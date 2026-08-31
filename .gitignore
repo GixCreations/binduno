@@ -1,0 +1,8 @@
+mtg_tracker_data/
+bulk.tmp
+__pycache__/
+*.pyc
+dist/
+build/
+Binduno.ico
+Binduno.spec

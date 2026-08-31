@@ -16,8 +16,12 @@ import urllib.request
 from datetime import datetime, timedelta
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-VERSION = "5.44"
+VERSION = "5.48"
 SCHEMA = 14
+# Repo the in-app "Update from GitHub" button pulls new versions from. Baked in
+# so testers don't have to type anything; still overridable in Settings or via
+# MTG_TRACKER_REPO (e.g. for a fork).
+GITHUB_REPO = "scorchyadvanced/binduno"
 PORT = int(os.environ.get("MTG_TRACKER_PORT") or 8770)
 def _data_dir():
     """Keep data outside the app bundle so it survives updates and moves."""
@@ -274,9 +278,10 @@ def log(c, action, detail):
 
 # ------------------------------------------------------- GitHub self-update
 def github_repo(c):
-    """'owner/name' of the GitHub repo Binduno updates from, or '' if unset.
-    Configured in Settings (meta key) or via MTG_TRACKER_REPO."""
-    r = (meta_get(c, "github_repo") or os.environ.get("MTG_TRACKER_REPO") or "").strip()
+    """'owner/name' of the GitHub repo Binduno updates from. Defaults to the
+    baked-in GITHUB_REPO; overridable in Settings or via MTG_TRACKER_REPO."""
+    r = (meta_get(c, "github_repo") or os.environ.get("MTG_TRACKER_REPO")
+         or GITHUB_REPO or "").strip()
     r = r.replace("https://github.com/", "").replace("http://github.com/", "").strip("/")
     return r if re.match(r"^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$", r) else ""
 
@@ -340,8 +345,43 @@ def apply_new_source(c, src, note):
     return {"ok": True, "from": VERSION, "to": newver}
 
 
+def _startup_update_check():
+    """Runs once, a few seconds after launch. Records whether a newer version
+    is on GitHub (Home shows a hint), and — only if the user opted in — installs
+    it and restarts. Never installs without that opt-in."""
+    time.sleep(5)
+    try:
+        c = connect()
+    except Exception:                                          # noqa: BLE001
+        return
+    if meta_get(c, "auto_update_check", "1") != "1":
+        return
+    repo = github_repo(c)
+    if not repo:
+        return
+    try:
+        info = github_latest(repo)
+    except Exception as e:                                      # noqa: BLE001
+        UPDATE.update(checked=True, error=str(e))
+        return
+    UPDATE.update(checked=True, error="", current=VERSION,
+                  available=bool(info.get("newer")), latest=info.get("latest", ""),
+                  srcUrl=info.get("srcUrl", ""), htmlUrl=info.get("htmlUrl", ""),
+                  notes=(info.get("notes") or "")[:2000])
+    if UPDATE["available"] and meta_get(c, "auto_update_install") == "1":
+        try:
+            apply_new_source(c, _http_text(info["srcUrl"]), "Auto-updated from GitHub")
+        except Exception as e:                                  # noqa: BLE001
+            log(c, "App", f"Auto-update failed: {e}")
+
+
 # ----------------------------------------------------------- scryfall import
 REFRESH = {"running": False, "step": "", "pct": 0, "error": ""}
+
+# Filled in once on startup by _startup_update_check() when the GitHub check is
+# enabled; the Home page reads it to show an "update available" hint.
+UPDATE = {"checked": False, "available": False, "latest": "", "current": VERSION,
+          "srcUrl": "", "notes": "", "htmlUrl": "", "error": ""}
 
 # The browser UI tells the server to stop when its tab goes away (beforeunload).
 # A plain page reload — and the launch-time auto-open landing on a stale tab —
@@ -1918,11 +1958,14 @@ class Handler(BaseHTTPRequestHandler):
                                          "lastSeen": meta_get(c, "cm_helper_last_seen", "")},
                             "showCosts": meta_get(c, "show_costs") == "1",
                             "githubRepo": github_repo(c),
+                            "update": UPDATE,
+                            "autoUpdateCheck": meta_get(c, "auto_update_check", "1") == "1",
+                            "autoUpdateInstall": meta_get(c, "auto_update_install") == "1",
                             "lan": {"url": _lan_url(), "port": PORT},
                             "onboardingDone": onboarding_done})
-        elif p == "/cm-helper.user.js":
-            body = CM_USERSCRIPT.replace("__PORT__", str(PORT)).replace(
-                "__VERSION__", VERSION).encode()
+        elif p in ("/cm-helper.user.js", "/cm-helper.bookmarklet.js"):
+            src = (CM_BOOKMARKLET if p.endswith("bookmarklet.js") else CM_USERSCRIPT)
+            body = src.replace("__PORT__", str(PORT)).replace("__VERSION__", VERSION).encode()
             self.send_response(200)
             self.send_header("Content-Type", "text/javascript; charset=utf-8")
             self.send_header("Cache-Control", "no-store")
@@ -2066,6 +2109,15 @@ class Handler(BaseHTTPRequestHandler):
             repo = (json.loads(raw or "{}").get("repo") or "").strip()
             meta_set(c, "github_repo", repo)
             self.send_json({"ok": True, "githubRepo": github_repo(c)})
+        elif self.path == "/api/update-prefs":
+            d = json.loads(raw or "{}")
+            if "check" in d:
+                meta_set(c, "auto_update_check", "1" if d["check"] else "0")
+            if "install" in d:
+                meta_set(c, "auto_update_install", "1" if d["install"] else "0")
+            self.send_json({"ok": True,
+                            "autoUpdateCheck": meta_get(c, "auto_update_check", "1") == "1",
+                            "autoUpdateInstall": meta_get(c, "auto_update_install") == "1"})
         elif self.path == "/api/update-from-github":
             try:
                 repo = github_repo(c)
@@ -2332,6 +2384,9 @@ h2{font-family:var(--serif);font-weight:400;font-size:20px;margin:34px 0 12px}
 .li .mt{font-family:var(--mono);font-size:12px;color:var(--muted)}
 .bar{flex:0 0 92px;height:6px;background:#1d242e;border-radius:4px;overflow:hidden}
 .bar span{display:block;height:100%;background:var(--gold)}
+/* inside a set card (.set is a flex column) flex-basis controls height, so the
+   shared .bar would be 92px tall — pin it back to a thin full-width bar */
+.set .bar{flex:0 0 6px;width:100%}
 .tools{display:flex;gap:9px;flex-wrap:wrap;align-items:center;margin:14px 0}
 input,select,button{font-family:var(--sans);font-size:13.5px}
 input[type=search],select{background:var(--panel2);border:1px solid var(--line);color:var(--text);
@@ -2853,14 +2908,14 @@ en:{
   "wantlist.copyList":"Copy list {i}","wantlist.copied":"Copied",
   "manage.title":"Settings",
   "manage.tabCollection":"Collection","manage.tabCompletion":"Completion","manage.tabCm":"Cardmarket",
-  "manage.tabAppearance":"Appearance","manage.tabAbout":"About & Help",
+  "manage.tabAppearance":"Appearance","manage.tabAbout":"Update & Help",
   "manage.tabUpdate":"Update Collection",
   "manage.tabSets":"Excluded Sets","manage.tabDesign":"Design","manage.tabShipping":"Shipping",
   "manage.tabLanguage":"Language","manage.tabGoals":"Set goals",
   "manage.tabHistory":"History","manage.tabApp":"Update App","manage.tabHelp":"Help",
   "cm.title":"Cardmarket helper",
   "cm.desc":"A userscript that runs on cardmarket.com and marks each single offer by whether the card is already in your collection — handy for topping up a seller's order with cheap missing cards at no extra shipping.",
-  "cm.step1":"Install a free, open-source userscript manager: Violentmonkey (Chrome / Firefox / Edge) or 'Userscripts' by Quoid (Safari, from the Mac App Store).",
+  "cm.step1":"Install a free, open-source userscript manager: <a href='https://violentmonkey.github.io/' target='_blank' rel='noopener'>Violentmonkey</a> (Chrome / Firefox / Edge) or <a href='https://apps.apple.com/app/userscripts/id1463298887' target='_blank' rel='noopener'>Userscripts</a> by Quoid (Safari, from the Mac App Store).",
   "cm.step2":"Open this URL — the manager offers to install the script:",
   "cm.stepAllow":"Chrome and Brave (since v120) also need user scripts switched on: open the extension's details page (chrome://extensions or brave://extensions -> Violentmonkey -> Details) and enable 'Allow User Scripts', then reload the page.",
   "cm.stepRunning":"Keep Binduno running while you use it — the script reads your collection from this app, so nothing gets marked if it is closed.",
@@ -2869,14 +2924,12 @@ en:{
   "cm.legend":"Green = this exact printing is in your collection · yellow = you own the card from another set/version/finish · red = you don't own it. The count shows how many copies you own.",
   "cm.toggleNote":"On/off lives on the button on the Cardmarket page and syncs back here. The script only reads the pages you open and talks to this local app — it makes no requests to Cardmarket.",
   "cm.updateNote":"The script does not auto-update. After a Binduno update, open the URL above again and reinstall to get the matching helper version.",
-  "cm.troubleNote":"Nothing showing up? On the Cardmarket page open the browser console (Cmd/Ctrl+Alt+I), run  localStorage.bnd_debug = \"1\"  and reload — the [Binduno] lines say what went wrong. Turn it off again with  localStorage.removeItem(\"bnd_debug\").",
-  "cm.tos":"Cardmarket's terms restrict automated access. A local script that only annotates pages you already opened, with no extra requests and no purchase automation, is a mild grey area — it is your account and your call.",
   "goal.title":"What counts as a complete set",
   "goal.desc":"These rules decide when a set reads 100%. They apply everywhere — set pages, the home dashboard and the buy lists.",
   "goal.presetTitle":"Quick pick",
   "goal.presetDesc":"Sets all three options at once. Fine-tune below afterwards if you like.",
-  "goal.preset.oneEach":"One of every card","goal.preset.oneEachDesc":"Any single printing of each card name finishes the set. No booster-fun, no serialized.",
-  "goal.preset.baseSet":"Base set","goal.preset.baseSetDesc":"Every plain base-frame printing on its own — extra arts of basics and foil-only stars still count. No booster-fun.",
+  "goal.preset.oneEach":"One of every card","goal.preset.oneEachDesc":"Any single printing of each card name finishes the set.",
+  "goal.preset.baseSet":"Base set","goal.preset.baseSetDesc":"Every plain base-frame printing on its own — extra arts of basics and foil-only stars still count.",
   "goal.preset.everything":"Everything","goal.preset.everythingDesc":"Every collector number: showcase, borderless, extended art, special foils. Serialized still excluded.",
   "goal.scope":"Counting","goal.scopeNames":"One printing per card name is enough","goal.scopePrintings":"Every collector number counts on its own",
   "goal.extras":"Special printings (Showcase, Borderless, Extended Art, special foils)","goal.extrasInclude":"Count toward 100%","goal.extrasExclude":"Don't count — base printing only",
@@ -3073,13 +3126,52 @@ en:{
   "costs.enable":"Show what is left to buy in euros",
   "setCard.nMissing":"{n} missing",
   "gh.title":"Update from GitHub",
-  "gh.desc":"Point Binduno at a GitHub repository that holds mtg_tracker.py and it "+
-    "can pull new versions itself — the newest Release, or the file on the default "+
-    "branch if there are no Releases yet.",
+  "gh.desc":"Binduno pulls new versions straight from its GitHub repository — the "+
+    "newest Release, or the file on the default branch if there are no Releases yet. "+
+    "The repo is preset; only change it if you run your own fork.",
   "gh.save":"Save","gh.check":"Check for updates","gh.checking":"Checking GitHub…",
   "gh.upToDate":"You are on the newest version ({v}).",
   "gh.available":"Version {next} is available (you have {cur}). {name}",
   "gh.install":"Download and install {v}","gh.viewRelease":"Release notes on GitHub",
+  "gh.autoCheck":"Check for updates on every start",
+  "gh.autoInstall":"Install updates automatically",
+  "gh.autoNote":"The check runs quietly a few seconds after launch. With auto‑install on, "+
+    "a new version is downloaded and the app restarts itself — otherwise you just get a "+
+    "note on the home page.",
+  "home.updateAvailable":"Binduno {v} is available.",
+  "home.updateOpen":"Update","home.updateDismiss":"Later",
+  "tip.shipping":"Estimated shipping",
+  "tip.cmExpTitle":"Cardmarket expansion",
+  "tip.cmExp":"Cardmarket sells this printing in a separate expansion, listed as version {v}.",
+  "tip.cmVerTitle":"Cardmarket version",
+  "tip.cmVer":"Cardmarket lists this printing as version {v} of this card in this set.",
+  "start.title":"Start here","start.dismiss":"Dismiss",
+  "start.body":"Three things Binduno is for — pick one, or read how it thinks.",
+  "start.a1":"See where my collection stands","start.a2":"Build a want list",
+  "start.a3":"Mark cards while shopping on Cardmarket","start.a4":"How Binduno thinks",
+  "explain.link":"How Binduno thinks",
+  "explain.title":"How Binduno thinks","explain.back":"Back to the home page",
+  "explain.intro":"The whole model in five short points.",
+  "explain.h1":"Two goals at once",
+  "explain.b1":"Card names counts owning any one printing of a card — your “one of everything” project. Printings counts every set-and-number on its own — full set completion. Both are shown side by side.",
+  "explain.h2":"You decide what counts",
+  "explain.b2":"By default a set is complete when you own one plain printing of each card name. Under Settings → Completion you can instead require every collector number, and choose whether Showcase / borderless / serialized printings count. Promos, tokens and Un-sets are left out.",
+  "explain.h3":"Prices are Cardmarket trend",
+  "explain.b3":"Values and “cost to finish” use Cardmarket's trend price via Scryfall — not the cheapest current offer, and with no German-seller premium. Real cost is usually a bit lower. The euro figures are off by default (Settings → Completion).",
+  "explain.h4":"Want lists are built to Cardmarket's rules",
+  "explain.b4":"The Wantlist-Cart is the only place want-list text is made. It uses Cardmarket's exact names and bracket order, quantity prefixes, and splits into 150-entry blocks you paste one after another.",
+  "explain.h5":"Everything stays on your computer",
+  "explain.b5":"Your collection lives in a local SQLite file. No account, no cloud. The only thing downloaded is Scryfall's card database; the optional Cardmarket helper only reads pages you already opened.",
+  "cm.browserLabel":"Your browser",
+  "cm.optBookmarklet":"Bookmarklet (no extension)",
+  "cm.step1b.chrome":"Install <a href='https://violentmonkey.github.io/' target='_blank' rel='noopener'>Violentmonkey</a> (free, open source) from your browser's extension store.",
+  "cm.step1b.firefox":"Install <a href='https://addons.mozilla.org/firefox/addon/violentmonkey/' target='_blank' rel='noopener'>Violentmonkey</a> (free, open source) from Firefox Add-ons.",
+  "cm.step1b.safari":"Install <a href='https://apps.apple.com/app/userscripts/id1463298887' target='_blank' rel='noopener'>Userscripts</a> by Quoid (free) from the Mac App Store.",
+  "cm.stepSafariEnable":"In Safari → Settings → Extensions, switch Userscripts on and allow it on cardmarket.com.",
+  "cm.bmIntro":"No extension needed and it works in any browser — the catch is you must click it once on every page.",
+  "cm.bmDrag":"Drag this link onto your bookmarks bar:",
+  "cm.bmClick":"On a Cardmarket seller's singles page, click the bookmark. It marks the visible rows and keeps refreshing for about 90 seconds; click it again whenever you change page.",
+  "cm.bmNote":"Experimental. If nothing shows up, your browser blocked the connection to the local app — use the extension method instead.",
 },
 de:{
   "nav.home":"Start","nav.collection":"Sammlung","nav.missing":"Fehlende Namen",
@@ -3218,14 +3310,14 @@ de:{
   "wantlist.copyList":"Liste {i} kopieren","wantlist.copied":"Kopiert",
   "manage.title":"Einstellungen",
   "manage.tabCollection":"Sammlung","manage.tabCompletion":"Vervollständigung","manage.tabCm":"Cardmarket",
-  "manage.tabAppearance":"Darstellung","manage.tabAbout":"Über & Hilfe",
+  "manage.tabAppearance":"Darstellung","manage.tabAbout":"Update & Hilfe",
   "manage.tabUpdate":"Sammlung aktualisieren",
   "manage.tabSets":"Ausgeschlossene Sets","manage.tabDesign":"Design","manage.tabShipping":"Versand",
   "manage.tabLanguage":"Sprache","manage.tabGoals":"Set-Ziele",
   "manage.tabHistory":"Verlauf","manage.tabApp":"App aktualisieren","manage.tabHelp":"Hilfe",
   "cm.title":"Cardmarket-Helfer",
   "cm.desc":"Ein Userscript, das auf cardmarket.com läuft und jedes Single-Angebot danach markiert, ob die Karte schon in deiner Sammlung ist — praktisch, um eine Händler-Bestellung mit günstigen fehlenden Karten ohne Zusatzversand aufzufüllen.",
-  "cm.step1":"Einen kostenlosen, quelloffenen Userscript-Manager installieren: Violentmonkey (Chrome / Firefox / Edge) oder 'Userscripts' von Quoid (Safari, aus dem Mac App Store).",
+  "cm.step1":"Einen kostenlosen, quelloffenen Userscript-Manager installieren: <a href='https://violentmonkey.github.io/' target='_blank' rel='noopener'>Violentmonkey</a> (Chrome / Firefox / Edge) oder <a href='https://apps.apple.com/app/userscripts/id1463298887' target='_blank' rel='noopener'>Userscripts</a> von Quoid (Safari, aus dem Mac App Store).",
   "cm.step2":"Diese URL öffnen — der Manager bietet die Installation des Scripts an:",
   "cm.stepAllow":"Chrome und Brave (ab v120) brauchen zusätzlich aktivierte User-Skripte: auf der Detailseite der Erweiterung (chrome://extensions bzw. brave://extensions -> Violentmonkey -> Details) 'User-Skripte zulassen' einschalten, dann Seite neu laden.",
   "cm.stepRunning":"Binduno währenddessen laufen lassen — das Script liest deine Sammlung aus dieser App; ist sie zu, wird nichts markiert.",
@@ -3234,14 +3326,12 @@ de:{
   "cm.legend":"Grün = genau dieser Druck ist in der Sammlung · gelb = Karte aus einem anderen Set/Version/Finish vorhanden · rot = nicht vorhanden. Die Zahl zeigt, wie viele Exemplare du besitzt.",
   "cm.toggleNote":"An/Aus sitzt auf dem Knopf auf der Cardmarket-Seite und wird hierher zurücksynchronisiert. Das Script liest nur die Seiten, die du öffnest, und spricht mit dieser lokalen App — es sendet nichts an Cardmarket.",
   "cm.updateNote":"Das Script aktualisiert sich nicht selbst. Nach einem Binduno-Update die URL oben erneut öffnen und neu installieren, damit die Helfer-Version passt.",
-  "cm.troubleNote":"Nichts zu sehen? Auf der Cardmarket-Seite die Browser-Konsole öffnen (Cmd/Strg+Alt+I),  localStorage.bnd_debug = \"1\"  eingeben und neu laden — die [Binduno]-Zeilen sagen, woran es liegt. Wieder aus mit  localStorage.removeItem(\"bnd_debug\").",
-  "cm.tos":"Cardmarkets AGB schränken automatisierten Zugriff ein. Ein lokales Script, das nur Seiten annotiert, die du ohnehin geöffnet hast, ohne Zusatz-Requests und ohne Kauf-Automatik, ist eine milde Grauzone — es ist dein Konto, deine Entscheidung.",
   "goal.title":"Wann gilt ein Set als vollständig",
   "goal.desc":"Diese Regeln bestimmen, wann ein Set 100 % erreicht. Sie gelten überall — Set-Seiten, Startseite und Kauflisten.",
   "goal.presetTitle":"Schnellauswahl",
   "goal.presetDesc":"Setzt alle drei Optionen auf einmal. Danach unten bei Bedarf feinjustieren.",
-  "goal.preset.oneEach":"Ein Exemplar pro Karte","goal.preset.oneEachDesc":"Irgendein Druck jedes Kartennamens vervollständigt das Set. Keine Sonderdrucke, keine serialisierten.",
-  "goal.preset.baseSet":"Basis-Set","goal.preset.baseSetDesc":"Jeder normale Basis-Frame-Druck einzeln — mehrere Arten von Basics und Foil-only-Star-Karten zählen weiter. Keine Sonderdrucke.",
+  "goal.preset.oneEach":"Ein Exemplar pro Karte","goal.preset.oneEachDesc":"Irgendein Druck jedes Kartennamens vervollständigt das Set.",
+  "goal.preset.baseSet":"Basis-Set","goal.preset.baseSetDesc":"Jeder normale Basis-Frame-Druck einzeln — mehrere Arten von Basics und Foil-only-Star-Karten zählen weiter.",
   "goal.preset.everything":"Alles","goal.preset.everythingDesc":"Jede Sammlernummer: Showcase, Borderless, Extended Art, Spezial-Foils. Serialisierte weiterhin ausgeschlossen.",
   "goal.scope":"Zählweise","goal.scopeNames":"Ein Druck pro Kartenname reicht","goal.scopePrintings":"Jede Sammlernummer zählt einzeln",
   "goal.extras":"Sonderdrucke (Showcase, Borderless, Extended Art, Spezial-Foils)","goal.extrasInclude":"Zählen zur 100 %","goal.extrasExclude":"Zählen nicht — nur Basis-Druck",
@@ -3441,13 +3531,52 @@ de:{
   "costs.enable":"Anzeigen, was noch zu kaufen ist (in Euro)",
   "setCard.nMissing":"{n} fehlen",
   "gh.title":"Update von GitHub",
-  "gh.desc":"Zeig Binduno auf ein GitHub-Repository mit mtg_tracker.py, dann kann es "+
-    "neue Versionen selbst holen — das neueste Release, oder die Datei im Default-Branch, "+
-    "solange es noch keine Releases gibt.",
+  "gh.desc":"Binduno holt neue Versionen direkt aus seinem GitHub-Repository — das "+
+    "neueste Release, oder die Datei im Default-Branch, solange es keine Releases gibt. "+
+    "Das Repo ist voreingestellt; nur ändern, wenn du einen eigenen Fork betreibst.",
   "gh.save":"Speichern","gh.check":"Nach Updates suchen","gh.checking":"Prüfe GitHub…",
   "gh.upToDate":"Du hast die neueste Version ({v}).",
   "gh.available":"Version {next} ist verfügbar (du hast {cur}). {name}",
   "gh.install":"{v} herunterladen und installieren","gh.viewRelease":"Release-Notizen auf GitHub",
+  "gh.autoCheck":"Bei jedem Start nach Updates suchen",
+  "gh.autoInstall":"Updates automatisch installieren",
+  "gh.autoNote":"Die Prüfung läuft ein paar Sekunden nach dem Start still im Hintergrund. "+
+    "Mit automatischer Installation wird eine neue Version geladen und die App startet sich "+
+    "neu — sonst gibt es nur einen Hinweis auf der Startseite.",
+  "home.updateAvailable":"Binduno {v} ist verfügbar.",
+  "home.updateOpen":"Aktualisieren","home.updateDismiss":"Später",
+  "tip.shipping":"Geschätzter Versand",
+  "tip.cmExpTitle":"Cardmarket-Erweiterung",
+  "tip.cmExp":"Cardmarket führt diesen Druck in einer eigenen Erweiterung, als Version {v}.",
+  "tip.cmVerTitle":"Cardmarket-Version",
+  "tip.cmVer":"Cardmarket führt diesen Druck als Version {v} dieser Karte in diesem Set.",
+  "start.title":"Hier starten","start.dismiss":"Ausblenden",
+  "start.body":"Drei Dinge, wofür Binduno da ist — such dir eins aus, oder lies, wie es denkt.",
+  "start.a1":"Sehen, wo meine Sammlung steht","start.a2":"Eine Wantlist bauen",
+  "start.a3":"Karten beim Kauf auf Cardmarket markieren","start.a4":"So denkt Binduno",
+  "explain.link":"So denkt Binduno",
+  "explain.title":"So denkt Binduno","explain.back":"Zurück zur Startseite",
+  "explain.intro":"Das ganze Modell in fünf kurzen Punkten.",
+  "explain.h1":"Zwei Ziele gleichzeitig",
+  "explain.b1":"Kartennamen zählt, ob du irgendeinen Druck einer Karte besitzt — dein „von jedem eins“-Projekt. Drucke zählt jede Set-und-Nummer einzeln — vollständige Set-Vervollständigung. Beides wird nebeneinander gezeigt.",
+  "explain.h2":"Du legst fest, was zählt",
+  "explain.b2":"Standardmäßig ist ein Set vollständig, wenn du von jedem Kartennamen einen normalen Druck hast. Unter Einstellungen → Vervollständigung kannst du stattdessen jede Sammlernummer verlangen und wählen, ob Showcase / Borderless / serialisierte Drucke mitzählen. Promos, Token und Un-Sets bleiben außen vor.",
+  "explain.h3":"Preise sind Cardmarket-Trend",
+  "explain.b3":"Werte und „Restkosten“ nutzen Cardmarkets Trendpreis über Scryfall — nicht das günstigste aktuelle Angebot, und ohne Aufschlag für deutsche Verkäufer. Real zahlst du meist etwas weniger. Die Euro-Zahlen sind standardmäßig aus (Einstellungen → Vervollständigung).",
+  "explain.h4":"Wantlisten folgen Cardmarkets Regeln",
+  "explain.b4":"Der Wantlist-Cart ist der einzige Ort, an dem Wantlist-Text entsteht. Er nutzt Cardmarkets exakte Namen und Klammerreihenfolge, Mengen-Präfixe und teilt in 150er-Blöcke, die du nacheinander einfügst.",
+  "explain.h5":"Alles bleibt auf deinem Rechner",
+  "explain.b5":"Deine Sammlung liegt in einer lokalen SQLite-Datei. Kein Konto, keine Cloud. Heruntergeladen wird nur Scryfalls Kartendatenbank; der optionale Cardmarket-Helfer liest nur Seiten, die du ohnehin geöffnet hast.",
+  "cm.browserLabel":"Dein Browser",
+  "cm.optBookmarklet":"Bookmarklet (ohne Erweiterung)",
+  "cm.step1b.chrome":"<a href='https://violentmonkey.github.io/' target='_blank' rel='noopener'>Violentmonkey</a> (kostenlos, quelloffen) aus dem Erweiterungs-Store deines Browsers installieren.",
+  "cm.step1b.firefox":"<a href='https://addons.mozilla.org/firefox/addon/violentmonkey/' target='_blank' rel='noopener'>Violentmonkey</a> (kostenlos, quelloffen) aus den Firefox-Add-ons installieren.",
+  "cm.step1b.safari":"<a href='https://apps.apple.com/app/userscripts/id1463298887' target='_blank' rel='noopener'>Userscripts</a> von Quoid (kostenlos) aus dem Mac App Store installieren.",
+  "cm.stepSafariEnable":"In Safari → Einstellungen → Erweiterungen „Userscripts“ einschalten und für cardmarket.com erlauben.",
+  "cm.bmIntro":"Keine Erweiterung nötig, funktioniert in jedem Browser — dafür musst du es auf jeder Seite einmal anklicken.",
+  "cm.bmDrag":"Zieh diesen Link in deine Lesezeichenleiste:",
+  "cm.bmClick":"Auf der Singles-Seite eines Cardmarket-Händlers das Lesezeichen anklicken. Es markiert die sichtbaren Zeilen und aktualisiert ~90 Sekunden lang; nach einem Seitenwechsel erneut klicken.",
+  "cm.bmNote":"Experimentell. Wenn nichts erscheint, hat dein Browser die Verbindung zur lokalen App blockiert — dann die Erweiterungs-Methode nutzen.",
 },
 };
 const $=s=>document.querySelector(s);
@@ -3457,6 +3586,8 @@ const pct=n=>(n*100).toFixed(1)+" %";
 const RAR={c:["Common","#7d8896"],u:["Uncommon","#a8b4c2"],r:["Rare","#d4a629"],
            m:["Mythic","#e0692c"],s:["Special","#b49ed0"],b:["Basic land","#6f7a88"]};
 const rarLabel=k=>t("rarity."+k);
+function updateDismissed(v){try{return localStorage.getItem("bnd_upd_dismiss")===v;}catch(e){return false;}}
+function dismissUpdate(v){try{localStorage.setItem("bnd_upd_dismiss",v);}catch(e){}}
 let SHOW_COSTS=false;
 let RARMODE="names";   // "By rarity" on Home: card-name counts vs. every printing
 let SETS=[],STATS=null,PAGE=1,PER=24,VIEW="grid",SORT="totalCost",DIR=1,
@@ -3514,11 +3645,28 @@ function home(){
   if(!window.HAS.hasCards||!window.HAS.hasCollection) return setupPrompt();
   const s=STATS;
   const nm=s.names.owned/Math.max(1,s.names.total), pr=s.printings.owned/Math.max(1,s.printings.total);
+  const upd=(window.HAS&&window.HAS.update)||{};
+  const showUpd=upd.available&&!updateDismissed(upd.latest);
+  let startSeen=true; try{startSeen=localStorage.getItem("bnd_start_seen")==="1";}catch(e){}
   $("#view").innerHTML=`
   <h1>${t("home.title")}</h1>
   <p class="sub">${t("home.updated",{
      cards:s.cardsUpdated?s.cardsUpdated.replace("T"," "):t("home.never"),
      collection:s.collectionUpdated?s.collectionUpdated.replace("T"," "):t("home.never")})}</p>
+  ${showUpd?`<div class="msg ok" id="updBanner" style="display:flex;gap:12px;align-items:center;flex-wrap:wrap;max-width:760px">
+    <span>${t("home.updateAvailable",{v:upd.latest})}</span>
+    <button class="pri" id="updGo">${t("home.updateOpen")}</button>
+    <button id="updHide">${t("home.updateDismiss")}</button></div>`:""}
+  ${startSeen?"":`<div class="card" id="startCard" style="max-width:820px;padding:18px;position:relative">
+    <button id="startX" title="${t("start.dismiss")}" style="position:absolute;top:8px;right:8px;padding:2px 8px">✕</button>
+    <div class="v" style="font-size:18px;font-family:var(--serif)">${t("start.title")}</div>
+    <p class="sub" style="margin:6px 0 12px">${t("start.body")}</p>
+    <div style="display:flex;gap:10px;flex-wrap:wrap">
+      <button data-sc="collection">${t("start.a1")}</button>
+      <button data-sc="cart">${t("start.a2")}</button>
+      <button data-sc="cm">${t("start.a3")}</button>
+      <button data-sc="explain">${t("start.a4")}</button>
+    </div></div>`}
   <div class="donuts">
     <div class="donut">${donut(nm,"#d4a629")}
       <div><div class="t">${t("home.cardNames")}</div><div class="p">${pct(nm)}</div>
@@ -3573,6 +3721,14 @@ function home(){
   <p class="sub">${t("home.watchlistDesc")}</p>
   <div id="watchlistOut"><p class="sub">${t("missing.loading")}</p></div>`;
   document.querySelectorAll("[data-rm]").forEach(b=>b.onclick=()=>{RARMODE=b.dataset.rm;home();});
+  if($("#updGo"))$("#updGo").onclick=()=>{SUB="about";ABOUT_SUB="app";go("manage");};
+  if($("#updHide"))$("#updHide").onclick=()=>{dismissUpdate(upd.latest);const b=$("#updBanner");if(b)b.remove();};
+  const seeStart=()=>{try{localStorage.setItem("bnd_start_seen","1");}catch(e){}};
+  if($("#startX"))$("#startX").onclick=()=>{seeStart();const c=$("#startCard");if(c)c.remove();};
+  document.querySelectorAll("[data-sc]").forEach(b=>b.onclick=()=>{seeStart();
+    const d=b.dataset.sc;
+    if(d==="cm"){SUB="cm";go("manage");}
+    else go(d);});
   bindRows();
   if($("#bigTicket"))$("#bigTicket").onclick=()=>{
     CMODE="cards";
@@ -3640,7 +3796,21 @@ function bindRows(){document.querySelectorAll(".li[data-code]").forEach(e=>
 function setupPrompt(){
   $("#view").innerHTML=`<div class="empty"><h2>${t("home.nothingLoaded")}</h2>
   <p>${t("home.nothingLoadedDesc")}</p>
-  <button class="pri" onclick="go('manage')">${t("home.goToManage")}</button></div>`;
+  <button class="pri" onclick="go('manage')">${t("home.goToManage")}</button>
+  <p class="sub" style="margin-top:18px"><a data-go="explain" style="cursor:pointer;color:var(--gold);border-bottom:1px dotted">${t("explain.link")}</a></p></div>`;
+  document.querySelectorAll("[data-go]").forEach(a=>a.onclick=()=>go(a.dataset.go));
+}
+function explainPage(){
+  CRUMBS=[];
+  const P=[1,2,3,4,5].map(n=>`<div class="card" style="padding:18px">
+    <div class="v" style="font-size:17px;font-family:var(--serif)">${t("explain.h"+n)}</div>
+    <p class="sub" style="margin:8px 0 0">${t("explain.b"+n)}</p></div>`).join("");
+  $("#view").innerHTML=`${crumbs([{label:t("nav.home"),hash:"home"},{label:t("explain.title")}])}
+    <h1>${t("explain.title")}</h1>
+    <p class="sub" style="max-width:640px">${t("explain.intro")}</p>
+    <div class="cards" style="grid-template-columns:repeat(auto-fit,minmax(260px,1fr));max-width:900px">${P}</div>
+    <p class="sub" style="margin-top:20px"><button class="pri" onclick="go('home')">${t("explain.back")}</button></p>`;
+  bindCrumbs();
 }
 
 /* ---------------- Setup wizard ---------------- */
@@ -4007,7 +4177,7 @@ const card=s=>`<div class="set ${s.missing===0&&s.counted?"done":""} ${s.counted
       (s.missing?t("setCard.nMissing",{n:s.missing}):t("setCard.complete"))}</span>
     <span style="color:var(--gold)">${SHOW_COSTS?(s.missing?money(s.totalCost):t("setCard.complete")):""}</span></div>
   ${(SHOW_COSTS&&s.missing)?`<div class="st" style="font-size:11px;color:var(--dim)"
-    data-tip-title="Estimated shipping" data-tip="${SHIPCALC(s.missing,s.missingValue)}">
+    data-tip-title="${t('tip.shipping')}" data-tip="${SHIPCALC(s.missing,s.missingValue)}">
     <span>${t("setCard.cardsToBuy",{n:s.missing,v:money(s.missingValue)})}</span>
     <span>${t("setCard.shipPrefix",{v:money(s.shipping)})}</span></div>`:""}
   ${(SHOW_COSTS&&s.sealed&&s.sealed.price)?`<div class="st"><span>${t("setCard.sealedNoted")}</span>
@@ -4025,7 +4195,7 @@ const trow=s=>`<tr class="${s.missing===0&&s.counted?"done":""} ${s.counted?"":"
   <td class="num">${s.owned}/${s.total}</td><td class="num">${pct(s.pct)}</td>
   <td class="num">${money(s.ownedValue)}</td>
   ${SHOW_COSTS?`<td class="num">${s.missing?money(s.missingValue):"—"}</td>
-  <td class="num" style="color:var(--dim)" data-tip-title="Estimated shipping"
+  <td class="num" style="color:var(--dim)" data-tip-title="${t('tip.shipping')}"
       data-tip="${SHIPCALC(s.missing,s.missingValue)}">${s.missing?money(s.shipping):"—"}</td>
   <td class="num" style="color:var(--gold)">${s.missing?money(s.totalCost):"—"}</td>`:""}
   <td class="num"><button data-view="${s.code}">${t("setCard.view")}</button>
@@ -4098,18 +4268,18 @@ function SHIPCALC(n,value){
 
 /* ---------------- shared bits ---------------- */
 const VAR=c=>(c.variant?`<span class="varlbl">${c.variant}</span>`:"")+
-  (c.extras?`<span class="verlbl" data-tip-title="Cardmarket expansion"
-    data-tip="Cardmarket sells this printing in a separate expansion, listed as version ${c.extras}."
+  (c.extras?`<span class="verlbl" data-tip-title="${t('tip.cmExpTitle')}"
+    data-tip="${t('tip.cmExp',{v:c.extras})}"
     >Extras ${c.extras}</span>`:"")+
-  ((c.ver&&c.ver>1&&!c.extras)?`<span class="verlbl" data-tip-title="Cardmarket version"
-    data-tip="Cardmarket lists this printing as version ${c.ver} of this card in this set."
+  ((c.ver&&c.ver>1&&!c.extras)?`<span class="verlbl" data-tip-title="${t('tip.cmVerTitle')}"
+    data-tip="${t('tip.cmVer',{v:c.ver})}"
     >V.${c.ver}</span>`:"");
 const cardTile=c=>`<div class="cc" data-card="${c.set}|${c.number}">
   <div class="imgwrap">${c.img?`<img class="face" src="${c.img}" alt="${cardName(c)}" loading="lazy">`
     :`<div class="noimg">${cardName(c)}</div>`}
     <span class="${c.qty?"owned":"miss"}">${c.qty?c.qty+"×":"0"}</span>
     <button class="tilecart" data-cart="${c.set}|${c.number}"
-      title="Add to Wantlist-Cart">+</button></div>
+      title="${t('common.addToCart')}">+</button></div>
   <div class="meta"><div class="cn">${cardName(c)}</div>
     ${c.variant||c.extras?`<div class="vrow">${VAR(c)}</div>`:""}
     ${c.setName?`<div class="cset">${c.setName} · #${c.number}</div>`:""}
@@ -4236,7 +4406,7 @@ async function buyPage(code){
       <div class="n">${t("buyPage.cardsCount",{n:b.count})}</div>
       <div class="n" data-tip-title="${t("buyPage.cardsOnlyTipTitle")}" data-tip="${t("buyPage.cardsOnlyTip")}"
         >${money(b.value)}</div>
-      <div class="n" data-tip-title="Estimated shipping"
+      <div class="n" data-tip-title="${t('tip.shipping')}"
         data-tip="${SHIPCALC(b.count,b.value)}">+${money(b.shipping)}</div>
       <div class="n" style="color:var(--gold);font-weight:600">${money(b.total)}</div>
       <button data-bc="${k}" class="pri">${t("common.addToCart")}</button></div>`).join("");
@@ -4541,7 +4711,7 @@ async function drawCart(){
         <div class="n">${t("cart.fromNSets",{n:CART.sets})}</div></div>
       <div class="card"><div class="k">${t("cart.cardsTotal")}</div>
         <div class="v" style="font-size:24px">${money(CART.goods)}</div></div>
-      <div class="card" data-tip-title="Estimated shipping"
+      <div class="card" data-tip-title="${t('tip.shipping')}"
         data-tip="${SHIPCALC(CART.count,CART.goods)}">
         <div class="k">${t("cart.shippingEst")}</div>
         <div class="v" style="font-size:24px">${money(CART.shipping)}</div></div>
@@ -4750,7 +4920,9 @@ function manage(){
   <div class="seg segtabs" style="margin:8px 0 18px">${MANAGE_TABS.map(([id,key])=>
     `<button data-s="${id}" class="${SUB===id?"on":""}">${t(key)}</button>`).join("")}</div>
   <div id="sub"></div>`;
-  document.querySelectorAll("[data-s]").forEach(b=>b.onclick=()=>{ SUB=b.dataset.s;manage(); });
+  document.querySelectorAll("[data-s]").forEach(b=>b.onclick=()=>{
+    if(b.dataset.s==="about"&&SUB!=="about")ABOUT_SUB="app";   // land on Update App
+    SUB=b.dataset.s;manage(); });
   const on=document.querySelector(".segtabs button.on");
   if(on&&on.scrollIntoView)on.scrollIntoView({inline:"center",block:"nearest"});
   ((MANAGE_TABS.find(x=>x[0]===SUB)||MANAGE_TABS[0])[2])();
@@ -4799,10 +4971,10 @@ function appearancePane(){
   $("#sub").innerHTML='<div id="mSecA"></div>'+sectionSep()+'<div id="mSecB"></div>';
   designPane("#mSecA"); languagePane("#mSecB");
 }
-let ABOUT_SUB="help";
+let ABOUT_SUB="app";
 function aboutPane(){
-  const TABS=[["help","manage.tabHelp",helpPane],["phone","phone.tab",phonePane],
-              ["app","manage.tabApp",appPane],["history","manage.tabHistory",historyPane]];
+  const TABS=[["app","manage.tabApp",appPane],["help","manage.tabHelp",helpPane],
+              ["phone","phone.tab",phonePane],["history","manage.tabHistory",historyPane]];
   $("#sub").innerHTML=`<div class="helpnav">${TABS.map(([id,k])=>
     `<button data-as="${id}" class="${ABOUT_SUB===id?"on":""}">${t(k)}</button>`).join("")}</div>
     <div id="asub"></div>`;
@@ -4823,24 +4995,54 @@ function cmPane(sel){
   const url=location.origin+"/cm-helper.user.js";
   const cm=(window.HAS&&window.HAS.cmHelper)||{};
   const ago=cmSeenAgo(cm.lastSeen);
+  let br="chrome"; try{br=localStorage.getItem("bnd_cm_browser")||"chrome";}catch(e){}
   $(sel||"#sub").innerHTML=`<h2 style="margin-top:0">${t("cm.title")}</h2>
   <p class="sub">${t("cm.desc")}</p>
   <div class="msg ${ago?"ok":""}" style="max-width:700px;display:flex;gap:10px;align-items:center;flex-wrap:wrap">
     <span>${ago?t("cm.statusSeen",{ago}):t("cm.statusNever")}</span>
     <button id="cmTest" style="flex:0 0 auto">${t("cm.testBtn")}</button></div>
-  <ol class="sub" style="line-height:1.9;max-width:700px">
-    <li>${t("cm.step1")}</li>
-    <li>${t("cm.step2")} <a href="${url}" target="_blank"><code>${url}</code></a></li>
-    <li>${t("cm.stepAllow")}</li>
-    <li>${t("cm.stepRunning")}</li>
-    <li>${t("cm.step3")}</li>
-    <li>${t("cm.stepPermit")}</li>
-  </ol>
+  <label class="sub" style="display:block;margin:14px 0 4px">${t("cm.browserLabel")}</label>
+  <select id="cmBrowser">
+    <option value="chrome">Chrome / Brave / Edge</option>
+    <option value="firefox">Firefox</option>
+    <option value="safari">Safari</option>
+    <option value="bookmarklet">${t("cm.optBookmarklet")}</option>
+  </select>
+  <div id="cmSteps" style="margin-top:12px"></div>
   <p class="sub">${t("cm.legend")}</p>
   <div class="msg" style="max-width:700px">${t("cm.toggleNote")}</div>
-  <p class="sub" style="max-width:700px;margin-top:12px">${t("cm.updateNote")}</p>
-  <p class="sub" style="max-width:700px">${t("cm.troubleNote")}</p>
-  <p class="sub" style="max-width:700px;margin-top:12px">${t("cm.tos")}</p>`;
+  <p class="sub" style="max-width:700px;margin-top:12px">${t("cm.updateNote")}</p>`;
+  $("#cmBrowser").value=br;
+  const renderSteps=()=>{
+    const v=$("#cmBrowser").value;
+    try{localStorage.setItem("bnd_cm_browser",v);}catch(e){}
+    let html;
+    if(v==="bookmarklet"){
+      html=`<p class="sub" style="max-width:700px">${t("cm.bmIntro")}</p>
+      <ol class="sub" style="line-height:1.9;max-width:700px">
+        <li>${t("cm.bmDrag")}<br>
+          <a id="bmLink" draggable="true" style="display:inline-block;margin-top:6px;background:var(--gold);
+             color:#181206;padding:5px 14px;border-radius:4px;text-decoration:none;font-weight:600;cursor:grab">
+             Binduno CM</a></li>
+        <li>${t("cm.bmClick")}</li>
+        <li>${t("cm.stepRunning")}</li>
+      </ol>
+      <p class="sub" style="max-width:700px">${t("cm.bmNote")}</p>`;
+    }else{
+      const steps=[t("cm.step1b."+v), `${t("cm.step2")} <a href="${url}" target="_blank"><code>${url}</code></a>`];
+      if(v==="chrome") steps.push(t("cm.stepAllow"));
+      if(v==="safari") steps.push(t("cm.stepSafariEnable"));
+      steps.push(t("cm.stepRunning"),t("cm.step3"),t("cm.stepPermit"));
+      html=`<ol class="sub" style="line-height:1.9;max-width:700px">${steps.map(x=>`<li>${x}</li>`).join("")}</ol>`;
+    }
+    $("#cmSteps").innerHTML=html;
+    if(v==="bookmarklet"&&$("#bmLink")){
+      fetch("/cm-helper.bookmarklet.js").then(r=>r.text()).then(code=>{
+        $("#bmLink").href="javascript:"+code.replace(/\s*\n\s*/g," ");
+      });
+    }
+  };
+  $("#cmBrowser").onchange=renderSteps; renderSteps();
   const tb=$("#cmTest");
   if(tb) tb.onclick=async()=>{ tb.disabled=true; await load(); cmPane(sel); };
 }
@@ -5097,14 +5299,38 @@ function setsPane(sel){
       body:JSON.stringify({codes:SETS.map(s=>s.code),mode:""})});
     await load();setsPane(sel);};
 }
+async function installFromGithub(srcUrl,ver,btn,box){
+  if(btn){btn.disabled=true;btn.textContent=t("manageApp.installing");}
+  let x;
+  try{ x=await fetch("/api/update-from-github",{method:"POST",
+    body:JSON.stringify({srcUrl})}).then(y=>y.json()); }
+  catch(e){ x={ok:false,error:String(e)}; }
+  if(x.ok){
+    box.innerHTML=`<div class="msg ok">${t("manageApp.updatedMsg",{from:x.from,to:x.to})}</div>`;
+    let n=0;const w=async()=>{n++;try{await fetch("/api/refresh-status",{cache:"no-store"});location.reload();}
+      catch(e){n<40?setTimeout(w,500):box.innerHTML=`<div class="msg err">${t("manageApp.restartSlow")}</div>`;}};
+    setTimeout(w,1200);
+  }else if(btn){
+    btn.disabled=false;btn.textContent=t("gh.install",{v:ver});
+    box.insertAdjacentHTML("beforeend",`<div class="msg err" style="margin-top:8px">${x.error}</div>`);
+  }
+}
 function appPane(sel){
   const ghRepo=(window.HAS&&window.HAS.githubRepo)||"";
-  $(sel||"#sub").innerHTML=`<h2 style="margin-top:0">${t("manageApp.wizardTitle")}</h2>
-  <p class="sub">${t("manageApp.wizardDesc")}</p>
-  <button id="restartWiz">${t("manageApp.wizardBtn")}</button>
-  <h2>${t("gh.title")}</h2>
+  const upd=(window.HAS&&window.HAS.update)||{};
+  const acheck=window.HAS.autoUpdateCheck!==false;
+  const ainst=!!window.HAS.autoUpdateInstall;
+  $(sel||"#sub").innerHTML=`
+  ${upd.available?`<div class="msg ok" style="max-width:640px">
+      <b>${t("gh.available",{cur:upd.current||"",next:upd.latest,name:""})}</b>
+      <div style="margin-top:8px"><button class="pri" id="updNow">${t("gh.install",{v:upd.latest})}</button>
+      ${upd.htmlUrl?`<a href="${upd.htmlUrl}" target="_blank" style="margin-left:10px;color:var(--gold)">${t("gh.viewRelease")}</a>`:""}</div></div>`:""}
+  <h2 style="margin-top:${upd.available?"22px":"0"}">${t("gh.title")}</h2>
   <p class="sub">${t("gh.desc")}</p>
-  <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center;max-width:520px">
+  <label class="chk"><input type="checkbox" id="auCheck" ${acheck?"checked":""}> ${t("gh.autoCheck")}</label>
+  <label class="chk"><input type="checkbox" id="auInstall" ${ainst?"checked":""}> ${t("gh.autoInstall")}</label>
+  <p class="sub" style="font-size:12px;max-width:560px">${t("gh.autoNote")}</p>
+  <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center;max-width:520px;margin-top:6px">
     <input type="text" id="ghRepo" placeholder="owner/repo" value="${ghRepo}"
       style="flex:1 1 200px;background:var(--panel2);border:1px solid var(--line);color:var(--text);padding:8px 10px;border-radius:4px">
     <button id="ghSave">${t("gh.save")}</button>
@@ -5118,6 +5344,9 @@ function appPane(sel){
       ${t("manageApp.filePickerNote")}</div></div>
   <button id="upbtn" class="pri" disabled style="margin-top:10px">${t("manageApp.installBtn")}</button>
   <div id="upMsg"></div>
+  <h2>${t("manageApp.wizardTitle")}</h2>
+  <p class="sub">${t("manageApp.wizardDesc")}</p>
+  <button id="restartWiz">${t("manageApp.wizardBtn")}</button>
   <h2>${t("manageApp.rebuildTitle")}</h2>
   <p class="sub">${t("manageApp.rebuildDesc")}</p>
   <h2>${t("manageApp.whereThingsLive")}</h2>
@@ -5129,6 +5358,9 @@ function appPane(sel){
   $("#dbpath").textContent=home&&window.HAS.dbPath&&window.HAS.dbPath.startsWith(home)
     ?"~"+window.HAS.dbPath.slice(home.length):(window.HAS.dbPath||"");
   $("#restartWiz").onclick=()=>{WIZ_STEP=0;go("wizard");};
+  $("#auCheck").onchange=e=>fetch("/api/update-prefs",{method:"POST",body:JSON.stringify({check:e.target.checked})});
+  $("#auInstall").onchange=e=>fetch("/api/update-prefs",{method:"POST",body:JSON.stringify({install:e.target.checked})});
+  if($("#updNow"))$("#updNow").onclick=()=>installFromGithub(upd.srcUrl,upd.latest,$("#updNow"),$("#ghMsg"));
   $("#ghSave").onclick=async()=>{
     const r=await fetch("/api/github-repo",{method:"POST",
       body:JSON.stringify({repo:$("#ghRepo").value.trim()})}).then(x=>x.json());
@@ -5150,20 +5382,7 @@ function appPane(sel){
         r.notes.replace(/[<>&]/g,x=>({"<":"&lt;",">":"&gt;","&":"&amp;"}[x]))}</pre>`:""}
       <div style="margin-top:10px"><button class="pri" id="ghInstall">${t("gh.install",{v:r.latest})}</button>
       ${r.htmlUrl?`<a href="${r.htmlUrl}" target="_blank" style="margin-left:10px;color:var(--gold)">${t("gh.viewRelease")}</a>`:""}</div></div>`;
-    $("#ghInstall").onclick=async()=>{
-      $("#ghInstall").disabled=true;$("#ghInstall").textContent=t("manageApp.installing");
-      let x;
-      try{ x=await fetch("/api/update-from-github",{method:"POST",
-        body:JSON.stringify({srcUrl:r.srcUrl})}).then(y=>y.json()); }
-      catch(e){ x={ok:false,error:String(e)}; }
-      if(x.ok){
-        box.innerHTML=`<div class="msg ok">${t("manageApp.updatedMsg",{from:x.from,to:x.to})}</div>`;
-        let n=0;const w=async()=>{n++;try{await fetch("/api/refresh-status",{cache:"no-store"});location.reload();}
-          catch(e){n<40?setTimeout(w,500):box.innerHTML=`<div class="msg err">${t("manageApp.restartSlow")}</div>`;}};
-        setTimeout(w,1200);
-      }else{ $("#ghInstall").disabled=false;$("#ghInstall").textContent=t("gh.install",{v:r.latest});
-        box.querySelector(".msg").insertAdjacentHTML("beforeend",`<div class="msg err" style="margin-top:8px">${x.error}</div>`); }
-    };
+    $("#ghInstall").onclick=()=>installFromGithub(r.srcUrl,r.latest,$("#ghInstall"),box);
   };
   let newsrc=null;
   $("#upfile").onchange=e=>{
@@ -5494,7 +5713,7 @@ async function doRoute(){
       if(p==="collection")CRUMBS=[{label:t("nav.collection"),hash:"collection"}];
       if(p==="missing"){CRUMBS=[{label:t("nav.collection"),hash:"collection"}];CMODE="missing";}
       if(p==="cart")CRUMBS=[{label:t("nav.cart"),hash:"cart"}];
-      ({home,collection,cart:cartPage,manage}[navP]||home)();
+      ({home,collection,cart:cartPage,manage,explain:explainPage}[navP]||home)();
     }
     const sec=restoreSec||sectionFor(p);
     if(sec){CUR_SECTION=sec;SECTION_HASH[sec]=p;}
@@ -5980,7 +6199,15 @@ def build_windows_exe():
         import PyInstaller  # noqa: F401
     except ImportError:
         sys.exit("PyInstaller is missing. Install it once, then re-run:\n"
-                 "    py -m pip install --upgrade pyinstaller")
+                 "    py -m pip install --upgrade pyinstaller pystray pillow")
+    have_tray = True
+    try:
+        import pystray, PIL  # noqa: F401
+    except ImportError:
+        have_tray = False
+        print("Note: pystray / pillow not installed — the .exe will work but "
+              "without a tray icon. For the tray icon:\n"
+              "    py -m pip install pystray pillow\n")
     import subprocess
     here = os.path.dirname(os.path.abspath(__file__))
     ico = os.path.join(here, "Binduno.ico")
@@ -5991,6 +6218,8 @@ def build_windows_exe():
             "--distpath", os.path.join(here, "dist"),
             "--workpath", os.path.join(here, "build"),
             "--specpath", here]
+    if have_tray:
+        args += ["--hidden-import", "pystray._win32", "--hidden-import", "PIL._tkinter_finder"]
     if "--console" not in sys.argv:
         args.append("--noconsole")                    # plain double-click, no terminal window
     args.append(os.path.abspath(__file__))
@@ -6206,6 +6435,53 @@ CM_USERSCRIPT = r'''// ==UserScript==
 '''
 
 
+# The bookmarklet: the same marking logic as the userscript, but as one
+# self-contained snippet the browser runs once per click (bookmarklets are
+# exempt from page CSP, but can't keep running across navigations). It refreshes
+# for ~90 s to catch in-page filtering/sorting, then stops.
+CM_BOOKMARKLET = r'''(function(){
+var A="http://127.0.0.1:__PORT__",
+C={exact:"#3fb950",otherFinish:"#e3b341",otherVersion:"#e3b341",otherSet:"#e3b341",missing:"#f0554a"},
+T={exact:"rgba(63,185,80,.14)",otherFinish:"rgba(227,179,65,.15)",otherVersion:"rgba(227,179,65,.15)",otherSet:"rgba(227,179,65,.15)",missing:"rgba(240,85,74,.13)"},
+L={exact:"in collection",otherFinish:"other finish",otherVersion:"other version",otherSet:"other set",missing:"missing"},
+CA={};
+function tl(e){return e?(e.getAttribute("title")||e.getAttribute("data-bs-original-title")||"").trim():"";}
+function pr(r){var a=r.querySelector(".col-seller a"),x=r.querySelector('a[href*="/Magic/Expansions/"]');if(!a||!x)return null;
+var h=x.getAttribute("href")||"",f=false,s=r.querySelectorAll(".st_SpecialIcon"),i;
+for(i=0;i<s.length;i++){var v=tl(s[i]);if(v=="Foil"||v=="Folie")f=true;}
+return{name:(a.textContent||"").trim(),setSlug:(h.split("/Magic/Expansions/")[1]||"").split(/[?#]/)[0],setTitle:tl(x),foil:f};}
+function id(r){var m=/stockRow(\d+)/.exec(r.id||"");return m?m[1]:"";}
+function pt(r,res){var st=res.status,c=C[st],b=r.querySelector(".bnd-b");if(b)b.remove();
+if(!c){r.style.boxShadow="";r.style.background="";return;}
+r.style.boxShadow="inset 4px 0 0 "+c;r.style.background=T[st]||"";
+b=document.createElement("span");b.className="bnd-b";
+b.textContent=(L[st]||st)+(res.qty>0?" · "+res.qty+"×":"");
+b.style.cssText="display:inline-block;margin-left:8px;padding:1px 7px;border-radius:4px;font:700 11px/1.5 system-ui;vertical-align:middle;background:"+c+";color:"+(st=="missing"||st=="exact"?"#fff":"#241c00");
+var hs=r.querySelector(".col-seller");if(hs)hs.appendChild(b);}
+function run(){
+var rows=[].slice.call(document.querySelectorAll(".article-row")),need=[],map=[];
+rows.forEach(function(r){var i=id(r);if(!i)return;
+if(CA[i]){if(C[CA[i].status]&&!r.querySelector(".bnd-b"))pt(r,CA[i]);return;}
+var p=pr(r);if(!p)return;p.i=need.length;need.push(p);map.push(r);});
+if(!need.length)return;
+fetch(A+"/api/cm-match",{method:"POST",mode:"cors",headers:{"Content-Type":"application/json"},body:JSON.stringify({items:need})})
+.then(function(x){return x.json();}).then(function(res){
+if(!res||!res.results)return;
+res.results.forEach(function(x){var r=map[x.i];if(r){CA[id(r)]=x;pt(r,x);}});})
+.catch(function(e){if(!window.__bndW){window.__bndW=1;
+alert("Binduno: could not reach the app on "+A+". Make sure Binduno is running, then click the bookmarklet again.");}});}
+run();
+var n=0,iv=setInterval(function(){run();if(++n>28)clearInterval(iv);},3000);
+var mo=new MutationObserver(function(){clearTimeout(mo._t);mo._t=setTimeout(run,300);});
+mo.observe(document.body,{childList:true,subtree:true});
+setTimeout(function(){mo.disconnect();},92000);
+var t=document.createElement("div");t.textContent="Binduno: checking this page…";
+t.style.cssText="position:fixed;right:14px;bottom:14px;z-index:99999;padding:6px 11px;border-radius:8px;background:#1a1d24;color:#e8ebef;border:1px solid #b7791f;font:600 12px system-ui;box-shadow:0 4px 16px rgba(0,0,0,.4)";
+document.body.appendChild(t);
+setTimeout(function(){t.style.transition="opacity .6s";t.style.opacity="0";setTimeout(function(){t.remove();},700);},4000);
+})();'''
+
+
 APP_PLIST = """<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0"><dict>
@@ -6293,6 +6569,18 @@ def _install_bundled_python(res_dir):
     print("Extracting the bundled Python runtime ...")
     with tarfile.open(tarball) as tf:
         tf.extractall(res_dir)          # -> res_dir/python/bin/python3 etc.
+    # Add the (only) third-party packages Binduno uses — the menu-bar icon.
+    # These go INTO the bundle, so the end user still installs nothing. Failure
+    # is non-fatal: the app just runs without the tray icon.
+    py = os.path.join(res_dir, "python", "bin", "python3")
+    import subprocess
+    print("Adding the menu-bar icon support (pystray + Pillow) ...")
+    rc = subprocess.call([py, "-m", "pip", "install", "--no-input", "--quiet",
+                          "--no-warn-script-location",
+                          "pystray", "pillow", "pyobjc-framework-Cocoa"])
+    if rc != 0:
+        print("  (pip step failed — the app will still work, just without a "
+              "menu-bar icon)")
 
 
 def install_app():
@@ -6419,6 +6707,44 @@ class _Server(ThreadingHTTPServer):
         self.server_port = self.server_address[1]
 
 
+def run_tray(url):
+    """Show a menu-bar / system-tray icon with Open / Quit. Optional: needs
+    pystray + Pillow, which the packaged builds bundle. If they aren't
+    importable (e.g. running the plain script), this returns False and the
+    caller keeps the server on the main thread as before. On macOS the tray
+    event loop MUST own the main thread, so the HTTP server is expected to be
+    running in a background thread by the time this is called."""
+    try:
+        import io as _io
+        import pystray
+        from PIL import Image
+    except Exception:                                          # noqa: BLE001
+        return False
+    try:
+        img = Image.open(_io.BytesIO(_png(_render(64), 64, 64)))
+        icon = pystray.Icon("binduno", img, "Binduno")
+
+        def _open(_i=None, _item=None):
+            webbrowser.open(url)
+
+        def _quit(_i=None, _item=None):
+            try:
+                icon.stop()
+            except Exception:                                  # noqa: BLE001
+                pass
+            os._exit(0)
+
+        icon.menu = pystray.Menu(
+            pystray.MenuItem("Open Binduno", _open, default=True),
+            pystray.MenuItem("Quit Binduno", _quit),
+        )
+        icon.run()                                             # blocks
+        return True
+    except Exception as e:                                     # noqa: BLE001
+        print(f"(tray icon unavailable: {e})")
+        return False
+
+
 def main():
     if "--install-app" in sys.argv:
         install_app()
@@ -6457,8 +6783,15 @@ def main():
     if not os.environ.get("MTG_TRACKER_NO_AUTOOPEN"):
         threading.Timer(0.8, lambda: webbrowser.open(url)).start()
     threading.Thread(target=auto_sync_loop, daemon=True).start()
+    threading.Thread(target=_startup_update_check, daemon=True).start()
+    # Serve in a background thread so a menu-bar / tray icon can own the main
+    # thread (required on macOS). If no tray support is available, run_tray()
+    # returns immediately and the server just keeps going on this thread.
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
     try:
-        srv.serve_forever()
+        if not run_tray(url):
+            while True:
+                time.sleep(3600)
     except KeyboardInterrupt:
         print("\nstopped")
 

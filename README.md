@@ -6,12 +6,13 @@
 
 **A local Magic: The Gathering collection tracker and Cardmarket want‑list builder.**
 
-One Python file. No account, no cloud, no third‑party packages — your collection never leaves your computer.
+One Python file, standard library only. No account, no cloud, nothing to sign up for — your collection never leaves your computer.
 
-![version](https://img.shields.io/badge/version-5.45-d4a629)
+![version](https://img.shields.io/badge/version-5.48-d4a629)
 ![python](https://img.shields.io/badge/python-3.9%2B-4a90c4)
 ![status](https://img.shields.io/badge/status-early%20beta-e0692c)
 ![platform](https://img.shields.io/badge/platform-macOS%20%C2%B7%20Windows%20%C2%B7%20Linux-8d98a7)
+![license](https://img.shields.io/badge/license-PolyForm%20Noncommercial-8d98a7)
 
 </div>
 
@@ -23,9 +24,7 @@ Binduno reads a CSV export of your collection (from **ManaBox**, **Moxfield** or
 
 It runs a tiny local web server and opens in your browser. That's the whole app.
 
-<div align="center">
-<img src="docs/home.jpg" width="720" alt="Home dashboard">
-</div>
+<p align="center"><img src="docs/home.jpg" width="880" alt="Home dashboard"></p>
 
 ---
 
@@ -42,11 +41,12 @@ It runs a tiny local web server and opens in your browser. That's the whole app.
 - Serialized cards and whole sets (promos, tokens, Un‑sets…) toggleable
 - Optional price cap that sets very expensive cards aside so one Reserved‑List card doesn't make a set look unaffordable *(off by default)*
 
-<div align="center">
-<img src="docs/collection.jpg" width="420" alt="Collection – set grid">
-&nbsp;&nbsp;
-<img src="docs/set.jpg" width="420" alt="Set detail">
-</div>
+<table>
+<tr>
+<td width="50%"><img src="docs/collection.jpg" alt="Collection – set grid"></td>
+<td width="50%"><img src="docs/set.jpg" alt="Set detail"></td>
+</tr>
+</table>
 
 **Cardmarket want lists**
 - Correct Cardmarket names, bracket order (`Card (Set) (V.1)` vs. `Card (V.1) (Set: Extras)`), quantity prefixes and 150‑entry blocks
@@ -68,11 +68,10 @@ It runs a tiny local web server and opens in your browser. That's the whole app.
 - Daily automatic card/price sync
 - German and English UI; German card names supported
 - Dark, light and colour‑blind‑friendly themes
+- Menu‑bar / system‑tray icon on the packaged builds (Open · Quit)
 - Open it on your phone over Wi‑Fi (there's a QR code in Settings)
 
-<div align="center">
-<img src="docs/mobile.jpg" width="300" alt="Binduno on a phone">
-</div>
+<p align="center"><img src="docs/mobile.jpg" width="300" alt="Binduno on a phone"></p>
 
 ---
 
@@ -117,7 +116,7 @@ Produces `dist\Binduno.exe` — a single file that needs no Python on the target
 
 ## Updating
 
-Open **Settings → About & Help → Update App → "Update from GitHub"** and click **Check for updates**. Binduno downloads the newest `mtg_tracker.py` from this repository, checks it, backs up the old one and restarts itself. No re‑download, no reinstall.
+Open **Settings → Update & Help → Update App → "Update from GitHub"** and click **Check for updates**. Binduno downloads the newest `mtg_tracker.py` from this repository, checks it, backs up the old one and restarts itself. No re‑download, no reinstall.
 
 ---
 
@@ -139,6 +138,10 @@ Binduno works and is used daily, but it's a first public release. If you try it:
 - Especially useful: reports from **Windows**, from **large collections**, and from the **Cardmarket helper** on different browsers.
 
 ---
+
+## License
+
+Released under the **[PolyForm Noncommercial License 1.0.0](LICENSE)**. In short: you may use, study, modify and share Binduno freely for any **non‑commercial** purpose. Selling it, putting it behind a paywall, bundling it into a paid product or otherwise using it commercially — with or without changes — is **not** permitted.
 
 ## Disclaimer
 
