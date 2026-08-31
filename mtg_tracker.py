@@ -16,7 +16,7 @@ import urllib.request
 from datetime import datetime, timedelta
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-VERSION = "5.49"
+VERSION = "5.50"
 SCHEMA = 14
 # Repo the in-app "Update from GitHub" button pulls new versions from. Baked in
 # so testers don't have to type anything; still overridable in Settings or via
@@ -1591,7 +1591,10 @@ def card_search(c, p):
     where = ["k.digital=0"]
     args = []
     if p.get("allsets") != "1":
-        cc = counted_codes(c)
+        # Secret Lair is set_type "box" and so doesn't count toward completion,
+        # but its cards are individually tracked and people do look them up — the
+        # browser stays useful only if they show up here without "all sets".
+        cc = sorted(set(counted_codes(c)) | secret_lair_codes(c))
         if cc:
             where.append("k.set_code IN (%s)" % ",".join("?" * len(cc))); args += cc
     if p.get("baseonly") == "1":
@@ -3192,14 +3195,15 @@ en:{
   "explain.b5":"Your collection lives in a local SQLite file. No account, no cloud. The only thing downloaded is Scryfall's card database; the optional Cardmarket helper only reads pages you already opened.",
   "cm.browserLabel":"Your browser",
   "cm.optBookmarklet":"Bookmarklet (no extension)",
+  "cm.bmHeading":"Bookmarklet — no extension (Chrome &amp; Firefox)",
   "cm.step1b.chrome":"Install <a href='https://violentmonkey.github.io/' target='_blank' rel='noopener'>Violentmonkey</a> (free, open source) from your browser's extension store.",
   "cm.step1b.firefox":"Install <a href='https://addons.mozilla.org/firefox/addon/violentmonkey/' target='_blank' rel='noopener'>Violentmonkey</a> (free, open source) from Firefox Add-ons.",
   "cm.step1b.safari":"Install <a href='https://apps.apple.com/app/userscripts/id1463298887' target='_blank' rel='noopener'>Userscripts</a> by Quoid (free) from the Mac App Store.",
   "cm.stepSafariEnable":"In Safari → Settings → Extensions, switch Userscripts on and allow it on cardmarket.com.",
-  "cm.bmIntro":"No extension needed and it works in any browser — the catch is you must click it once on every page.",
+  "cm.bmIntro":"No extension to install — the catch is you must click it once on every page.",
   "cm.bmDrag":"Drag this link onto your bookmarks bar:",
   "cm.bmClick":"On a Cardmarket seller's singles page, click the bookmark. It marks the visible rows and keeps refreshing for about 90 seconds; click it again whenever you change page.",
-  "cm.bmNote":"Experimental. If nothing shows up, your browser blocked the connection to the local app — use the extension method instead.",
+  "cm.bmNote":"Does not work in Safari — Safari blocks the bookmarklet's connection to the local app. On Safari, use the extension method above instead.",
 },
 de:{
   "nav.home":"Start","nav.collection":"Sammlung","nav.missing":"Fehlende Namen",
@@ -3600,14 +3604,15 @@ de:{
   "explain.b5":"Deine Sammlung liegt in einer lokalen SQLite-Datei. Kein Konto, keine Cloud. Heruntergeladen wird nur Scryfalls Kartendatenbank; der optionale Cardmarket-Helfer liest nur Seiten, die du ohnehin geöffnet hast.",
   "cm.browserLabel":"Dein Browser",
   "cm.optBookmarklet":"Bookmarklet (ohne Erweiterung)",
+  "cm.bmHeading":"Bookmarklet — ohne Erweiterung (Chrome &amp; Firefox)",
   "cm.step1b.chrome":"<a href='https://violentmonkey.github.io/' target='_blank' rel='noopener'>Violentmonkey</a> (kostenlos, quelloffen) aus dem Erweiterungs-Store deines Browsers installieren.",
   "cm.step1b.firefox":"<a href='https://addons.mozilla.org/firefox/addon/violentmonkey/' target='_blank' rel='noopener'>Violentmonkey</a> (kostenlos, quelloffen) aus den Firefox-Add-ons installieren.",
   "cm.step1b.safari":"<a href='https://apps.apple.com/app/userscripts/id1463298887' target='_blank' rel='noopener'>Userscripts</a> von Quoid (kostenlos) aus dem Mac App Store installieren.",
   "cm.stepSafariEnable":"In Safari → Einstellungen → Erweiterungen „Userscripts“ einschalten und für cardmarket.com erlauben.",
-  "cm.bmIntro":"Keine Erweiterung nötig, funktioniert in jedem Browser — dafür musst du es auf jeder Seite einmal anklicken.",
+  "cm.bmIntro":"Nichts zu installieren — dafür musst du es auf jeder Seite einmal anklicken.",
   "cm.bmDrag":"Zieh diesen Link in deine Lesezeichenleiste:",
   "cm.bmClick":"Auf der Singles-Seite eines Cardmarket-Händlers das Lesezeichen anklicken. Es markiert die sichtbaren Zeilen und aktualisiert ~90 Sekunden lang; nach einem Seitenwechsel erneut klicken.",
-  "cm.bmNote":"Experimentell. Wenn nichts erscheint, hat dein Browser die Verbindung zur lokalen App blockiert — dann die Erweiterungs-Methode nutzen.",
+  "cm.bmNote":"Funktioniert nicht in Safari — Safari blockiert die Verbindung des Bookmarklets zur lokalen App. Unter Safari stattdessen die Erweiterungs-Methode oben nutzen.",
 },
 };
 const $=s=>document.querySelector(s);
@@ -5055,43 +5060,38 @@ function cmPane(sel){
     <option value="chrome">Chrome / Brave / Edge</option>
     <option value="firefox">Firefox</option>
     <option value="safari">Safari</option>
-    <option value="bookmarklet">${t("cm.optBookmarklet")}</option>
   </select>
   <div id="cmSteps" style="margin-top:12px"></div>
+  <div style="margin-top:18px;max-width:700px;border:1px solid var(--line);border-radius:8px;padding:12px 14px">
+    <div style="font-weight:600;margin-bottom:2px">${t("cm.bmHeading")}</div>
+    <p class="sub" style="margin:4px 0">${t("cm.bmIntro")}</p>
+    <ol class="sub" style="line-height:1.9;margin:6px 0 0;padding-left:20px">
+      <li>${t("cm.bmDrag")}<br>
+        <a id="bmLink" draggable="true" style="display:inline-block;margin-top:6px;background:var(--gold);
+           color:#181206;padding:5px 14px;border-radius:4px;text-decoration:none;font-weight:600;cursor:grab">
+           Binduno CM</a></li>
+      <li>${t("cm.bmClick")}</li>
+    </ol>
+    <p class="sub" style="margin:8px 0 0">${t("cm.bmNote")}</p>
+  </div>
   <p class="sub">${t("cm.legend")}</p>
   <div class="msg" style="max-width:700px">${t("cm.toggleNote")}</div>
   <p class="sub" style="max-width:700px;margin-top:12px">${t("cm.updateNote")}</p>`;
-  $("#cmBrowser").value=br;
+  $("#cmBrowser").value=(br==="bookmarklet"?"chrome":br);
   const renderSteps=()=>{
     const v=$("#cmBrowser").value;
     try{localStorage.setItem("bnd_cm_browser",v);}catch(e){}
-    let html;
-    if(v==="bookmarklet"){
-      html=`<p class="sub" style="max-width:700px">${t("cm.bmIntro")}</p>
-      <ol class="sub" style="line-height:1.9;max-width:700px">
-        <li>${t("cm.bmDrag")}<br>
-          <a id="bmLink" draggable="true" style="display:inline-block;margin-top:6px;background:var(--gold);
-             color:#181206;padding:5px 14px;border-radius:4px;text-decoration:none;font-weight:600;cursor:grab">
-             Binduno CM</a></li>
-        <li>${t("cm.bmClick")}</li>
-        <li>${t("cm.stepRunning")}</li>
-      </ol>
-      <p class="sub" style="max-width:700px">${t("cm.bmNote")}</p>`;
-    }else{
-      const steps=[t("cm.step1b."+v), `${t("cm.step2")} <a href="${url}" target="_blank"><code>${url}</code></a>`];
-      if(v==="chrome") steps.push(t("cm.stepAllow"));
-      if(v==="safari") steps.push(t("cm.stepSafariEnable"));
-      steps.push(t("cm.stepRunning"),t("cm.step3"),t("cm.stepPermit"));
-      html=`<ol class="sub" style="line-height:1.9;max-width:700px">${steps.map(x=>`<li>${x}</li>`).join("")}</ol>`;
-    }
-    $("#cmSteps").innerHTML=html;
-    if(v==="bookmarklet"&&$("#bmLink")){
-      fetch("/cm-helper.bookmarklet.js").then(r=>r.text()).then(code=>{
-        $("#bmLink").href="javascript:"+code.replace(/\s*\n\s*/g," ");
-      });
-    }
+    const steps=[t("cm.step1b."+v), `${t("cm.step2")} <a href="${url}" target="_blank"><code>${url}</code></a>`];
+    if(v==="chrome") steps.push(t("cm.stepAllow"));
+    if(v==="safari") steps.push(t("cm.stepSafariEnable"));
+    steps.push(t("cm.stepRunning"),t("cm.step3"),t("cm.stepPermit"));
+    $("#cmSteps").innerHTML=`<ol class="sub" style="line-height:1.9;max-width:700px">${
+      steps.map(x=>`<li>${x}</li>`).join("")}</ol>`;
   };
   $("#cmBrowser").onchange=renderSteps; renderSteps();
+  fetch("/cm-helper.bookmarklet.js").then(r=>r.text()).then(code=>{
+    if($("#bmLink")) $("#bmLink").href="javascript:"+code.replace(/\s*\n\s*/g," ");
+  });
   const tb=$("#cmTest");
   if(tb) tb.onclick=async()=>{ tb.disabled=true; await load(); cmPane(sel); };
 }
@@ -6193,7 +6193,13 @@ def _render(size, tile=True, palette="dark", mono=None):
                 # bars don't overlap, so the strongest-covering bar wins the pixel
                 best_a, best_c = 0.0, None
                 for cx, cy, hw, hh, color, alpha in BARS:
-                    a_bar = max(0.0, min(1.0, 0.5 - rr(u - cx, v - cy, hw, hh, BAR_R) / aa)) * alpha
+                    d = rr(u - cx, v - cy, hw, hh, BAR_R)
+                    if mono is not None:
+                        # hollow bars: paint only a stroke along each outline so
+                        # the macOS menu-bar glyph reads as line art, not blocks
+                        a_bar = max(0.0, min(1.0, 0.5 - (abs(d) - 0.032) / aa))
+                    else:
+                        a_bar = max(0.0, min(1.0, 0.5 - d / aa)) * alpha
                     if a_bar > best_a:
                         best_a, best_c = a_bar, color
                 if best_c is None:
@@ -6529,13 +6535,17 @@ fetch(A+"/api/cm-match",{method:"POST",mode:"cors",headers:{"Content-Type":"appl
 .then(function(x){return x.json();}).then(function(res){
 if(!res||!res.results)return;
 res.results.forEach(function(x){var r=map[x.i];if(r){CA[id(r)]=x;pt(r,x);}});})
-.catch(function(e){if(!window.__bndW){window.__bndW=1;
-alert("Binduno: could not reach the app on "+A+". Make sure Binduno is running, then click the bookmarklet again.");}});}
+.catch(fail);}
+function fail(){if(!S.err){S.err=true;
+alert("Binduno: could not reach the app on "+A+".\nChrome/Firefox: make sure Binduno is running, then click the bookmarklet again.\nSafari blocks this connection - use the extension method instead.");}
+S.stop();}
+if(window.__bndS)window.__bndS.stop();
+var S=window.__bndS={err:false,n:0,stop:function(){clearInterval(S.iv);try{S.mo.disconnect();}catch(e){}}};
 run();
-var n=0,iv=setInterval(function(){run();if(++n>28)clearInterval(iv);},3000);
-var mo=new MutationObserver(function(){clearTimeout(mo._t);mo._t=setTimeout(run,300);});
-mo.observe(document.body,{childList:true,subtree:true});
-setTimeout(function(){mo.disconnect();},92000);
+S.iv=setInterval(function(){if(S.err)return;run();if(++S.n>28)S.stop();},3000);
+S.mo=new MutationObserver(function(){if(S.err)return;clearTimeout(S.t);S.t=setTimeout(run,300);});
+S.mo.observe(document.body,{childList:true,subtree:true});
+setTimeout(S.stop,92000);
 var t=document.createElement("div");t.textContent="Binduno: checking this page…";
 t.style.cssText="position:fixed;right:14px;bottom:14px;z-index:99999;padding:6px 11px;border-radius:8px;background:#1a1d24;color:#e8ebef;border:1px solid #b7791f;font:600 12px system-ui;box-shadow:0 4px 16px rgba(0,0,0,.4)";
 document.body.appendChild(t);
