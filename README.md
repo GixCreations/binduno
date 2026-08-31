@@ -8,7 +8,7 @@
 
 One Python file, standard library only. No account, no cloud, nothing to sign up for — your collection never leaves your computer.
 
-![version](https://img.shields.io/badge/version-5.48-d4a629)
+![version](https://img.shields.io/badge/version-5.49-d4a629)
 ![python](https://img.shields.io/badge/python-3.9%2B-4a90c4)
 ![status](https://img.shields.io/badge/status-early%20beta-e0692c)
 ![platform](https://img.shields.io/badge/platform-macOS%20%C2%B7%20Windows%20%C2%B7%20Linux-8d98a7)
@@ -51,6 +51,7 @@ It runs a tiny local web server and opens in your browser. That's the whole app.
 **Cardmarket want lists**
 - Correct Cardmarket names, bracket order (`Card (Set) (V.1)` vs. `Card (V.1) (Set: Extras)`), quantity prefixes and 150‑entry blocks
 - "Buy missing" per set, or collect cards across sets in the Wantlist‑Cart
+- *Secret Lair cards can't go in the Wantlist‑Cart yet* — Cardmarket splits Secret Lair into hundreds of separate expansions with no reliable mapping, so a generated line wouldn't match. Buy those directly from the card's Cardmarket page.
 
 **Cardmarket browser helper** *(optional)*
 - A userscript that marks every single offer on cardmarket.com by whether you already own the card — green (this exact printing), yellow (you own it in another set/version/finish), red (missing), with the copy count

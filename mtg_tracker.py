@@ -16,7 +16,7 @@ import urllib.request
 from datetime import datetime, timedelta
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-VERSION = "5.48"
+VERSION = "5.49"
 SCHEMA = 14
 # Repo the in-app "Update from GitHub" button pulls new versions from. Baked in
 # so testers don't have to type anything; still overridable in Settings or via
@@ -391,6 +391,7 @@ UPDATE = {"checked": False, "available": False, "latest": "", "current": VERSION
 # fires (the reloaded page fetching itself) calls the shutdown off.
 QUIT_TIMER = None
 QUIT_GRACE = 2.5
+TRAY_ACTIVE = False        # set once a menu-bar / tray icon is up
 
 
 def fetch(url):
@@ -1797,6 +1798,14 @@ def missing_names(c, p):
                        "ver": r["ver"] or 1, "extras": r["extras_idx"] or 0, "cmSuffix": r["cm_suffix"] or "", "cmVer": r["cm_ver"] or 1} for r in rows]}
 
 
+def secret_lair_codes(c):
+    """Set codes whose name is a Secret Lair drop. Generating a working
+    Cardmarket want list for these isn't solved yet (CM splits Secret Lair
+    into hundreds of separate expansions), so they're kept out of the cart."""
+    return {r["code"] for r in c.execute(
+        "SELECT code FROM sets WHERE lower(name) LIKE 'secret lair%'")}
+
+
 def cart_rows(c):
     rows = c.execute("""SELECT t.set_code, t.number, t.qty, k.name, k.name_de, k.eur, k.eur_foil,
                                k.img, k.rarity, k.variant, k.ver, k.extras_idx, k.cm_suffix, k.cm_ver, s.name set_name
@@ -2131,6 +2140,11 @@ class Handler(BaseHTTPRequestHandler):
                 self.send_json({"ok": False, "error": str(e)}, 400)
         elif self.path == "/api/quit":
             self.send_json({"ok": True})
+            # With a menu-bar / tray icon running, closing the browser tab must
+            # NOT stop the app — you reopen it from the tray. Only the tray's
+            # own Quit item (or Ctrl+C) shuts it down then.
+            if TRAY_ACTIVE:
+                return
             global QUIT_TIMER
             if QUIT_TIMER is not None:
                 QUIT_TIMER.cancel()
@@ -2140,12 +2154,17 @@ class Handler(BaseHTTPRequestHandler):
         elif self.path == "/api/cart":
             d = json.loads(raw)
             act = d.get("action")
+            sl = secret_lair_codes(c) if act in ("add", "addmany") else set()
+            sl_skipped = 0
             if act == "add":
-                c.execute("""INSERT INTO cart(set_code,number,qty,added) VALUES(?,?,?,?)
-                             ON CONFLICT(set_code,number)
-                             DO UPDATE SET qty=qty+excluded.qty""",
-                          (d["set"], d["number"], int(d.get("qty", 1)),
-                           datetime.now().isoformat(timespec="seconds")))
+                if d["set"] in sl:
+                    sl_skipped = 1
+                else:
+                    c.execute("""INSERT INTO cart(set_code,number,qty,added) VALUES(?,?,?,?)
+                                 ON CONFLICT(set_code,number)
+                                 DO UPDATE SET qty=qty+excluded.qty""",
+                              (d["set"], d["number"], int(d.get("qty", 1)),
+                               datetime.now().isoformat(timespec="seconds")))
             elif act == "set":
                 q = int(d.get("qty", 0))
                 if q <= 0:
@@ -2157,6 +2176,9 @@ class Handler(BaseHTTPRequestHandler):
             elif act == "addmany":
                 now = datetime.now().isoformat(timespec="seconds")
                 for it in d.get("items", []):
+                    if it["set"] in sl:
+                        sl_skipped += 1
+                        continue
                     c.execute("""INSERT INTO cart(set_code,number,qty,added) VALUES(?,?,1,?)
                                  ON CONFLICT(set_code,number) DO NOTHING""",
                               (it["set"], it["number"], now))
@@ -2178,7 +2200,10 @@ class Handler(BaseHTTPRequestHandler):
                     log(c, "Collection", f"Added {len(items)} cart line(s) to collection")
                     bust()
             c.commit()
-            self.send_json(cart_rows(c))
+            res = cart_rows(c)
+            if sl_skipped:
+                res["secretLairSkipped"] = sl_skipped
+            self.send_json(res)
         elif self.path == "/api/shipping-pref":
             d = json.loads(raw)
             if "trackedOnly" in d:
@@ -2303,7 +2328,7 @@ PAGE = r"""<!DOCTYPE html><html lang="en"><head><meta charset="utf-8">
 <style>
 :root{
  --bg:#0f1319;--panel:#171d26;--panel2:#131920;--line:#28313d;--text:#e8ebef;
- --muted:#8d98a7;--dim:#5f6a78;
+ --muted:#8d98a7;--dim:#5f6a78;--track:#3b4756;
  --w:#e8dcb5;--u:#4a90c4;--b:#8b7fa8;--r:#c8503c;--g:#4f9d69;
  --gold:#d4a629;--mythic:#e0692c;--ok:#4f9d69;--good-bg:#183024;
  --bad:#d98a8a;--bad-bg:#33191b;
@@ -2315,7 +2340,7 @@ PAGE = r"""<!DOCTYPE html><html lang="en"><head><meta charset="utf-8">
  --nav-bg:rgba(15,19,25,.94)}
 :root[data-theme="light"]{
  --bg:#f5f3ee;--panel:#ffffff;--panel2:#f0ede6;--line:#d9d3c5;--text:#211d16;
- --muted:#6b6558;--dim:#948d7d;
+ --muted:#6b6558;--dim:#948d7d;--track:#cdc6b4;
  --w:#8a7a3a;--u:#2b6ea8;--b:#6b5a92;--r:#a83f2e;--g:#3d7a4f;
  --gold:#93690f;--mythic:#b8460f;--ok:#3d7a4f;--good-bg:#e3efe4;
  --bad:#a83f2e;--bad-bg:#f7e2df;
@@ -2371,7 +2396,7 @@ h2{font-family:var(--serif);font-weight:400;font-size:20px;margin:34px 0 12px}
 .rarbars{background:var(--panel);border:1px solid var(--line);border-radius:6px;padding:16px}
 .rarrow{display:grid;grid-template-columns:92px 1fr 128px;gap:12px;align-items:center;margin:9px 0}
 .rarrow .lb{font-size:13px;color:var(--muted)}
-.rarrow .track{height:9px;background:#1d242e;border-radius:5px;overflow:hidden}
+.rarrow .track{height:9px;background:var(--track);border-radius:5px;overflow:hidden}
 .rarrow .fill{height:100%;border-radius:5px}
 .rarrow .nm{font-family:var(--mono);font-size:11.5px;color:var(--dim);text-align:right}
 .list{background:var(--panel);border:1px solid var(--line);border-radius:6px;overflow:hidden}
@@ -2382,7 +2407,7 @@ h2{font-family:var(--serif);font-weight:400;font-size:20px;margin:34px 0 12px}
 .li img{width:19px;height:19px}
 .li .nm{flex:1;font-size:14px}
 .li .mt{font-family:var(--mono);font-size:12px;color:var(--muted)}
-.bar{flex:0 0 92px;height:6px;background:#1d242e;border-radius:4px;overflow:hidden}
+.bar{flex:0 0 92px;height:6px;background:var(--track);border-radius:4px;overflow:hidden}
 .bar span{display:block;height:100%;background:var(--gold)}
 /* inside a set card (.set is a flex column) flex-basis controls height, so the
    shared .bar would be 92px tall — pin it back to a thin full-width bar */
@@ -2894,6 +2919,9 @@ en:{
   "cart.sortCardName":"Card name","cart.sortPrice":"Price","cart.sortLineTotal":"Line total",
   "cart.sortQuantity":"Quantity","cart.empty":"Empty Wantlist-Cart",
   "cart.buildWantlist":"Build wantlist","cart.remove":"Remove",
+  "cart.secretLairWhy":"Secret Lair want lists aren't supported yet",
+  "cart.secretLairSkipped":"{n} Secret Lair card(s) were skipped — see the note on the set page.",
+  "cart.secretLairNote":"Secret Lair cards can't be added to the Wantlist-Cart yet. Cardmarket splits Secret Lair into hundreds of separate expansions with no reliable mapping, so a generated want list wouldn't match. Buy these directly from the card's Cardmarket page.",
   "cart.addAllToCollection":"Add all to collection","cart.addAllToCollectionConfirm":
     "Add all {n} cards in the Wantlist-Cart to your collection as nonfoil? "+
     "The cart itself stays as it is.",
@@ -3296,6 +3324,9 @@ de:{
   "cart.sortCardName":"Kartenname","cart.sortPrice":"Preis","cart.sortLineTotal":"Zeilensumme",
   "cart.sortQuantity":"Menge","cart.empty":"Wantlist-Cart leeren",
   "cart.buildWantlist":"Wantlist erzeugen","cart.remove":"Entfernen",
+  "cart.secretLairWhy":"Wantlisten für Secret Lair werden noch nicht unterstützt",
+  "cart.secretLairSkipped":"{n} Secret-Lair-Karte(n) übersprungen — siehe Hinweis auf der Set-Seite.",
+  "cart.secretLairNote":"Secret-Lair-Karten können noch nicht in den Wantlist-Cart. Cardmarket teilt Secret Lair in hunderte einzelne Erweiterungen ohne verlässliche Zuordnung auf, eine erzeugte Wantlist würde also nicht treffen. Diese Karten direkt über die Cardmarket-Seite der Karte kaufen.",
   "cart.addAllToCollection":"Alle zur Sammlung hinzufügen","cart.addAllToCollectionConfirm":
     "Alle {n} Karten aus dem Wantlist-Cart als Nonfoil zur Sammlung hinzufügen? "+
     "Der Cart selbst bleibt dabei unverändert.",
@@ -3586,6 +3617,17 @@ const pct=n=>(n*100).toFixed(1)+" %";
 const RAR={c:["Common","#7d8896"],u:["Uncommon","#a8b4c2"],r:["Rare","#d4a629"],
            m:["Mythic","#e0692c"],s:["Special","#b49ed0"],b:["Basic land","#6f7a88"]};
 const rarLabel=k=>t("rarity."+k);
+function isSecretLair(code){const s=SETS.find(x=>x.code===code);return !!s&&/^secret lair/i.test(s.name||"");}
+function toast(msg){
+  let b=$("#toast");
+  if(!b){b=document.createElement("div");b.id="toast";
+    b.style.cssText="position:fixed;left:50%;bottom:24px;transform:translateX(-50%);z-index:200;"
+      +"background:#0b0e13;color:var(--text);border:1px solid var(--line);border-radius:8px;"
+      +"padding:10px 16px;font-size:13.5px;max-width:min(92vw,520px);box-shadow:0 8px 30px rgba(0,0,0,.5)";
+    document.body.appendChild(b);}
+  b.textContent=msg;b.style.opacity="1";
+  clearTimeout(toast._t);toast._t=setTimeout(()=>{b.style.transition="opacity .5s";b.style.opacity="0";},4200);
+}
 function updateDismissed(v){try{return localStorage.getItem("bnd_upd_dismiss")===v;}catch(e){return false;}}
 function dismissUpdate(v){try{localStorage.setItem("bnd_upd_dismiss",v);}catch(e){}}
 let SHOW_COSTS=false;
@@ -3596,7 +3638,7 @@ let SETS=[],STATS=null,PAGE=1,PER=24,VIEW="grid",SORT="totalCost",DIR=1,
 function donut(p,color,size=96){
   const R=40,C=2*Math.PI*R,off=C*(1-Math.min(p,1));
   return `<svg viewBox="0 0 100 100" width="${size}" height="${size}">
-    <circle cx="50" cy="50" r="${R}" fill="none" stroke="#1d242e" stroke-width="12"/>
+    <circle cx="50" cy="50" r="${R}" fill="none" stroke="var(--track)" stroke-width="12"/>
     <circle cx="50" cy="50" r="${R}" fill="none" stroke="${color}" stroke-width="12"
       stroke-dasharray="${C}" stroke-dashoffset="${off}" stroke-linecap="round"
       transform="rotate(-90 50 50)"/>
@@ -4330,13 +4372,15 @@ function drawCards(){
     else if(CS==="qty"){x=a.qty||0;y=b.qty||0;}
     if(typeof x==="string")return x.localeCompare(y)*CD;
     return (x-y)*CD;});
-  const head=`<div class="tools" style="margin:14px 0 10px">
+  const sl=isSecretLair(DETAIL.code);
+  const head=`${sl?`<div class="msg" style="max-width:720px">${t("cart.secretLairNote")}</div>`:""}
+    <div class="tools" style="margin:14px 0 10px">
     <div class="seg"><button data-dv="table" class="${DV==="table"?"on":""}">${t("collection.table")}</button>
     <button data-dv="grid" class="${DV==="grid"?"on":""}">${t("collection.grid")}</button></div>
     <select id="gsort">${SORTCOLS.map(([k,l])=>
       `<option value="${k}" ${CS===k?"selected":""}>${l}</option>`).join("")}</select>
     <button id="gdir">${CD<0?"▼":"▲"}</button>
-    <button id="cartAllMissing">${t("setPage.addAllMissing")}</button>
+    <button id="cartAllMissing" ${sl?"disabled title=\""+t("cart.secretLairWhy")+"\"":""}>${t("setPage.addAllMissing")}</button>
     <button id="buyFromSet">${t("setPage.buyMissingDots")}</button></div>`;
   if(DV==="grid"){
     OUT.innerHTML=head+`<div class="cgrid">${rows.map(c=>cardTile(
@@ -4666,6 +4710,7 @@ let CART={items:[],count:0};
 let CQ="",CSORT="set",CDIR=1;
 async function cartPost(body){
   CART=await fetch("/api/cart",{method:"POST",body:JSON.stringify(body)}).then(r=>r.json());
+  if(CART.secretLairSkipped)toast(t("cart.secretLairSkipped",{n:CART.secretLairSkipped}));
   paintCartBadge();return CART;
 }
 async function cartLoad(){
@@ -4677,12 +4722,16 @@ function paintCartBadge(){
   b.textContent=CART.count||"";b.classList.toggle("on",!!CART.count);
 }
 function bindCartButtons(){
-  document.querySelectorAll("[data-cart]").forEach(b=>b.onclick=async ev=>{
-    ev.stopPropagation();
-    const [sc,nr]=b.dataset.cart.split("|");
-    await cartPost({action:"add",set:sc,number:nr,qty:1});
-    const old=b.textContent;
-    b.textContent="\u2713";setTimeout(()=>b.textContent=old,1100);
+  document.querySelectorAll("[data-cart]").forEach(b=>{
+    const [sc]=b.dataset.cart.split("|");
+    if(isSecretLair(sc)){b.disabled=true;b.title=t("cart.secretLairWhy");return;}
+    b.onclick=async ev=>{
+      ev.stopPropagation();
+      const [s,nr]=b.dataset.cart.split("|");
+      await cartPost({action:"add",set:s,number:nr,qty:1});
+      const old=b.textContent;
+      b.textContent="\u2713";setTimeout(()=>b.textContent=old,1100);
+    };
   });
 }
 function cartView(){
@@ -5490,7 +5539,11 @@ function helpPane(sel){
         therefore reads <code>Smaug the Magnificent (V.1) (The Hobbit: Extras)</code>.</p>
      <p>Quantities are written as a prefix: <code>2x Sol Ring (V.1) (Commander: Kaldheim)</code>.
         Cardmarket accepts 150 entries per list, so longer lists are split into numbered
-        blocks you copy one after another.</p>`,
+        blocks you copy one after another.</p>
+     <p><b>Secret Lair</b> cards can't be put in the Wantlist-Cart yet: Cardmarket
+        splits Secret Lair into hundreds of separate expansions with no reliable
+        mapping, so a generated want-list line wouldn't match. Buy those directly
+        from the card's Cardmarket page.</p>`,
    data:`<h3>Your data</h3>
      <p>Everything lives in a SQLite file on your Mac. Nothing is uploaded anywhere.</p>
      <ul><li><b>Replace</b> import wipes the stored collection and uses the file as the new truth.</li>
@@ -5589,7 +5642,11 @@ function helpPane(sel){
         sich daher <code>Smaug the Magnificent (V.1) (The Hobbit: Extras)</code>.</p>
      <p>Mengen werden als Präfix geschrieben: <code>2x Sol Ring (V.1) (Commander: Kaldheim)</code>.
         Cardmarket akzeptiert 150 Einträge pro Liste, längere Listen werden daher in
-        nummerierte Blöcke aufgeteilt, die du nacheinander kopierst.</p>`,
+        nummerierte Blöcke aufgeteilt, die du nacheinander kopierst.</p>
+     <p><b>Secret Lair</b>-Karten können noch nicht in den Wantlist-Cart: Cardmarket
+        teilt Secret Lair in hunderte einzelne Erweiterungen ohne verlässliche
+        Zuordnung auf, eine erzeugte Wantlist-Zeile würde also nicht treffen. Solche
+        Karten direkt über die Cardmarket-Seite der Karte kaufen.</p>`,
    data:`<h3>Deine Daten</h3>
      <p>Alles liegt in einer SQLite-Datei auf deinem Mac. Nichts wird irgendwohin hochgeladen.</p>
      <ul><li><b>Ersetzen</b>-Import löscht die gespeicherte Sammlung und nutzt die Datei als
@@ -6071,13 +6128,15 @@ def _png(rgba, w, h):
             + chunk(b"IEND", b""))
 
 
-def _render(size, tile=True, palette="dark"):
+def _render(size, tile=True, palette="dark", mono=None):
     """Draw the tracker mark: four card-spine bars ("Ruckenreihe" concept,
     logo review option 10). With tile=True they sit on the dark rounded
     square used for the Dock / taskbar / browser-tab icon; with tile=False
     only the bars are drawn (transparent background, zoomed up) for the
     in-app wordmark. palette="light" recolours the pale bars to a dark
-    slate so they don't vanish on the light theme's nav bar."""
+    slate so they don't vanish on the light theme's nav bar. mono=(r,g,b)
+    (0..1) draws every bar in one flat colour — used for the macOS menu-bar
+    icon, which is a monochrome white glyph like the system icons."""
     from math import hypot
 
     S = size
@@ -6100,11 +6159,13 @@ def _render(size, tile=True, palette="dark"):
         PALE = (0.910, 0.894, 0.847)
     # (offset-x, offset-y, half-width, half-height, color, alpha) per bar,
     # left to right, echoing a row of binder/card spines seen edge-on
+    if mono is not None:
+        PALE = GOLD = GOLD2 = tuple(mono)
     BARS = [
         (-0.37, 0.12, 0.09, 0.28, PALE, 1.0),
         (-0.11, 0.02, 0.09, 0.38, GOLD, 1.0),
         (0.15, -0.06, 0.09, 0.46, GOLD2, 1.0),
-        (0.41, 0.06, 0.09, 0.34, PALE, 0.85),
+        (0.41, 0.06, 0.09, 0.34, PALE, 1.0 if mono is not None else 0.85),
     ]
     BAR_R = 0.06
     zoom = 1.0 if tile else 1.62                    # bars fill the frame when there's no tile
@@ -6714,6 +6775,7 @@ def run_tray(url):
     caller keeps the server on the main thread as before. On macOS the tray
     event loop MUST own the main thread, so the HTTP server is expected to be
     running in a background thread by the time this is called."""
+    global TRAY_ACTIVE
     try:
         import io as _io
         import pystray
@@ -6721,7 +6783,13 @@ def run_tray(url):
     except Exception:                                          # noqa: BLE001
         return False
     try:
-        img = Image.open(_io.BytesIO(_png(_render(64), 64, 64)))
+        mac = sys.platform == "darwin"
+        if mac:
+            # a flat white bar glyph, like the other menu-bar icons
+            img = Image.open(_io.BytesIO(_png(
+                _render(72, tile=False, mono=(1, 1, 1)), 72, 72)))
+        else:
+            img = Image.open(_io.BytesIO(_png(_render(64), 64, 64)))
         icon = pystray.Icon("binduno", img, "Binduno")
 
         def _open(_i=None, _item=None):
@@ -6738,9 +6806,20 @@ def run_tray(url):
             pystray.MenuItem("Open Binduno", _open, default=True),
             pystray.MenuItem("Quit Binduno", _quit),
         )
-        icon.run()                                             # blocks
+
+        def _setup(ic):
+            ic.visible = True
+            if mac:                                            # let macOS tint it like a system icon
+                try:
+                    ic._icon.setTemplate_(True)
+                except Exception:                              # noqa: BLE001
+                    pass
+
+        TRAY_ACTIVE = True
+        icon.run(setup=_setup)                                 # blocks
         return True
     except Exception as e:                                     # noqa: BLE001
+        TRAY_ACTIVE = False
         print(f"(tray icon unavailable: {e})")
         return False
 
