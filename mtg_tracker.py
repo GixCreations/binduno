@@ -16,7 +16,7 @@ import urllib.request
 from datetime import datetime, timedelta
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-VERSION = "5.50"
+VERSION = "5.51"
 SCHEMA = 14
 # Repo the in-app "Update from GitHub" button pulls new versions from. Baked in
 # so testers don't have to type anything; still overridable in Settings or via
@@ -6193,13 +6193,10 @@ def _render(size, tile=True, palette="dark", mono=None):
                 # bars don't overlap, so the strongest-covering bar wins the pixel
                 best_a, best_c = 0.0, None
                 for cx, cy, hw, hh, color, alpha in BARS:
-                    d = rr(u - cx, v - cy, hw, hh, BAR_R)
-                    if mono is not None:
-                        # hollow bars: paint only a stroke along each outline so
-                        # the macOS menu-bar glyph reads as line art, not blocks
-                        a_bar = max(0.0, min(1.0, 0.5 - (abs(d) - 0.032) / aa))
-                    else:
-                        a_bar = max(0.0, min(1.0, 0.5 - d / aa)) * alpha
+                    a_bar = max(0.0, min(
+                        1.0, 0.5 - rr(u - cx, v - cy, hw, hh, BAR_R) / aa))
+                    if mono is None:
+                        a_bar *= alpha
                     if a_bar > best_a:
                         best_a, best_c = a_bar, color
                 if best_c is None:
@@ -6795,9 +6792,10 @@ def run_tray(url):
     try:
         mac = sys.platform == "darwin"
         if mac:
-            # a flat white bar glyph, like the other menu-bar icons
+            # supersample: render at 88 px, hand pystray a 44 px glyph
             img = Image.open(_io.BytesIO(_png(
-                _render(72, tile=False, mono=(1, 1, 1)), 72, 72)))
+                _render(88, tile=False, mono=(0, 0, 0)), 88, 88))).resize(
+                (44, 44), Image.LANCZOS)
         else:
             img = Image.open(_io.BytesIO(_png(_render(64), 64, 64)))
         icon = pystray.Icon("binduno", img, "Binduno")
@@ -6819,11 +6817,24 @@ def run_tray(url):
 
         def _setup(ic):
             ic.visible = True
-            if mac:                                            # let macOS tint it like a system icon
-                try:
-                    ic._icon.setTemplate_(True)
-                except Exception:                              # noqa: BLE001
-                    pass
+            if not mac:
+                return
+            # pystray downsizes the icon to the 22 pt bar height with no @2x
+            # copy, so on a Retina screen macOS upscales a 22 px bitmap and it
+            # looks fuzzy next to the system glyphs. Replace it with a 44 px
+            # image flagged as a 22 pt template — one crisp @2x representation.
+            try:
+                import AppKit
+                import Foundation
+                png = _png(_render(88, tile=False, mono=(0, 0, 0)), 88, 88)
+                data = Foundation.NSData.dataWithBytes_length_(png, len(png))
+                ns = AppKit.NSImage.alloc().initWithData_(data)
+                ns.setSize_((22, 22))
+                ns.setTemplate_(True)
+                ic._icon_image = ns                            # keep a ref
+                ic._status_item.button().setImage_(ns)
+            except Exception:                                  # noqa: BLE001
+                pass
 
         TRAY_ACTIVE = True
         icon.run(setup=_setup)                                 # blocks
