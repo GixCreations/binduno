@@ -16,7 +16,7 @@ import urllib.request
 from datetime import datetime, timedelta
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-VERSION = "5.65"
+VERSION = "5.66"
 SCHEMA = 15
 
 
@@ -2065,29 +2065,25 @@ class Handler(BaseHTTPRequestHandler):
             QUIT_TIMER.cancel()
             QUIT_TIMER = None
 
-    def do_GET(self):
+    def _dispatch(self, fn):
         self._keepalive()
         try:
-            self._get()
-        except Exception as e:                                # noqa: BLE001
-            import traceback
-            traceback.print_exc()
-            try:
-                self.send_json({"error": f"{type(e).__name__}: {e}"}, 500)
-            except Exception:                                 # noqa: BLE001
-                pass
-
-    def do_POST(self):
-        self._keepalive()
-        try:
-            self._post()
-        except Exception as e:                                # noqa: BLE001
+            fn()
+        except (ConnectionError, TimeoutError):
+            pass                                 # browser hung up mid-request — normal
+        except Exception as e:                   # noqa: BLE001
             import traceback
             traceback.print_exc()
             try:
                 self.send_json({"ok": False, "error": f"{type(e).__name__}: {e}"}, 500)
-            except Exception:                                 # noqa: BLE001
+            except Exception:                    # noqa: BLE001
                 pass
+
+    def do_GET(self):
+        self._dispatch(self._get)
+
+    def do_POST(self):
+        self._dispatch(self._post)
 
     def _get(self):
         p = self.path.split("?")[0]
