@@ -16,7 +16,7 @@ import urllib.request
 from datetime import datetime, timedelta
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-VERSION = "5.51"
+VERSION = "5.52"
 SCHEMA = 14
 # Repo the in-app "Update from GitHub" button pulls new versions from. Baked in
 # so testers don't have to type anything; still overridable in Settings or via
@@ -3176,7 +3176,7 @@ en:{
   "tip.cmExp":"Cardmarket sells this printing in a separate expansion, listed as version {v}.",
   "tip.cmVerTitle":"Cardmarket version",
   "tip.cmVer":"Cardmarket lists this printing as version {v} of this card in this set.",
-  "start.title":"Start here","start.dismiss":"Dismiss",
+  "start.title":"Start here","start.dismiss":"Dismiss","start.hide":"Don't show this again",
   "start.body":"Three things Binduno is for — pick one, or read how it thinks.",
   "start.a1":"See where my collection stands","start.a2":"Build a want list",
   "start.a3":"Mark cards while shopping on Cardmarket","start.a4":"How Binduno thinks",
@@ -3585,7 +3585,7 @@ de:{
   "tip.cmExp":"Cardmarket führt diesen Druck in einer eigenen Erweiterung, als Version {v}.",
   "tip.cmVerTitle":"Cardmarket-Version",
   "tip.cmVer":"Cardmarket führt diesen Druck als Version {v} dieser Karte in diesem Set.",
-  "start.title":"Hier starten","start.dismiss":"Ausblenden",
+  "start.title":"Hier starten","start.dismiss":"Ausblenden","start.hide":"Nicht mehr anzeigen",
   "start.body":"Drei Dinge, wofür Binduno da ist — such dir eins aus, oder lies, wie es denkt.",
   "start.a1":"Sehen, wo meine Sammlung steht","start.a2":"Eine Wantlist bauen",
   "start.a3":"Karten beim Kauf auf Cardmarket markieren","start.a4":"So denkt Binduno",
@@ -3713,7 +3713,9 @@ function home(){
       <button data-sc="cart">${t("start.a2")}</button>
       <button data-sc="cm">${t("start.a3")}</button>
       <button data-sc="explain">${t("start.a4")}</button>
-    </div></div>`}
+    </div>
+    <label class="chk" style="margin:14px 0 0;font-size:12.5px;color:var(--muted)">
+      <input type="checkbox" id="startNever"> ${t("start.hide")}</label></div>`}
   <div class="donuts">
     <div class="donut">${donut(nm,"#d4a629")}
       <div><div class="t">${t("home.cardNames")}</div><div class="p">${pct(nm)}</div>
@@ -3772,6 +3774,8 @@ function home(){
   if($("#updHide"))$("#updHide").onclick=()=>{dismissUpdate(upd.latest);const b=$("#updBanner");if(b)b.remove();};
   const seeStart=()=>{try{localStorage.setItem("bnd_start_seen","1");}catch(e){}};
   if($("#startX"))$("#startX").onclick=()=>{seeStart();const c=$("#startCard");if(c)c.remove();};
+  if($("#startNever"))$("#startNever").onchange=e=>{
+    if(e.target.checked){seeStart();const c=$("#startCard");if(c)c.remove();}};
   document.querySelectorAll("[data-sc]").forEach(b=>b.onclick=()=>{seeStart();
     const d=b.dataset.sc;
     if(d==="cm"){SUB="cm";go("manage");}
@@ -6264,15 +6268,26 @@ def build_windows_exe():
     except ImportError:
         sys.exit("PyInstaller is missing. Install it once, then re-run:\n"
                  "    py -m pip install --upgrade pyinstaller pystray pillow")
+    import subprocess
+    # The tray icon needs pystray + Pillow bundled into the .exe. Install them
+    # automatically (like --install-app does on macOS) so the user doesn't have
+    # to remember — non-fatal if it fails, the .exe just runs without an icon.
     have_tray = True
     try:
         import pystray, PIL  # noqa: F401
     except ImportError:
-        have_tray = False
-        print("Note: pystray / pillow not installed — the .exe will work but "
-              "without a tray icon. For the tray icon:\n"
+        print("Installing the tray-icon packages (pystray + pillow) ...")
+        rc = subprocess.call([sys.executable, "-m", "pip", "install", "--no-input",
+                              "--quiet", "pystray", "pillow"])
+        try:
+            import pystray, PIL  # noqa: F401
+            have_tray = rc == 0
+        except ImportError:
+            have_tray = False
+    if not have_tray:
+        print("Note: pystray / pillow unavailable — the .exe will work but with "
+              "no tray icon. Install them by hand and rebuild:\n"
               "    py -m pip install pystray pillow\n")
-    import subprocess
     here = os.path.dirname(os.path.abspath(__file__))
     ico = os.path.join(here, "Binduno.ico")
     build_ico(ico)
@@ -6283,7 +6298,10 @@ def build_windows_exe():
             "--workpath", os.path.join(here, "build"),
             "--specpath", here]
     if have_tray:
-        args += ["--hidden-import", "pystray._win32", "--hidden-import", "PIL._tkinter_finder"]
+        # --collect-all pulls pystray's backend submodules + Pillow's plugins
+        # reliably; the bare hidden-imports missed pystray._win32 in onefile.
+        args += ["--collect-all", "pystray", "--collect-all", "PIL",
+                 "--hidden-import", "pystray._win32"]
     if "--console" not in sys.argv:
         args.append("--noconsole")                    # plain double-click, no terminal window
     args.append(os.path.abspath(__file__))
