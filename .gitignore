@@ -1,3 +1,4 @@
+binduno_data/
 mtg_tracker_data/
 bulk.tmp
 __pycache__/
@@ -6,3 +7,5 @@ dist/
 build/
 Binduno.ico
 Binduno.spec
+.DS_Store
+CLAUDE.md

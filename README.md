@@ -8,7 +8,7 @@
 
 One Python file, standard library only. No account, no cloud, nothing to sign up for — your collection never leaves your computer.
 
-![version](https://img.shields.io/badge/version-5.52-d4a629)
+![version](https://img.shields.io/badge/version-5.53-d4a629)
 ![python](https://img.shields.io/badge/python-3.9%2B-4a90c4)
 ![status](https://img.shields.io/badge/status-early%20beta-e0692c)
 ![platform](https://img.shields.io/badge/platform-macOS%20%C2%B7%20Windows%20%C2%B7%20Linux-8d98a7)
@@ -89,7 +89,7 @@ Download **`Binduno.exe`** from the [latest release](../../releases/latest) and 
 You need **Python 3.9 or newer** — macOS and most Linux ship with it; on Windows install it from [python.org](https://www.python.org/downloads/) with *"Add python.exe to PATH"* ticked.
 
 ```bash
-python3 mtg_tracker.py
+python3 binduno.py
 ```
 
 It opens `http://127.0.0.1:8770` in your browser. Data is kept in your user folder between runs.
@@ -97,7 +97,7 @@ It opens `http://127.0.0.1:8770` in your browser. Data is kept in your user fold
 ### macOS — double‑clickable app
 
 ```bash
-python3 mtg_tracker.py --install-app
+python3 binduno.py --install-app
 ```
 
 Builds `~/Applications/Binduno.app` with its own bundled Python runtime — after that you never need the Terminal again. A menu‑bar icon (Open · Quit) shows while it runs.
@@ -114,7 +114,7 @@ Only needed to build from modified source or for another architecture. On a Wind
 
 ```bash
 py -m pip install --upgrade pyinstaller
-py mtg_tracker.py --build-exe
+py binduno.py --build-exe
 ```
 
 Produces `dist\Binduno.exe`.
@@ -123,13 +123,13 @@ Produces `dist\Binduno.exe`.
 
 ## Updating
 
-Open **Settings → Update & Help → Update App → "Update from GitHub"** and click **Check for updates**. Binduno downloads the newest `mtg_tracker.py` from this repository, checks it, backs up the old one and restarts itself. No re‑download, no reinstall.
+Open **Settings → Update & Help → Update App → "Update from GitHub"** and click **Check for updates**. Binduno downloads the newest `binduno.py` from this repository, checks it, backs up the old one and restarts itself. No re‑download, no reinstall.
 
 ---
 
 ## How it works
 
-- **One file.** `mtg_tracker.py`, Python 3.9+, standard library only. The web UI lives in the same file.
+- **One file.** `binduno.py`, Python 3.9+, standard library only. The web UI lives in the same file.
 - **Local storage.** A SQLite database in your user application‑data folder.
 - **Card data.** Scryfall's public bulk export (`default_cards`) plus set metadata. Prices are Cardmarket's EUR trend figures, via Scryfall.
 - **Nothing leaves your machine** except the card‑data download from Scryfall and, if you use the browser helper, the pages you already opened on Cardmarket.
