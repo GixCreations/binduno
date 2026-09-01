@@ -16,8 +16,8 @@ import urllib.request
 from datetime import datetime, timedelta
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-VERSION = "5.54"
-SCHEMA = 14
+VERSION = "5.55"
+SCHEMA = 15
 
 
 def _env(name, *legacy):
@@ -476,6 +476,19 @@ def find_bulk_url(entry):
     return (pref or hits or [None])[0]
 
 
+def _norm_name(n):
+    """Scryfall gives reversible cards (Inverted/Borderless shocklands, Art
+    Series, Secret Lair reversibles…) a doubled "X // X" name. Collapse those
+    to "X" so a printing groups with the plain card. Real double-faced cards
+    (front != back) are left untouched."""
+    n = (n or "").strip()
+    if " // " in n:
+        a, b = n.split(" // ", 1)
+        if a.strip() and a.strip() == b.strip():
+            return a.strip()
+    return n
+
+
 def refresh_cards():
     c = connect(); init(c)
     try:
@@ -663,7 +676,7 @@ def refresh_cards():
                               or k.get("oversized")
                               or (psize and ni > psize)) else 0
                 rows.append((code, cn, ni,
-                             k.get("name", ""), k.get("type_line") or "",
+                             _norm_name(k.get("name", "")), k.get("type_line") or "",
                              (k.get("rarity") or "r")[:1],
                              float(eur) if eur else None,
                              float(eurf) if eurf else None,
@@ -719,7 +732,8 @@ def refresh_cards():
                     cmvers[i] = extras[i]
                 else:
                     cmvers[i] = vers[i]
-        rows = [r + (vers[i], extras[i], suffixes[i], cmvers[i], de_names.get((r[0], r[1]), ""),
+        rows = [r + (vers[i], extras[i], suffixes[i], cmvers[i],
+                     _norm_name(de_names.get((r[0], r[1]), "")),
                      de_types.get((r[0], r[1]), ""), de_oracle.get((r[0], r[1]), ""))
                 for i, r in enumerate(rows)]
 
