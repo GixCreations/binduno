@@ -16,7 +16,7 @@ import urllib.request
 from datetime import datetime, timedelta
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-VERSION = "5.55"
+VERSION = "5.56"
 SCHEMA = 15
 
 
@@ -349,14 +349,14 @@ def _ver_tuple(s):
     return tuple(int(x) for x in re.findall(r"\d+", s or ""))
 
 
-def _http_text(url, timeout=30):
+def _http_text(url, timeout=15):
     req = urllib.request.Request(url, headers={"User-Agent": "Binduno",
                                                "Accept": "application/vnd.github.raw"})
     with urllib.request.urlopen(req, timeout=timeout) as r:
         return r.read().decode("utf-8", "replace")
 
 
-def _gh_json(path, timeout=20):
+def _gh_json(path, timeout=10):
     return json.loads(_http_text("https://api.github.com" + path, timeout))
 
 
@@ -365,23 +365,31 @@ def github_latest(repo):
     the raw file on the default branch. Returns dict with srcUrl/latest/…"""
     info = {"repo": repo, "current": VERSION}
     try:
-        rel = _gh_json(f"/repos/{repo}/releases/latest")
-        tag = rel.get("tag_name") or ""
-        src = next((a["browser_download_url"] for a in rel.get("assets", [])
-                    if a.get("name") == "binduno.py"), None) \
-            or f"https://raw.githubusercontent.com/{repo}/{tag}/binduno.py"
-        info.update(tag=tag, title=rel.get("name") or tag, srcUrl=src,
-                    notes=(rel.get("body") or "")[:4000],
-                    htmlUrl=rel.get("html_url"), latest=re.sub(r"^v", "", tag))
+        try:
+            rel = _gh_json(f"/repos/{repo}/releases/latest")
+            tag = rel.get("tag_name") or ""
+            src = next((a["browser_download_url"] for a in rel.get("assets", [])
+                        if a.get("name") == "binduno.py"), None) \
+                or f"https://raw.githubusercontent.com/{repo}/{tag}/binduno.py"
+            info.update(tag=tag, title=rel.get("name") or tag, srcUrl=src,
+                        notes=(rel.get("body") or "")[:4000],
+                        htmlUrl=rel.get("html_url"), latest=re.sub(r"^v", "", tag))
+        except urllib.error.HTTPError as e:
+            if e.code != 404:
+                raise
+            br = _gh_json(f"/repos/{repo}").get("default_branch") or "main"
+            src = f"https://raw.githubusercontent.com/{repo}/{br}/binduno.py"
+            mv = re.search(r'VERSION\s*=\s*"([^"]+)"', _http_text(src))
+            info.update(tag=br, title=f"{br} branch", srcUrl=src, notes="",
+                        htmlUrl=f"https://github.com/{repo}",
+                        latest=mv.group(1) if mv else "?")
     except urllib.error.HTTPError as e:
-        if e.code != 404:
-            raise
-        br = _gh_json(f"/repos/{repo}").get("default_branch") or "main"
-        src = f"https://raw.githubusercontent.com/{repo}/{br}/binduno.py"
-        mv = re.search(r'VERSION\s*=\s*"([^"]+)"', _http_text(src))
-        info.update(tag=br, title=f"{br} branch", srcUrl=src, notes="",
-                    htmlUrl=f"https://github.com/{repo}",
-                    latest=mv.group(1) if mv else "?")
+        raise RuntimeError("GitHub returned HTTP %s. %s" % (
+            e.code, "Rate limit — try again in a few minutes."
+            if e.code in (403, 429) else "Try again later."))
+    except (urllib.error.URLError, OSError) as e:
+        raise RuntimeError("Couldn't reach GitHub (%s). Check your internet "
+                           "connection and try again." % (getattr(e, "reason", e),))
     info["newer"] = _ver_tuple(info.get("latest")) > _ver_tuple(VERSION)
     return info
 
@@ -3234,6 +3242,7 @@ en:{
     "newest Release, or the file on the default branch if there are no Releases yet. "+
     "The repo is preset; only change it if you run your own fork.",
   "gh.save":"Save","gh.check":"Check for updates","gh.checking":"Checking GitHub…",
+  "gh.checkFailed":"Couldn't complete the check — the local app didn't answer in time (usually a slow or offline network). Try again, or use the file updater below.",
   "gh.upToDate":"You are on the newest version ({v}).",
   "gh.available":"Version {next} is available (you have {cur}). {name}",
   "gh.install":"Download and install {v}","gh.viewRelease":"Release notes on GitHub",
@@ -3643,6 +3652,7 @@ de:{
     "neueste Release, oder die Datei im Default-Branch, solange es keine Releases gibt. "+
     "Das Repo ist voreingestellt; nur ändern, wenn du einen eigenen Fork betreibst.",
   "gh.save":"Speichern","gh.check":"Nach Updates suchen","gh.checking":"Prüfe GitHub…",
+  "gh.checkFailed":"Prüfung nicht abgeschlossen — die lokale App hat nicht rechtzeitig geantwortet (meist langsames oder fehlendes Netz). Nochmal versuchen, oder unten den Datei-Updater nutzen.",
   "gh.upToDate":"Du hast die neueste Version ({v}).",
   "gh.available":"Version {next} ist verfügbar (du hast {cur}). {name}",
   "gh.install":"{v} herunterladen und installieren","gh.viewRelease":"Release-Notizen auf GitHub",
@@ -5497,7 +5507,10 @@ function appPane(sel){
     box.innerHTML=`<p class="sub">${t("gh.checking")}</p>`;
     let r;
     try{ r=await fetch("/api/github-latest").then(x=>x.json()); }
-    catch(e){ r={error:String(e)}; }
+    catch(e){
+      r={error:/load failed|fetch|network/i.test(String(e))
+        ? t("gh.checkFailed") : String(e)};
+    }
     if(r.error){ box.innerHTML=`<div class="msg err">${r.error}</div>`; return; }
     if(!r.newer){
       box.innerHTML=`<div class="msg ok">${t("gh.upToDate",{v:r.current})}</div>`;
