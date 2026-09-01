@@ -16,7 +16,7 @@ import urllib.request
 from datetime import datetime, timedelta
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-VERSION = "5.61"
+VERSION = "5.62"
 SCHEMA = 15
 
 
@@ -469,6 +469,7 @@ UPDATE = {"checked": False, "available": False, "latest": "", "current": VERSION
 QUIT_TIMER = None
 QUIT_GRACE = 2.5
 TRAY_ACTIVE = False        # set once a menu-bar / tray icon is up
+TRAY_ICON = None           # the pystray Icon, so an explicit Quit can remove it
 
 
 def fetch(url):
@@ -2304,10 +2305,28 @@ class Handler(BaseHTTPRequestHandler):
             except Exception as e:                            # noqa: BLE001
                 self.send_json({"ok": False, "error": str(e)}, 400)
         elif self.path == "/api/quit":
+            explicit = False
+            try:
+                explicit = bool(json.loads(raw or "{}").get("explicit"))
+            except Exception:                                # noqa: BLE001
+                pass
             self.send_json({"ok": True})
-            # With a menu-bar / tray icon running, closing the browser tab must
-            # NOT stop the app — you reopen it from the tray. Only the tray's
-            # own Quit item (or Ctrl+C) shuts it down then.
+            if explicit:
+                # The user pressed the Quit button and confirmed — really stop,
+                # and take the menu-bar / tray icon down with us.
+                def _die():
+                    if TRAY_ICON is not None:
+                        try:
+                            TRAY_ICON.stop()
+                        except Exception:                    # noqa: BLE001
+                            pass
+                    os._exit(0)
+                t = threading.Timer(0.25, _die)
+                t.daemon = True
+                t.start()
+                return
+            # An implicit quit — the beforeunload beacon on a tab close / reload.
+            # With a tray icon running, keep serving; you reopen from the tray.
             if TRAY_ACTIVE:
                 return
             global QUIT_TIMER
@@ -6061,7 +6080,7 @@ addEventListener("beforeunload",()=>{navigator.sendBeacon("/api/quit");});
 $("#brand").onclick=()=>go("home");
 $("#navQuit").onclick=async()=>{
   if(!confirm(t("nav.confirmQuit")))return;
-  try{await fetch("/api/quit",{method:"POST"});}catch(e){}
+  try{await fetch("/api/quit",{method:"POST",body:JSON.stringify({explicit:true})});}catch(e){}
   document.body.innerHTML='<div class="empty" style="padding-top:140px">'+
     `<h2>${t("nav.stopped")}</h2><p>${t("nav.stoppedDesc")}</p></div>`;
 };
@@ -7063,6 +7082,8 @@ def run_tray(url, autoopen=False):
         else:
             img = Image.open(_io.BytesIO(_png(_render(64), 64, 64)))
         icon = pystray.Icon("binduno", img, "Binduno")
+        global TRAY_ICON
+        TRAY_ICON = icon
 
         def _open(_i=None, _item=None):
             webbrowser.open(url)
