@@ -57,6 +57,10 @@ It runs a tiny local web server and opens in your browser. That's the whole app.
 - A userscript that marks every single offer on cardmarket.com by whether you already own the card — green (this exact printing), yellow (you own it in another set/version/finish), red (missing), with the copy count
 - Handy for topping up a seller's order with cheap missing cards at no extra shipping
 
+<p align="center"><img src="docs/cm-helper.jpg" width="880" alt="Cardmarket helper marking a seller's singles list"></p>
+
+*A seller's singles list on cardmarket.com with the helper running: every offer is tagged **in collection** (green — you already have this exact printing, with the copy count), **other set** (yellow — you own the card, just a different printing) or **missing** (red), and gets a matching colour bar down its left edge. Toggle it with the button in the bottom‑right.*
+
 **Price watchlist**
 - Up to 100 cards with a 7‑day Cardmarket price trend on the home page
 
