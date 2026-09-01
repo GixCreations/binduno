@@ -16,7 +16,7 @@ import urllib.request
 from datetime import datetime, timedelta
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-VERSION = "5.62"
+VERSION = "5.63"
 SCHEMA = 15
 
 
@@ -1482,9 +1482,11 @@ def counted_codes(c):
 # expansion name, right = the Scryfall/Binduno set name.
 CM_HELPER_LABELS = {
     "en": {"exact": "in collection", "otherFinish": "other finish",
-           "otherVersion": "other version", "otherSet": "other set", "missing": "missing"},
+           "otherVersion": "other version", "otherSet": "other set", "missing": "missing",
+           "on": "on", "off": "off"},
     "de": {"exact": "in Sammlung", "otherFinish": "anderes Finish",
-           "otherVersion": "andere Version", "otherSet": "anderes Set", "missing": "fehlt"},
+           "otherVersion": "andere Version", "otherSet": "anderes Set", "missing": "fehlt",
+           "on": "an", "off": "aus"},
 }
 
 
@@ -6620,7 +6622,7 @@ CM_USERSCRIPT = r'''// ==UserScript==
                 otherVersion:"rgba(227,179,65,.15)", otherSet:"rgba(227,179,65,.15)",
                 missing:"rgba(240,85,74,.13)" };
   var LABEL = { exact:"in collection", otherFinish:"other finish", otherVersion:"other version",
-                otherSet:"other set", missing:"missing" };   // replaced by the server's copy
+                otherSet:"other set", missing:"missing", on:"on", off:"off" };   // replaced by the server's copy (Binduno's UI language)
   var CACHE = {};                                             // articleId -> server result
   var enabled = true, started = false;
 
@@ -6737,7 +6739,7 @@ CM_USERSCRIPT = r'''// ==UserScript==
   btn.style.cssText = "position:fixed;right:14px;bottom:14px;z-index:99999;padding:7px 12px;"
     + "border-radius:8px;border:1px solid #b7791f;background:#1a1d24;color:#e8ebef;"
     + "font:600 12px/1.2 system-ui;cursor:pointer;box-shadow:0 4px 16px rgba(0,0,0,.4)";
-  function render(){ btn.textContent = "Binduno: " + (enabled ? "an" : "aus"); btn.style.opacity = enabled ? "1" : ".6"; }
+  function render(){ btn.textContent = "Binduno: " + (enabled ? LABEL.on : LABEL.off); btn.style.opacity = enabled ? "1" : ".6"; }
   function saveOn(v){
     try{ if(typeof GM_setValue !== "undefined"){ GM_setValue("on", v); return; } }catch(e){}
     try{ localStorage.setItem("bnd_on", v ? "1" : "0"); }catch(e){}
@@ -6761,8 +6763,9 @@ CM_USERSCRIPT = r'''// ==UserScript==
   render();
   get("/api/cm-helper-pref", function(r){
     if(r && typeof r.on === "boolean"){ enabled = r.on; render(); }
-    if(r && r.labels){                       // badges in Binduno's UI language
+    if(r && r.labels){                       // badges + toggle in Binduno's UI language
       LABEL = r.labels;
+      render();
       [].slice.call(document.querySelectorAll(".bnd-badge")).forEach(function(b){ b.remove(); });
     }
     start();
