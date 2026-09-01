@@ -16,7 +16,7 @@ import urllib.request
 from datetime import datetime, timedelta
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-VERSION = "5.63"
+VERSION = "5.64"
 SCHEMA = 15
 
 
@@ -36,7 +36,7 @@ def _env(name, *legacy):
 # Repo the in-app "Update from GitHub" button pulls new versions from. Baked in
 # so testers don't have to type anything; still overridable in Settings or via
 # BINDUNO_REPO (e.g. for a fork).
-GITHUB_REPO = "scorchyadvanced/binduno"
+GITHUB_REPO = "GixCreations/binduno"
 PORT = int(_env("PORT", "MTG_TRACKER_PORT") or 8770)
 
 
