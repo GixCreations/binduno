@@ -16,7 +16,7 @@ import urllib.request
 from datetime import datetime, timedelta
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-VERSION = "5.56"
+VERSION = "5.57"
 SCHEMA = 15
 
 
@@ -6667,6 +6667,7 @@ APP_PLIST = """<?xml version="1.0" encoding="UTF-8"?>
 <key>CFBundleIconFile</key><string>icon</string>
 <key>NSHighResolutionCapable</key><true/>
 <key>LSMinimumSystemVersion</key><string>11.0</string>
+<key>LSUIElement</key><true/>
 </dict></plist>
 """
 
@@ -6709,10 +6710,16 @@ fi
 echo "--- $(date) launching with bundled $PY" >> "$LOG"
 "$PY" "$SCRIPT" >> "$LOG" 2>&1
 STATUS=$?
-if [ $STATUS -ne 0 ]; then
-  TAIL=$(tail -n 6 "$LOG" | sed 's/"/\\"/g')
-  osascript -e "display alert \"Binduno stopped\" message \"Exit code $STATUS.\n\n$TAIL\n\nFull log: $LOG\" as critical"
-fi
+# 0 = clean exit (incl. the tray "Quit" menu). 130/137/143 = SIGINT/KILL/TERM,
+# i.e. deliberately stopped (Activity Monitor, logout, a kill) — not a crash.
+# Only a real unexpected failure gets a dialog.
+case $STATUS in
+  0|130|137|143) ;;
+  *)
+    TAIL=$(tail -n 6 "$LOG" | sed 's/"/\\"/g')
+    osascript -e "display alert \"Binduno stopped\" message \"Exit code $STATUS.\n\n$TAIL\n\nFull log: $LOG\" as critical"
+    ;;
+esac
 exit $STATUS
 '''
 
@@ -6879,13 +6886,15 @@ class _Server(ThreadingHTTPServer):
         self.server_port = self.server_address[1]
 
 
-def run_tray(url):
+def run_tray(url, autoopen=False):
     """Show a menu-bar / system-tray icon with Open / Quit. Optional: needs
     pystray + Pillow, which the packaged builds bundle. If they aren't
     importable (e.g. running the plain script), this returns False and the
     caller keeps the server on the main thread as before. On macOS the tray
     event loop MUST own the main thread, so the HTTP server is expected to be
-    running in a background thread by the time this is called."""
+    running in a background thread by the time this is called. When `autoopen`
+    is set the browser is opened from inside the setup callback, after the
+    menu-bar item exists."""
     global TRAY_ACTIVE
     try:
         import io as _io
@@ -6919,14 +6928,20 @@ def run_tray(url):
             pystray.MenuItem("Quit Binduno", _quit),
         )
 
+        def _open_browser():
+            if autoopen:
+                threading.Timer(0.6, lambda: webbrowser.open(url)).start()
+
         def _setup(ic):
             ic.visible = True
             if not mac:
+                _open_browser()
                 return
             # pystray downsizes the icon to the 22 pt bar height with no @2x
             # copy, so on a Retina screen macOS upscales a 22 px bitmap and it
             # looks fuzzy next to the system glyphs. Replace it with a 44 px
             # image flagged as a 22 pt template — one crisp @2x representation.
+            ns = None
             try:
                 import AppKit
                 import Foundation
@@ -6939,6 +6954,25 @@ def run_tray(url):
                 ic._status_item.button().setImage_(ns)
             except Exception:                                  # noqa: BLE001
                 pass
+
+            # First launch after an update/rebuild sometimes drops the status
+            # item (NSApp still settling / focus handed to the browser). Re-show
+            # it a moment later on the main run loop — a no-op when it's fine.
+            def _reassert(_t=None):
+                try:
+                    b = ic._status_item.button()
+                    if ns is not None:
+                        b.setImage_(ns)
+                    b.setHidden_(False)
+                    ic.visible = True
+                except Exception:                             # noqa: BLE001
+                    pass
+            try:
+                Foundation.NSTimer.scheduledTimerWithTimeInterval_repeats_block_(
+                    1.5, False, lambda _t: _reassert())
+            except Exception:                                 # noqa: BLE001
+                pass
+            _open_browser()
 
         TRAY_ACTIVE = True
         icon.run(setup=_setup)                                 # blocks
@@ -6984,8 +7018,7 @@ def main():
     url = f"http://127.0.0.1:{PORT}/"
     print(f"Binduno\n  data: {DB}\n  open: {url}\n  stop: Ctrl+C "
           f"or the Quit button in Manage Collection")
-    if not _env("NO_AUTOOPEN", "MTG_TRACKER_NO_AUTOOPEN"):
-        threading.Timer(0.8, lambda: webbrowser.open(url)).start()
+    autoopen = not _env("NO_AUTOOPEN", "MTG_TRACKER_NO_AUTOOPEN")
     threading.Thread(target=auto_sync_loop, daemon=True).start()
     threading.Thread(target=_startup_update_check, daemon=True).start()
     # Serve in a background thread so a menu-bar / tray icon can own the main
@@ -6993,7 +7026,12 @@ def main():
     # returns immediately and the server just keeps going on this thread.
     threading.Thread(target=srv.serve_forever, daemon=True).start()
     try:
-        if not run_tray(url):
+        # run_tray opens the browser itself once the menu-bar item is up, so
+        # the icon is claimed before the browser steals focus (that focus race
+        # left the icon missing on the first launch after an update/rebuild).
+        if not run_tray(url, autoopen):
+            if autoopen:
+                threading.Timer(0.8, lambda: webbrowser.open(url)).start()
             while True:
                 time.sleep(3600)
     except KeyboardInterrupt:
