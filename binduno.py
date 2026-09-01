@@ -16,7 +16,7 @@ import urllib.request
 from datetime import datetime, timedelta
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-VERSION = "5.64"
+VERSION = "5.65"
 SCHEMA = 15
 
 
@@ -6870,6 +6870,10 @@ PY="$HERE/Resources/python/bin/python3"
 LOG="$HOME/Library/Logs/Binduno.log"
 mkdir -p "$(dirname "$LOG")"
 
+# A previous run that wedged (menu-bar loop failed to start, etc.) stays
+# registered as "the app"; macOS then refuses to open it again. Clear it first.
+pkill -f "$SCRIPT" 2>/dev/null && sleep 1
+
 if [ ! -x "$PY" ]; then
   osascript -e 'display alert "Binduno" message "The bundled Python runtime is missing from the app. Re-run the installer (python3 binduno.py --install-app)." as critical'
   exit 1
@@ -7207,6 +7211,18 @@ def main():
         if not run_tray(url, autoopen):
             if autoopen:
                 threading.Timer(0.8, lambda: webbrowser.open(url)).start()
+            # The .app is a menu-bar agent (LSUIElement). A process that never
+            # pumps an event loop is flagged "not responding" by macOS and then
+            # blocks every relaunch. If the tray couldn't start, still run a
+            # bare NSApplication loop so the app stays launchable.
+            if sys.platform == "darwin":
+                try:
+                    import AppKit
+                    _app = AppKit.NSApplication.sharedApplication()
+                    _app.setActivationPolicy_(2)     # Prohibited (agent)
+                    _app.run()
+                except Exception:                    # noqa: BLE001
+                    pass
             while True:
                 time.sleep(3600)
     except KeyboardInterrupt:
