@@ -78,40 +78,46 @@ It runs a tiny local web server and opens in your browser. That's the whole app.
 
 ## Install
 
-Binduno is a single script — `mtg_tracker.py`.
+### Windows — download, no Python needed
 
-### Run it directly (any OS)
+Download **`Binduno.exe`** from the [latest release](../../releases/latest) and double‑click it. One self‑contained file — no Python, no setup. Your collection is stored in `%LOCALAPPDATA%\Binduno` and kept between runs.
 
-You need **Python 3.9 or newer** (macOS and most Linux ship with it; on Windows get it from [python.org](https://www.python.org/downloads/) and tick *"Add python.exe to PATH"*).
+> The .exe isn't code‑signed, so Windows SmartScreen shows a blue box on first run: click **More info → Run anyway**. Once only.
+
+### Run from source (any OS)
+
+You need **Python 3.9 or newer** — macOS and most Linux ship with it; on Windows install it from [python.org](https://www.python.org/downloads/) with *"Add python.exe to PATH"* ticked.
 
 ```bash
 python3 mtg_tracker.py
 ```
 
-It opens `http://127.0.0.1:8770` in your browser. Data is stored in your user folder and kept between runs.
+It opens `http://127.0.0.1:8770` in your browser. Data is kept in your user folder between runs.
 
-### macOS: make a double‑clickable app
+### macOS — double‑clickable app
 
 ```bash
 python3 mtg_tracker.py --install-app
 ```
 
-Creates `~/Applications/Binduno.app` with a bundled Python runtime — after that you never need the Terminal again.
+Builds `~/Applications/Binduno.app` with its own bundled Python runtime — after that you never need the Terminal again. A menu‑bar icon (Open · Quit) shows while it runs.
 
-> The app is **not code‑signed** yet, so the first launch shows *"unidentified developer"*. Right‑click the app → **Open** → **Open**, once. After that it starts normally.
+> The app isn't notarized by Apple, so macOS blocks the first launch (*"Apple could not verify… free of malware"*). To allow it, once:
+> - **macOS 15 Sequoia and newer:** open **System Settings → Privacy & Security**, scroll to the bottom, click **Open Anyway** next to the Binduno message, confirm with Touch ID or your password.
+> - **macOS 14 and earlier:** right‑click the app → **Open**, then **Open** in the dialog.
+>
+> It launches normally afterwards. Building the app on the same Mac usually skips the prompt entirely — it mainly shows up when the `.app` was copied from another machine.
 
-### Windows: build a standalone .exe
+### Windows — build the .exe yourself
 
-On a Windows machine with Python:
+Only needed to build from modified source or for another architecture. On a Windows machine with Python:
 
 ```bash
 py -m pip install --upgrade pyinstaller
 py mtg_tracker.py --build-exe
 ```
 
-Produces `dist\Binduno.exe` — a single file that needs no Python on the target machine.
-
-> Unsigned, so SmartScreen shows a warning on first run: **More info → Run anyway**.
+Produces `dist\Binduno.exe`.
 
 ---
 
