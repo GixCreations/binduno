@@ -16,7 +16,7 @@ import urllib.request
 from datetime import datetime, timedelta
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-VERSION = "5.60"
+VERSION = "5.61"
 SCHEMA = 15
 
 
@@ -223,6 +223,16 @@ def connect():
     c.row_factory = sqlite3.Row
     c.execute("PRAGMA journal_mode=WAL")
     c.execute("PRAGMA busy_timeout=30000")
+    # These matter a lot on Windows, where every plain read goes through the
+    # AV file-system filter: memory-mapped reads and a big page cache cut the
+    # per-page syscalls that made a cold "set totals" recompute take 10-15 s.
+    c.execute("PRAGMA synchronous=NORMAL")          # durable with WAL, far fewer fsyncs
+    c.execute("PRAGMA temp_store=MEMORY")           # sort / materialize in RAM, no temp file
+    c.execute("PRAGMA cache_size=-65536")           # 64 MB page cache
+    try:
+        c.execute("PRAGMA mmap_size=268435456")     # 256 MB memory-mapped I/O
+    except sqlite3.OperationalError:
+        pass
     return c
 
 
@@ -1943,17 +1953,80 @@ def export_collection(c):
 
 
 # --------------------------------------------------------------------- server
-CACHE = {"sets": None, "stamp": 0}
+CACHE = {"stamp": None, "sets": None, "home": None}
+SETS_CACHE_FILE = os.path.join(BASE, "sets_cache.pkl")
+
+
+def _sets_stamp(c):
+    """Everything the set/home aggregates depend on besides raw card and
+    collection rows. Cheap to compute (a handful of meta reads + the tiny
+    set_pref table); when it is unchanged the expensive recompute — and the
+    on-disk copy from the last run — can be reused."""
+    return (
+        meta_get(c, "collection_updated", ""),
+        meta_get(c, "cards_updated", ""),
+        datetime.now().strftime("%Y-%m-%d"),
+        SCHEMA,
+        json.dumps(goal_prefs(c), sort_keys=True),
+        json.dumps(endgame_prefs(c), sort_keys=True),
+        shipping_country(c), tracked_shipping_only(c),
+        tuple(sorted(
+            (r["code"], r["mode"] or "", r["sealed_note"] or "", r["sealed_price"] or 0)
+            for r in c.execute("SELECT code,mode,sealed_note,sealed_price FROM set_pref"))),
+    )
+
+
+def _cache_save():
+    try:
+        import pickle
+        tmp = SETS_CACHE_FILE + ".tmp"
+        with open(tmp, "wb") as f:
+            pickle.dump({k: CACHE[k] for k in ("stamp", "sets", "home")}, f,
+                        pickle.HIGHEST_PROTOCOL)
+        os.replace(tmp, SETS_CACHE_FILE)
+    except Exception:                               # noqa: BLE001
+        pass
+
+
+def _cache_load(stamp):
+    try:
+        import pickle
+        with open(SETS_CACHE_FILE, "rb") as f:
+            d = pickle.load(f)
+        return d if isinstance(d, dict) and d.get("stamp") == stamp else None
+    except Exception:                               # noqa: BLE001
+        return None
 
 
 def cached_sets(c):
-    if CACHE["sets"] is None:
-        CACHE["sets"] = set_rows(c)
+    stamp = _sets_stamp(c)
+    if CACHE["sets"] is not None and CACHE["stamp"] == stamp:
+        return CACHE["sets"]
+    disk = _cache_load(stamp)
+    if disk and disk.get("sets") is not None:
+        CACHE.update(stamp=stamp, sets=disk["sets"], home=disk.get("home"))
+        return CACHE["sets"]
+    CACHE.update(stamp=stamp, sets=set_rows(c), home=None)
+    _cache_save()
     return CACHE["sets"]
 
 
+def cached_home(c):
+    """home_stats() runs ~7 GROUP BY / DISTINCT queries over the whole cards
+    table — seconds on a slow (Windows + AV) box. Cache it on the same stamp as
+    the set list, in memory and on disk, so a launch with unchanged data is
+    instant."""
+    stamp = _sets_stamp(c)
+    if CACHE["home"] is not None and CACHE["stamp"] == stamp:
+        return CACHE["home"]
+    sets = cached_sets(c)                            # also brings CACHE["stamp"] to `stamp`
+    CACHE["home"] = home_stats(c, sets)
+    _cache_save()
+    return CACHE["home"]
+
+
 def bust():
-    CACHE["sets"] = None
+    CACHE.update(stamp=None, sets=None, home=None)
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -2031,7 +2104,6 @@ class Handler(BaseHTTPRequestHandler):
             self.end_headers()
             self.wfile.write(body)
         elif p == "/api/stats":
-            sets = cached_sets(c)
             has_cards = bool(c.execute("SELECT 1 FROM cards LIMIT 1").fetchone())
             has_collection = bool(c.execute("SELECT 1 FROM collection LIMIT 1").fetchone())
             onboarding_flag = meta_get(c, "onboarding_done")
@@ -2043,7 +2115,7 @@ class Handler(BaseHTTPRequestHandler):
             self.send_json({"version": VERSION,
                             "dbPath": DB,
                             "homeDir": os.path.expanduser("~"),
-                            "stats": home_stats(c, sets),
+                            "stats": cached_home(c),
                             "hasCards": has_cards,
                             "hasCollection": has_collection,
                             "trackedShipping": tracked_shipping_only(c),
@@ -2158,7 +2230,7 @@ class Handler(BaseHTTPRequestHandler):
                 res = import_collection(c, payload["csv"], payload.get("mode", "replace"),
                                         payload.get("format", "auto"))
                 bust()
-                cached_sets(c)      # rebuild now, on the connection that just committed
+                cached_home(c)     # rebuild sets + home now, on the connection that committed
                 self.send_json({"ok": True, **res})
             except Exception as e:                            # noqa: BLE001
                 self.send_json({"ok": False, "error": str(e)}, 400)
@@ -2410,7 +2482,7 @@ class Handler(BaseHTTPRequestHandler):
             log(c, "Collection", "Collection cleared")
             c.commit()
             bust()
-            cached_sets(c)      # rebuild now, on the connection that just committed
+            cached_home(c)     # rebuild sets + home now, on the connection that committed
             self.send_json({"ok": True})
         else:
             self.send_json({"error": "not found"}, 404)
