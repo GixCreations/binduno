@@ -16,7 +16,7 @@ import urllib.request
 from datetime import datetime, timedelta
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-VERSION = "5.58"
+VERSION = "5.59"
 SCHEMA = 15
 
 
@@ -6384,6 +6384,17 @@ def build_windows_exe():
               "no tray icon. Install them by hand and rebuild:\n"
               "    py -m pip install pystray pillow\n")
     here = os.path.dirname(os.path.abspath(__file__))
+    # PyInstaller deletes the old dist\Binduno.exe near the end of the build; if
+    # a previously built copy is still running it holds a lock and the whole
+    # build fails with "Access is denied" after minutes of work. Check up front.
+    old_exe = os.path.join(here, "dist", "Binduno.exe")
+    if os.path.exists(old_exe):
+        try:
+            os.remove(old_exe)
+        except PermissionError:
+            sys.exit("Can't overwrite the existing dist\\Binduno.exe — it is "
+                     "still running.\nQuit Binduno (tray icon -> Quit, or end "
+                     "'Binduno.exe' in Task Manager), then re-run this.")
     ico = os.path.join(here, "Binduno.ico")
     build_ico(ico)
     print(f"Icon written to {ico}")
