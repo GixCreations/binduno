@@ -16,7 +16,7 @@ import urllib.request
 from datetime import datetime, timedelta
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-VERSION = "5.53"
+VERSION = "5.54"
 SCHEMA = 14
 
 
@@ -362,16 +362,13 @@ def _gh_json(path, timeout=20):
 
 def github_latest(repo):
     """Newest binduno.py for `repo`: prefer the latest Release, fall back to
-    the raw file on the default branch. Returns dict with srcUrl/latest/…
-    `mtg_tracker.py` is still accepted as an asset/file name so installs from
-    before the rename keep updating."""
+    the raw file on the default branch. Returns dict with srcUrl/latest/…"""
     info = {"repo": repo, "current": VERSION}
     try:
         rel = _gh_json(f"/repos/{repo}/releases/latest")
         tag = rel.get("tag_name") or ""
-        assets = {a.get("name"): a["browser_download_url"]
-                  for a in rel.get("assets", [])}
-        src = assets.get("binduno.py") or assets.get("mtg_tracker.py") \
+        src = next((a["browser_download_url"] for a in rel.get("assets", [])
+                    if a.get("name") == "binduno.py"), None) \
             or f"https://raw.githubusercontent.com/{repo}/{tag}/binduno.py"
         info.update(tag=tag, title=rel.get("name") or tag, srcUrl=src,
                     notes=(rel.get("body") or "")[:4000],
@@ -6668,7 +6665,6 @@ RUNNER = r'''#!/bin/bash
 # no system python3 required.
 HERE="$(cd "$(dirname "$0")/.." && pwd)"
 SCRIPT="$HERE/Resources/binduno.py"
-[ -f "$SCRIPT" ] || SCRIPT="$HERE/Resources/mtg_tracker.py"   # bundles from before the rename
 PY="$HERE/Resources/python/bin/python3"
 LOG="$HOME/Library/Logs/Binduno.log"
 mkdir -p "$(dirname "$LOG")"
