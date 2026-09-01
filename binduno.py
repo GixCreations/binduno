@@ -16,7 +16,7 @@ import urllib.request
 from datetime import datetime, timedelta
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-VERSION = "5.57"
+VERSION = "5.58"
 SCHEMA = 15
 
 
@@ -1083,9 +1083,16 @@ def import_collection(c, text, mode, fmt="auto"):
             c.execute("""INSERT INTO collection VALUES(?,?,?,?,?,?)
                          ON CONFLICT(set_code,number,lang,foil)
                          DO UPDATE SET qty=qty+excluded.qty""", row)
-    c.commit()
     meta_set(c, "collection_updated", datetime.now().isoformat(timespec="seconds"))
     log(c, "Collection", f"{cards:,} cards imported ({label}, {mode} mode)")
+    c.commit()
+    # Push the write out of the WAL into the main db file so every other worker
+    # connection sees the new collection on its very next read — without this a
+    # freshly imported collection could read back empty until the next write.
+    try:
+        c.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+    except sqlite3.Error:
+        pass
     return {"rows": len(rows), "cards": cards, "mode": mode,
             "format": fmt, "formatLabel": label}
 
@@ -2150,6 +2157,7 @@ class Handler(BaseHTTPRequestHandler):
                 res = import_collection(c, payload["csv"], payload.get("mode", "replace"),
                                         payload.get("format", "auto"))
                 bust()
+                cached_sets(c)      # rebuild now, on the connection that just committed
                 self.send_json({"ok": True, **res})
             except Exception as e:                            # noqa: BLE001
                 self.send_json({"ok": False, "error": str(e)}, 400)
@@ -3720,6 +3728,7 @@ function updateDismissed(v){try{return localStorage.getItem("bnd_upd_dismiss")==
 function dismissUpdate(v){try{localStorage.setItem("bnd_upd_dismiss",v);}catch(e){}}
 let SHOW_COSTS=false;
 let RARMODE="names";   // "By rarity" on Home: card-name counts vs. every printing
+let FORCE_RELOAD=false;   // set after an import so the next route re-fetches
 let SETS=[],STATS=null,PAGE=1,PER=24,VIEW="grid",SORT="totalCost",DIR=1,
     Q="",FLABELS=null,FSTAT="started";
 
@@ -4121,7 +4130,7 @@ function wizardBind(step){
         ? `<div class="msg ok">${t("manageUpdate.importedMsg",{n:num(r.cards),
             mode:t("manageUpdate.modeReplace")})} · ${t("manageUpdate.detected",{fmt:r.formatLabel})}</div>`
         : `<div class="msg err">${r.error}</div>`;
-      if(r.ok){await load();setTimeout(()=>wizardGoto(WIZ_STEP+1),900);}
+      if(r.ok){FORCE_RELOAD=true;await load();setTimeout(()=>wizardGoto(WIZ_STEP+1),900);}
       else $("#imp").disabled=false;
     };
   }else if(step==="carddata"){
@@ -5361,7 +5370,7 @@ function updatePane(){
       ? `<div class="msg ok">${t("manageUpdate.importedMsg",{n:num(r.cards),
           mode:t(r.mode==="add"?"manageUpdate.modeAdd":"manageUpdate.modeReplace")})} · ${t("manageUpdate.detected",{fmt:r.formatLabel})}</div>`
       : `<div class="msg err">${r.error}</div>`;
-    if(r.ok){await load();}
+    if(r.ok){FORCE_RELOAD=true;await load();}
   };
   $("#ref").onclick=async()=>{
     await fetch("/api/refresh-cards",{method:"POST"});
@@ -5840,7 +5849,7 @@ async function doRoute(){
   const navP=p==="missing"?"collection":p;
   document.querySelectorAll(".tab").forEach(t=>t.classList.toggle("on",t.dataset.p===navP));
   try{
-    if(!SETS.length||!STATS)await load();
+    if(FORCE_RELOAD||!SETS.length||!STATS){FORCE_RELOAD=false;await load();}
     if($("#ver"))$("#ver").textContent="v"+(window.HAS.version||"");
     paintCartBadge();
     if(!ONBOARDING_DONE&&p!=="wizard"){
