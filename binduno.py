@@ -16,7 +16,7 @@ import urllib.request
 from datetime import datetime, timedelta
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-VERSION = "5.59"
+VERSION = "5.60"
 SCHEMA = 15
 
 
@@ -1086,11 +1086,12 @@ def import_collection(c, text, mode, fmt="auto"):
     meta_set(c, "collection_updated", datetime.now().isoformat(timespec="seconds"))
     log(c, "Collection", f"{cards:,} cards imported ({label}, {mode} mode)")
     c.commit()
-    # Push the write out of the WAL into the main db file so every other worker
-    # connection sees the new collection on its very next read — without this a
-    # freshly imported collection could read back empty until the next write.
+    # Nudge the WAL toward the main db so other worker connections see the new
+    # collection promptly. PASSIVE never blocks (TRUNCATE could wait on a
+    # reader for the full busy_timeout — that was the 10-20 s stall after an
+    # import).
     try:
-        c.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+        c.execute("PRAGMA wal_checkpoint(PASSIVE)")
     except sqlite3.Error:
         pass
     return {"rows": len(rows), "cards": cards, "mode": mode,
@@ -2405,9 +2406,11 @@ class Handler(BaseHTTPRequestHandler):
                     f'{set_code.upper()} #{number} -> {new_qty}x')
             self.send_json(card_detail(c, set_code, number))
         elif self.path == "/api/reset":
-            c.execute("DELETE FROM collection"); c.commit()
+            c.execute("DELETE FROM collection")
             log(c, "Collection", "Collection cleared")
+            c.commit()
             bust()
+            cached_sets(c)      # rebuild now, on the connection that just committed
             self.send_json({"ok": True})
         else:
             self.send_json({"error": "not found"}, 404)
@@ -2601,6 +2604,13 @@ textarea{width:100%;height:130px;background:var(--panel2);color:var(--text);bord
 .radio .d{display:block;color:var(--muted);font-size:12.5px;margin-top:2px}
 .prog{height:8px;background:#1d242e;border-radius:5px;overflow:hidden;margin:10px 0}
 .prog span{display:block;height:100%;background:var(--gold);transition:width .3s}
+#busy{position:fixed;inset:0;z-index:500;display:none;align-items:center;justify-content:center;
+  background:rgba(8,10,14,.72);backdrop-filter:blur(2px)}
+#busy .busybox{background:var(--panel,#12161d);border:1px solid var(--line,#232a34);
+  border-radius:12px;padding:22px 26px;width:min(420px,86vw);box-shadow:0 20px 60px rgba(0,0,0,.55)}
+#busy .busymsg{font-size:14px;margin-bottom:12px;color:var(--text)}
+#busy .prog{margin:0}
+#busy .prog span{transition:width .4s ease}
 .hist{font-family:var(--mono);font-size:12.5px}
 .hist .row{display:flex;gap:14px;padding:9px 0;border-bottom:1px solid #1c222b}
 .hist .ts{color:var(--gold);flex:0 0 200px}
@@ -3098,6 +3108,8 @@ en:{
   "manageUpdate.add":"Add",
   "manageUpdate.addDesc":"Keep what is stored and add these quantities on top.",
   "manageUpdate.importBtn":"Import collection","manageUpdate.importing":"Importing…",
+  "busy.importing":"Importing your collection…","busy.clearing":"Clearing your collection…",
+  "busy.recount":"Recalculating set totals — almost there…",
   "manageUpdate.importedMsg":"{n} cards imported with {mode} mode.",
   "manageUpdate.modeReplace":"replace","manageUpdate.modeAdd":"add",
   "manageUpdate.cardDataTitle":"Card data",
@@ -3506,6 +3518,8 @@ de:{
   "manageUpdate.add":"Hinzufügen",
   "manageUpdate.addDesc":"Gespeichertes behalten und diese Mengen obendrauf addieren.",
   "manageUpdate.importBtn":"Sammlung importieren","manageUpdate.importing":"Importiert…",
+  "busy.importing":"Sammlung wird importiert…","busy.clearing":"Sammlung wird gelöscht…",
+  "busy.recount":"Set-Summen werden neu berechnet — gleich fertig…",
   "manageUpdate.importedMsg":"{n} Karten importiert, Modus {mode}.",
   "manageUpdate.modeReplace":"Ersetzen","manageUpdate.modeAdd":"Hinzufügen",
   "manageUpdate.cardDataTitle":"Kartendaten",
@@ -3723,6 +3737,34 @@ function toast(msg){
     document.body.appendChild(b);}
   b.textContent=msg;b.style.opacity="1";
   clearTimeout(toast._t);toast._t=setTimeout(()=>{b.style.transition="opacity .5s";b.style.opacity="0";},4200);
+}
+// Full-screen blocking bar for import / clear. Covers the nav too, so clicks
+// during the (10-20 s) rebuild are visibly held, not silently dropped. Only
+// call busyDone() once load() has finished and the data is ready to render.
+function busyStart(msg){
+  let b=$("#busy");
+  if(!b){b=document.createElement("div");b.id="busy";
+    b.innerHTML=`<div class="busybox"><div class="busymsg"></div>
+      <div class="prog"><span style="width:6%"></span></div></div>`;
+    document.body.appendChild(b);}
+  b.querySelector(".busymsg").textContent=msg;
+  b.querySelector(".prog span").style.width="6%";
+  b.style.display="flex";
+  clearInterval(busyStart._t);
+  // creep the bar forward while we wait, so it never looks frozen; it caps at
+  // 90 % until busyDone() takes it to 100 %.
+  let p=6;
+  busyStart._t=setInterval(()=>{p=Math.min(90,p+Math.max(1,(90-p)*0.08));
+    const s=$("#busy .prog span");if(s)s.style.width=p+"%";},600);
+  return b;
+}
+function busyStep(msg){const m=$("#busy .busymsg");if(m&&msg)m.textContent=msg;}
+async function busyDone(){
+  clearInterval(busyStart._t);
+  const b=$("#busy");if(!b)return;
+  const s=b.querySelector(".prog span");if(s)s.style.width="100%";
+  await new Promise(r=>setTimeout(r,400));
+  b.style.display="none";
 }
 function updateDismissed(v){try{return localStorage.getItem("bnd_upd_dismiss")===v;}catch(e){return false;}}
 function dismissUpdate(v){try{localStorage.setItem("bnd_upd_dismiss",v);}catch(e){}}
@@ -4122,15 +4164,21 @@ function wizardBind(step){
     };
     $("#imp").onclick=async()=>{
       $("#imp").disabled=true;$("#imp").textContent=t("manageUpdate.importing");
-      const r=await fetch("/api/import",{method:"POST",
-        body:JSON.stringify({csv:WIZ_IMPORT_TEXT,mode:"replace",
-          format:($("#fmt")&&$("#fmt").value)||"auto"})}).then(r=>r.json());
+      busyStart(t("busy.importing"));
+      let r;
+      try{
+        r=await fetch("/api/import",{method:"POST",
+          body:JSON.stringify({csv:WIZ_IMPORT_TEXT,mode:"replace",
+            format:($("#fmt")&&$("#fmt").value)||"auto"})}).then(r=>r.json());
+        if(r.ok){busyStep(t("busy.recount"));FORCE_RELOAD=true;await load();}
+      }catch(e){ r={ok:false,error:String(e)}; }
+      await busyDone();
       $("#imp").textContent=t("manageUpdate.importBtn");
       $("#impMsg").innerHTML=r.ok
         ? `<div class="msg ok">${t("manageUpdate.importedMsg",{n:num(r.cards),
             mode:t("manageUpdate.modeReplace")})} · ${t("manageUpdate.detected",{fmt:r.formatLabel})}</div>`
         : `<div class="msg err">${r.error}</div>`;
-      if(r.ok){FORCE_RELOAD=true;await load();setTimeout(()=>wizardGoto(WIZ_STEP+1),900);}
+      if(r.ok){setTimeout(()=>wizardGoto(WIZ_STEP+1),700);}
       else $("#imp").disabled=false;
     };
   }else if(step==="carddata"){
@@ -5363,14 +5411,19 @@ function updatePane(){
   $("#imp").onclick=async()=>{
     const mode=document.querySelector("input[name=m]:checked").value;
     $("#imp").disabled=true;$("#imp").textContent=t("manageUpdate.importing");
-    const r=await fetch("/api/import",{method:"POST",
-      body:JSON.stringify({csv:text,mode,format:($("#fmt")&&$("#fmt").value)||"auto"})}).then(r=>r.json());
-    $("#imp").textContent=t("manageUpdate.importBtn");
+    busyStart(t("busy.importing"));
+    let r;
+    try{
+      r=await fetch("/api/import",{method:"POST",
+        body:JSON.stringify({csv:text,mode,format:($("#fmt")&&$("#fmt").value)||"auto"})}).then(r=>r.json());
+      if(r.ok){busyStep(t("busy.recount"));FORCE_RELOAD=true;await load();}
+    }catch(e){ r={ok:false,error:String(e)}; }
+    await busyDone();
+    $("#imp").disabled=false;$("#imp").textContent=t("manageUpdate.importBtn");
     $("#impMsg").innerHTML=r.ok
       ? `<div class="msg ok">${t("manageUpdate.importedMsg",{n:num(r.cards),
           mode:t(r.mode==="add"?"manageUpdate.modeAdd":"manageUpdate.modeReplace")})} · ${t("manageUpdate.detected",{fmt:r.formatLabel})}</div>`
       : `<div class="msg err">${r.error}</div>`;
-    if(r.ok){FORCE_RELOAD=true;await load();}
   };
   $("#ref").onclick=async()=>{
     await fetch("/api/refresh-cards",{method:"POST"});
@@ -5392,7 +5445,13 @@ function updatePane(){
   };
   $("#clr").onclick=async()=>{
     if(!confirm(t("manageUpdate.confirmClear")))return;
-    await fetch("/api/reset",{method:"POST"});await load();manage();
+    busyStart(t("busy.clearing"));
+    try{
+      await fetch("/api/reset",{method:"POST"});
+      busyStep(t("busy.recount"));FORCE_RELOAD=true;await load();
+    }catch(e){}
+    await busyDone();
+    manage();
   };
   async function poll(doneMsg){
     const s=await fetch("/api/refresh-status").then(r=>r.json());
