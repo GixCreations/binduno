@@ -16,7 +16,7 @@ import urllib.request
 from datetime import datetime, timedelta
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-VERSION = "5.69"
+VERSION = "5.70"
 SCHEMA = 15
 
 
@@ -6728,14 +6728,18 @@ CM_USERSCRIPT = r'''// ==UserScript==
   // the wantlist table instead — same idea, "did I already buy this?".
   function parseWantRow(row){
     var a = row.querySelector("td.name a");
+    if(!a) return null;
+    // A want with no specific printing chosen renders no .expansion-symbol
+    // at all - not "not rendered yet", just "any set is fine". Leave
+    // setTitle empty then; cm-match already falls back to a by-name-only
+    // ownership check when the set can't be resolved.
     var exp = row.querySelector(".expansion-symbol");
-    if(!a || !exp) return null;
     var tern = row.querySelectorAll("td.ternary-header");
     var foilTxt = tern[0] ? (tern[0].textContent || "").trim().toLowerCase() : "";
     return {
       name: (a.textContent || "").trim(),
       setSlug: "",
-      setTitle: ttl(exp),
+      setTitle: exp ? ttl(exp) : "",
       foil: foilTxt === "yes" || foilTxt === "ja"
     };
   }

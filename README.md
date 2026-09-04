@@ -8,7 +8,7 @@
 
 One Python file, standard library only. No account, no cloud, nothing to sign up for — your collection never leaves your computer.
 
-![version](https://img.shields.io/badge/version-5.69-d4a629)
+![version](https://img.shields.io/badge/version-5.70-d4a629)
 ![python](https://img.shields.io/badge/python-3.9%2B-4a90c4)
 ![status](https://img.shields.io/badge/status-early%20beta-e0692c)
 ![platform](https://img.shields.io/badge/platform-macOS%20%C2%B7%20Windows%20%C2%B7%20Linux-8d98a7)
