@@ -16,7 +16,7 @@ import urllib.request
 from datetime import datetime, timedelta
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-VERSION = "5.66"
+VERSION = "5.67"
 SCHEMA = 15
 
 
@@ -1043,6 +1043,49 @@ def _detect_format(fields):
     return None
 
 
+def _commit_collection_rows(c, raw_rows, mode, label):
+    """raw_rows: iterable of (set_code, number, name, qty, lang, foil) — the
+    shape every IMPORT_FORMATS parser (and the Cardmarket-purchase import)
+    returns. Aggregates duplicates and writes them into `collection`."""
+    agg, cards = {}, 0
+    for setc, num, name, qraw, lang, foil in raw_rows:
+        try:
+            q = int(float(qraw or 1))
+        except (ValueError, TypeError):
+            q = 1
+        if q <= 0:
+            continue
+        key = (setc.lower().strip(), num.strip(), _lang_code(lang), foil)
+        if key in agg:
+            agg[key][0] += q
+        else:
+            agg[key] = [q, name.strip()]
+        cards += q
+    rows = [(k[0], k[1], v[1], v[0], k[2], k[3]) for k, v in agg.items()]
+    if not rows:
+        return {"rows": 0, "cards": 0, "mode": mode}
+    if mode == "replace":
+        c.execute("DELETE FROM collection")
+        c.executemany("INSERT OR REPLACE INTO collection VALUES(?,?,?,?,?,?)", rows)
+    else:
+        for row in rows:
+            c.execute("""INSERT INTO collection VALUES(?,?,?,?,?,?)
+                         ON CONFLICT(set_code,number,lang,foil)
+                         DO UPDATE SET qty=qty+excluded.qty""", row)
+    meta_set(c, "collection_updated", datetime.now().isoformat(timespec="seconds"))
+    log(c, "Collection", f"{cards:,} cards imported ({label}, {mode} mode)")
+    c.commit()
+    # Nudge the WAL toward the main db so other worker connections see the new
+    # collection promptly. PASSIVE never blocks (TRUNCATE could wait on a
+    # reader for the full busy_timeout — that was the 10-20 s stall after an
+    # import).
+    try:
+        c.execute("PRAGMA wal_checkpoint(PASSIVE)")
+    except sqlite3.Error:
+        pass
+    return {"rows": len(rows), "cards": cards, "mode": mode}
+
+
 def import_collection(c, text, mode, fmt="auto"):
     text = (text or "").lstrip("\ufeff").lstrip()
     if text[:1] in ("{", "["):
@@ -1068,45 +1111,36 @@ def import_collection(c, text, mode, fmt="auto"):
         missing = ", ".join(sorted(need - set(fields)))
         raise ValueError(f"This does not look like a {label} export — missing "
                          f"column(s): {missing}")
-
-    agg, cards = {}, 0
-    for setc, num, name, qraw, lang, foil in parse(list(rdr)):
-        try:
-            q = int(float(qraw or 1))
-        except (ValueError, TypeError):
-            q = 1
-        if q <= 0:
-            continue
-        key = (setc.lower().strip(), num.strip(), _lang_code(lang), foil)
-        if key in agg:
-            agg[key][0] += q
-        else:
-            agg[key] = [q, name.strip()]
-        cards += q
-    rows = [(k[0], k[1], v[1], v[0], k[2], k[3]) for k, v in agg.items()]
-    if not rows:
+    result = _commit_collection_rows(c, parse(list(rdr)), mode, label)
+    if not result["rows"]:
         raise ValueError(f"The {label} file was read, but held no cards.")
-    if mode == "replace":
-        c.execute("DELETE FROM collection")
-        c.executemany("INSERT OR REPLACE INTO collection VALUES(?,?,?,?,?,?)", rows)
-    else:
-        for row in rows:
-            c.execute("""INSERT INTO collection VALUES(?,?,?,?,?,?)
-                         ON CONFLICT(set_code,number,lang,foil)
-                         DO UPDATE SET qty=qty+excluded.qty""", row)
-    meta_set(c, "collection_updated", datetime.now().isoformat(timespec="seconds"))
-    log(c, "Collection", f"{cards:,} cards imported ({label}, {mode} mode)")
-    c.commit()
-    # Nudge the WAL toward the main db so other worker connections see the new
-    # collection promptly. PASSIVE never blocks (TRUNCATE could wait on a
-    # reader for the full busy_timeout — that was the 10-20 s stall after an
-    # import).
-    try:
-        c.execute("PRAGMA wal_checkpoint(PASSIVE)")
-    except sqlite3.Error:
-        pass
-    return {"rows": len(rows), "cards": cards, "mode": mode,
-            "format": fmt, "formatLabel": label}
+    result["format"] = fmt
+    result["formatLabel"] = label
+    return result
+
+
+def import_cm_purchase(c, items, mode="add"):
+    """Add every article scraped from a Cardmarket purchase page straight into
+    the collection. items: [{name, setSlug, setTitle, number, qty, foil, lang}]
+    - the same shape the cm-helper userscript already builds for /api/cm-match.
+    Cards whose set can't be resolved (promos, unusual products) are skipped
+    and reported back so the user can add them by hand."""
+    rows, skipped = [], []
+    for it in items:
+        name = (it.get("name") or "").strip()
+        num = str(it.get("number") or "").strip()
+        code, _ = resolve_cm_set(c, it.get("setSlug", ""), it.get("setTitle", ""))
+        if not name or not num or not code:
+            if name:
+                skipped.append(name)
+            continue
+        rows.append((code, num, name, it.get("qty") or 1,
+                     it.get("lang") or "en", "foil" if it.get("foil") else "normal"))
+    result = _commit_collection_rows(c, rows, mode, "Cardmarket purchase")
+    result["matched"] = len(rows)
+    result["skipped"] = len(skipped)
+    result["skippedNames"] = skipped[:20]
+    return result
 
 
 # --------------------------------------------------------------- computation
@@ -1483,10 +1517,16 @@ def counted_codes(c):
 CM_HELPER_LABELS = {
     "en": {"exact": "in collection", "otherFinish": "other finish",
            "otherVersion": "other version", "otherSet": "other set", "missing": "missing",
-           "on": "on", "off": "off"},
+           "on": "on", "off": "off",
+           "addPurchase": "Add this purchase to Binduno", "adding": "Adding…",
+           "addFailed": "Failed — is Binduno running?", "added": "Added",
+           "notMatched": "not matched"},
     "de": {"exact": "in Sammlung", "otherFinish": "anderes Finish",
            "otherVersion": "andere Version", "otherSet": "anderes Set", "missing": "fehlt",
-           "on": "an", "off": "aus"},
+           "on": "an", "off": "aus",
+           "addPurchase": "Kauf zu Binduno hinzufügen", "adding": "Wird hinzugefügt…",
+           "addFailed": "Fehlgeschlagen — läuft Binduno?", "added": "Hinzugefügt",
+           "notMatched": "nicht erkannt"},
 }
 
 
@@ -2223,6 +2263,15 @@ class Handler(BaseHTTPRequestHandler):
             d = json.loads(raw)
             meta_set(c, "cm_helper_on", "1" if d.get("on") else "0")
             self.send_json({"ok": True, "on": meta_get(c, "cm_helper_on", "1") == "1"}, cors=True)
+        elif self.path == "/api/cm-purchase-import":
+            try:
+                payload = json.loads(raw)
+                res = import_cm_purchase(c, payload.get("items", []), payload.get("mode", "add"))
+                bust()
+                cached_home(c)     # rebuild sets + home now, on the connection that committed
+                self.send_json({"ok": True, **res}, cors=True)
+            except Exception as e:                            # noqa: BLE001
+                self.send_json({"ok": False, "error": str(e)}, 400, cors=True)
         elif self.path == "/api/import":
             try:
                 payload = json.loads(raw)
@@ -2942,7 +2991,8 @@ tr.child2 td:first-child::before{left:36px}
 or approved by Wizards of the Coast. Magic: The Gathering, all card names, images and
 related assets are trademarks and/or copyrights of Wizards of the Coast LLC and Hasbro,
 Inc. All prices are sourced from Scryfall and Cardmarket and shown for personal,
-non-commercial reference only.</footer>
+non-commercial reference only.
+<div style="margin-top:8px">Made with &#10084;&#65039; in Odenwald</div></footer>
 <div id="tipbox" role="tooltip"></div>
 <div id="cardpop"><img alt=""></div>
 
@@ -6618,7 +6668,10 @@ CM_USERSCRIPT = r'''// ==UserScript==
                 otherVersion:"rgba(227,179,65,.15)", otherSet:"rgba(227,179,65,.15)",
                 missing:"rgba(240,85,74,.13)" };
   var LABEL = { exact:"in collection", otherFinish:"other finish", otherVersion:"other version",
-                otherSet:"other set", missing:"missing", on:"on", off:"off" };   // replaced by the server's copy (Binduno's UI language)
+                otherSet:"other set", missing:"missing", on:"on", off:"off",
+                addPurchase:"Add this purchase to Binduno", adding:"Adding…",
+                addFailed:"Failed - is Binduno running?", added:"Added",
+                notMatched:"not matched" };   // replaced by the server's copy (Binduno's UI language)
   var CACHE = {};                                             // articleId -> server result
   var enabled = true, started = false;
 
@@ -6662,8 +6715,28 @@ CM_USERSCRIPT = r'''// ==UserScript==
     };
   }
   function rowId(row){ var m = /stockRow(\d+)/.exec(row.id || ""); return m ? m[1] : ""; }
-  function paint(row, res){
+  // Wantlist pages ("Wants" list detail): no offer-scraper markup, so read
+  // the wantlist table instead — same idea, "did I already buy this?".
+  function parseWantRow(row){
+    var a = row.querySelector("td.name a");
+    var exp = row.querySelector(".expansion-symbol");
+    if(!a || !exp) return null;
+    var tern = row.querySelectorAll("td.ternary-header");
+    var foilTxt = tern[0] ? (tern[0].textContent || "").trim().toLowerCase() : "";
+    return {
+      name: (a.textContent || "").trim(),
+      setSlug: "",
+      setTitle: ttl(exp),
+      foil: foilTxt === "yes" || foilTxt === "ja"
+    };
+  }
+  function wantRowId(row){
+    var i = row.querySelector('input[name="checkWantsRow[]"]');
+    return i ? (i.getAttribute("data-id-want") || "") : "";
+  }
+  function paint(row, res, host, hideMissing){
     var status = res.status, c = COLOR[status];
+    if(hideMissing && status === "missing") c = null;
     var b = row.querySelector(".bnd-badge");
     if(b) b.remove();
     if(!c){ row.style.boxShadow=""; row.style.background=""; return; }
@@ -6677,8 +6750,8 @@ CM_USERSCRIPT = r'''// ==UserScript==
     b.style.cssText = "display:inline-block;margin-left:8px;padding:1px 7px;border-radius:4px;"
       + "font:700 11px/1.5 system-ui;vertical-align:middle;background:" + c
       + ";color:" + (status === "missing" || status === "exact" ? "#fff" : "#241c00");
-    var host = row.querySelector(".col-seller");
-    if(host) host.appendChild(b);
+    var h = host || row.querySelector(".col-seller");
+    if(h) h.appendChild(b);
   }
   function clearRow(row){
     row.style.boxShadow=""; row.style.background="";
@@ -6695,19 +6768,30 @@ CM_USERSCRIPT = r'''// ==UserScript==
   if(DBG) console.log("[Binduno] debug logging is ON");
   function ensure(){
     if(!enabled) return;
-    var all = [].slice.call(document.querySelectorAll(".article-row"));
+    var offers = [].slice.call(document.querySelectorAll(".article-row")).map(function(row){
+      return { row:row, id:"o"+rowId(row), parse:parseRow, host:null, hideMissing:false };
+    });
+    var wants = [].slice.call(document.querySelectorAll('input[name="checkWantsRow[]"]'))
+      .map(function(inp){ return inp.closest("tr"); }).filter(Boolean).map(function(row){
+        return { row:row, id:"w"+wantRowId(row), parse:parseWantRow,
+                 host:row.querySelector("td.name"), hideMissing:true };
+      });
+    var all = offers.concat(wants);
     var need=[], map=[], noId=0, notReady=[], cached=0;
-    all.forEach(function(row){
-      var id = rowId(row); if(!id){ noId++; return; }
+    all.forEach(function(e){
+      var row = e.row, id = e.id;
+      if(id === "o" || id === "w"){ noId++; return; }
       var hit = CACHE[id];
       if(hit){
         cached++;
-        if(COLOR[hit.status] && !row.querySelector(".bnd-badge")) paint(row, hit);
+        if((COLOR[hit.status] && !(e.hideMissing && hit.status === "missing"))
+           && !row.querySelector(".bnd-badge")) paint(row, hit, e.host, e.hideMissing);
         return;
       }
-      var p = parseRow(row);
+      var p = e.parse(row);
       if(!p){ notReady.push(id); return; }       // not rendered yet — retry next pass
-      p.id = id; p.i = need.length; need.push(p); map.push({id:id, row:row});
+      p.id = id; p.i = need.length; need.push(p);
+      map.push({id:id, row:row, host:e.host, hideMissing:e.hideMissing});
     });
     if(!need.length) return;
     if(DBG) console.log("[Binduno] ensure: rows="+all.length+" noId="+noId+" cached="+cached
@@ -6719,7 +6803,7 @@ CM_USERSCRIPT = r'''// ==UserScript==
       res.results.forEach(function(x){
         var m = map[x.i];
         if(!m){ if(DBG) console.warn("[Binduno] no row for i="+x.i, x); return; }
-        CACHE[m.id] = x; paint(m.row, x);
+        CACHE[m.id] = x; paint(m.row, x, m.host, m.hideMissing);
       });
     });
   }
@@ -6729,6 +6813,58 @@ CM_USERSCRIPT = r'''// ==UserScript==
     mo.observe(document.body, {childList:true, subtree:true});
     ensure();
     setInterval(ensure, 2000);
+    initPurchaseImport();
+    setInterval(initPurchaseImport, 2000);
+  }
+
+  // Purchase pages ("My Purchases" order detail): every article row carries
+  // its data straight in data-* attributes, no scraping needed — name,
+  // collector number and quantity are exact, only the set still needs the
+  // usual slug/title resolution. One button adds the whole order at once.
+  var CM_LANG = {1:"en",2:"fr",3:"de",4:"es",5:"it",6:"zh",7:"ja",8:"pt",9:"ru",10:"ko",11:"zh"};
+  function purchaseRows(){
+    return [].slice.call(document.querySelectorAll("tr[data-article-id][data-expansion-name]"));
+  }
+  function parsePurchaseRow(row){
+    var expLink = row.querySelector('a[href*="/Magic/Expansions/"]');
+    var setSlug = "", setTitle = row.getAttribute("data-expansion-name") || "";
+    if(expLink){
+      setSlug = (expLink.getAttribute("href") || "").split("/Magic/Expansions/")[1] || "";
+      setSlug = setSlug.split(/[?#]/)[0];
+      setTitle = ttl(expLink) || setTitle;
+    }
+    var foil = false, ic = row.querySelectorAll(".col-extras [title], .col-extras [data-bs-original-title]");
+    for(var i=0;i<ic.length;i++){ var x = ttl(ic[i]); if(x === "Foil" || x === "Folie") foil = true; }
+    return {
+      name: row.getAttribute("data-name") || "",
+      number: row.getAttribute("data-number") || "",
+      qty: parseInt(row.getAttribute("data-amount"), 10) || 1,
+      setSlug: setSlug, setTitle: setTitle, foil: foil,
+      lang: CM_LANG[row.getAttribute("data-language")] || "en"
+    };
+  }
+  function initPurchaseImport(){
+    if(document.getElementById("bnd-imp-btn") || !purchaseRows().length) return;
+    var b = document.createElement("button");
+    b.id = "bnd-imp-btn";
+    b.style.cssText = "position:fixed;left:14px;bottom:14px;z-index:99999;padding:7px 12px;"
+      + "border-radius:8px;border:1px solid #3fb950;background:#1a1d24;color:#e8ebef;"
+      + "font:600 12px/1.2 system-ui;cursor:pointer;box-shadow:0 4px 16px rgba(0,0,0,.4)";
+    var reset = function(){ b.textContent = LABEL.addPurchase; };
+    reset();
+    b.onclick = function(){
+      var items = purchaseRows().map(parsePurchaseRow);
+      b.disabled = true; b.textContent = LABEL.adding;
+      post("/api/cm-purchase-import", {items:items, mode:"add"}, function(res){
+        b.disabled = false;
+        if(!res || !res.ok){ b.textContent = LABEL.addFailed; setTimeout(reset, 4000); return; }
+        b.textContent = LABEL.added + " " + res.cards
+          + (res.skipped ? " (" + res.skipped + " " + LABEL.notMatched + ")" : "");
+        if(res.skipped && DBG) console.log("[Binduno] purchase-import: not matched", res.skippedNames);
+        setTimeout(reset, 6000);
+      });
+    };
+    document.body.appendChild(b);
   }
 
   var btn = document.createElement("button");
@@ -6750,7 +6886,11 @@ CM_USERSCRIPT = r'''// ==UserScript==
     saveOn(enabled);
     post("/api/cm-helper-pref", {on:enabled}, function(){});
     if(enabled) ensure();
-    else [].slice.call(document.querySelectorAll(".article-row")).forEach(clearRow);
+    else{
+      [].slice.call(document.querySelectorAll(".article-row")).forEach(clearRow);
+      [].slice.call(document.querySelectorAll('input[name="checkWantsRow[]"]'))
+        .forEach(function(inp){ var r = inp.closest("tr"); if(r) clearRow(r); });
+    }
   };
   document.body.appendChild(btn);
   console.log("[Binduno] toggle button added");
@@ -7036,7 +7176,7 @@ def _price_gap_check():
 
 
 def auto_sync_loop():
-    time.sleep(15)                 # let the server finish starting up first
+    time.sleep(5)                  # let the server finish starting up first
     while True:
         try:
             _auto_sync_check()
