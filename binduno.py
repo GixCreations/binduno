@@ -16,7 +16,7 @@ import urllib.request
 from datetime import datetime, timedelta
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-VERSION = "5.68"
+VERSION = "5.69"
 SCHEMA = 15
 
 
@@ -1511,6 +1511,15 @@ def counted_codes(c):
     return [x["code"] for x in cached_sets(c) if x["counted"]]
 
 
+def owned_set_codes(c):
+    """Every non-digital set code, regardless of set-completion goal prefs.
+    "Do I already own this card" (the Cardmarket helper) has to look
+    everywhere you could have a physical copy — a Commander precon or
+    Secret Lair card is just as owned as one from a counted expansion,
+    even though it doesn't count toward set-completion totals."""
+    return [r["code"] for r in c.execute("SELECT code FROM sets WHERE digital=0")]
+
+
 # --------------------------------------------------- Cardmarket browser helper
 # The user's own set names Cardmarket brands differently. Left = Cardmarket
 # expansion name, right = the Scryfall/Binduno set name.
@@ -1645,9 +1654,9 @@ def resolve_cm_set(c, slug, title):
     return None, is_extras
 
 
-def _owns_name(c, counted, marks, name):
-    """Total copies of a card name across counted sets, front-face-tolerant."""
-    if not counted:
+def _owns_name(c, codes, marks, name):
+    """Total copies of a card name across the given sets, front-face-tolerant."""
+    if not codes:
         return 0
     front = name.split(" // ")[0]
     return c.execute(
@@ -1656,14 +1665,14 @@ def _owns_name(c, counted, marks, name):
             WHERE k.digital=0 AND k.set_code IN ({marks})
               AND (k.name=? COLLATE NOCASE OR k.name_de=? COLLATE NOCASE
                    OR k.name LIKE ? COLLATE NOCASE)""",
-        counted + [name, name, front + " // %"]).fetchone()["q"]
+        codes + [name, name, front + " // %"]).fetchone()["q"]
 
 
 def cm_match(c, items):
     """For each Cardmarket offer row decide whether it is already owned.
     status: exact | otherFinish | otherVersion | otherSet | missing
           | unknownSet | unknownCard"""
-    counted = counted_codes(c)
+    counted = owned_set_codes(c)
     marks = ",".join("?" * len(counted)) or "''"
     out = []
     for it in items:
@@ -6847,9 +6856,17 @@ CM_USERSCRIPT = r'''// ==UserScript==
     if(document.getElementById("bnd-imp-btn") || !purchaseRows().length) return;
     var b = document.createElement("button");
     b.id = "bnd-imp-btn";
-    b.style.cssText = "position:fixed;left:14px;bottom:14px;z-index:99999;padding:7px 12px;"
-      + "border-radius:8px;border:1px solid #3fb950;background:#1a1d24;color:#e8ebef;"
-      + "font:600 12px/1.2 system-ui;cursor:pointer;box-shadow:0 4px 16px rgba(0,0,0,.4)";
+    // Anchor next to the seller name at the top of the page (justify-content:
+    // between pushes it to the far right of that row, above the status
+    // timeline). Falls back to a floating button if Cardmarket's layout
+    // doesn't have that container.
+    var anchor = document.getElementById("SellerBuyerInfo");
+    b.style.cssText = anchor
+      ? "padding:5px 10px;border-radius:6px;border:1px solid #3fb950;background:#1a1d24;"
+        + "color:#e8ebef;font:600 12px/1.2 system-ui;cursor:pointer;white-space:nowrap;margin-left:8px"
+      : "position:fixed;left:14px;bottom:14px;z-index:99999;padding:7px 12px;"
+        + "border-radius:8px;border:1px solid #3fb950;background:#1a1d24;color:#e8ebef;"
+        + "font:600 12px/1.2 system-ui;cursor:pointer;box-shadow:0 4px 16px rgba(0,0,0,.4)";
     var reset = function(){ b.textContent = LABEL.addPurchase; };
     reset();
     b.onclick = function(){
@@ -6864,7 +6881,7 @@ CM_USERSCRIPT = r'''// ==UserScript==
         setTimeout(reset, 6000);
       });
     };
-    document.body.appendChild(b);
+    (anchor || document.body).appendChild(b);
   }
 
   var btn = document.createElement("button");
