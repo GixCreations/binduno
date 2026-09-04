@@ -16,7 +16,7 @@ import urllib.request
 from datetime import datetime, timedelta
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-VERSION = "5.67"
+VERSION = "5.68"
 SCHEMA = 15
 
 
@@ -3393,7 +3393,8 @@ en:{
   "costs.title":"Cost estimates",
   "costs.desc":"Off by default: the running total of what a full collection would still "+
     "cost can be discouraging when you are just starting out. Turn it on to show the "+
-    "\"remaining cost\", \"to finish\" and shipping figures on the Home and Collection pages.",
+    "\"remaining cost\" and \"cheapest to finish\" cards on the Home page. Prices on the "+
+    "Collection and Missing pages (and the \"cost to finish\" sort) are shown either way.",
   "costs.enable":"Show what is left to buy in euros",
   "setCard.nMissing":"{n} missing",
   "gh.title":"Update from GitHub",
@@ -3429,7 +3430,7 @@ en:{
   "explain.h2":"You decide what counts",
   "explain.b2":"By default a set is complete when you own one plain printing of each card name. Under Settings → Completion you can instead require every collector number, and choose whether Showcase / borderless / serialized printings count. Promos, tokens and Un-sets are left out.",
   "explain.h3":"Prices are Cardmarket trend",
-  "explain.b3":"Values and “cost to finish” use Cardmarket's trend price via Scryfall — not the cheapest current offer, and with no German-seller premium. Real cost is usually a bit lower. The euro figures are off by default (Settings → Completion).",
+  "explain.b3":"Values and “cost to finish” use Cardmarket's trend price via Scryfall — not the cheapest current offer, and with no German-seller premium. Real cost is usually a bit lower. The Home page's totals are off by default (Settings → Completion); euro figures elsewhere are always shown.",
   "explain.h4":"Want lists are built to Cardmarket's rules",
   "explain.b4":"The Wantlist-Cart is the only place want-list text is made. It uses Cardmarket's exact names and bracket order, quantity prefixes, and splits into 150-entry blocks you paste one after another.",
   "explain.h5":"Everything stays on your computer",
@@ -3804,8 +3805,9 @@ de:{
   "cm.testBtn":"Status aktualisieren",
   "costs.title":"Kostenschätzungen",
   "costs.desc":"Standardmäßig aus: Die laufende Summe, was eine vollständige Sammlung noch "+
-    "kosten würde, kann am Anfang abschreckend wirken. Einschalten, um „Restkosten“, "+
-    "„Restkosten pro Set“ und Versandbeträge auf der Start- und Sammlungsseite zu zeigen.",
+    "kosten würde, kann am Anfang abschreckend wirken. Einschalten, um „Restkosten“ und "+
+    "„Günstigste Fertigstellung“ auf der Startseite zu zeigen. Preise auf der Sammlungs- "+
+    "und Fehlende-Karten-Seite (und die Sortierung „Restkosten“) sind so oder so sichtbar.",
   "costs.enable":"Anzeigen, was noch zu kaufen ist (in Euro)",
   "setCard.nMissing":"{n} fehlen",
   "gh.title":"Update von GitHub",
@@ -3841,7 +3843,7 @@ de:{
   "explain.h2":"Du legst fest, was zählt",
   "explain.b2":"Standardmäßig ist ein Set vollständig, wenn du von jedem Kartennamen einen normalen Druck hast. Unter Einstellungen → Vervollständigung kannst du stattdessen jede Sammlernummer verlangen und wählen, ob Showcase / Borderless / serialisierte Drucke mitzählen. Promos, Token und Un-Sets bleiben außen vor.",
   "explain.h3":"Preise sind Cardmarket-Trend",
-  "explain.b3":"Werte und „Restkosten“ nutzen Cardmarkets Trendpreis über Scryfall — nicht das günstigste aktuelle Angebot, und ohne Aufschlag für deutsche Verkäufer. Real zahlst du meist etwas weniger. Die Euro-Zahlen sind standardmäßig aus (Einstellungen → Vervollständigung).",
+  "explain.b3":"Werte und „Restkosten“ nutzen Cardmarkets Trendpreis über Scryfall — nicht das günstigste aktuelle Angebot, und ohne Aufschlag für deutsche Verkäufer. Real zahlst du meist etwas weniger. Die Summen auf der Startseite sind standardmäßig aus (Einstellungen → Vervollständigung), Euro-Zahlen anderswo sind immer sichtbar.",
   "explain.h4":"Wantlisten folgen Cardmarkets Regeln",
   "explain.b4":"Der Wantlist-Cart ist der einzige Ort, an dem Wantlist-Text entsteht. Er nutzt Cardmarkets exakte Namen und Klammerreihenfolge, Mengen-Präfixe und teilt in 150er-Blöcke, die du nacheinander einfügst.",
   "explain.h5":"Alles bleibt auf deinem Rechner",
@@ -3939,7 +3941,6 @@ async function load(){
   SHIP_COUNTRY=r.shippingCountry||"DE"; SHIP_RATES=r.shipRates||{};
   AUTO_SYNC=r.autoSync!==false; PRICE_LOGGING=r.priceLogging!==false;
   SHOW_COSTS=!!r.showCosts;
-  if(!SHOW_COSTS && SORT==="totalCost") SORT="pct";
   ONBOARDING_DONE=!!r.onboardingDone;
   SETS=await getJSON("/api/sets");
   await cartLoad();   // so the nav badge shows a pending cart right after a restart
@@ -4364,7 +4365,7 @@ function collection(){
       <option value="counted">${t("collection.countedInTotals")}</option><option value="excluded">${t("collection.excludedFromTotals")}</option></select>
     <select id="sort">
       <option value="released">${t("collection.sortReleased")}</option><option value="name">${t("collection.sortName")}</option>
-      <option value="pct">${t("collection.sortCompletion")}</option>${SHOW_COSTS?`<option value="totalCost">${t("collection.sortCostToFinish")}</option>`:""}
+      <option value="pct">${t("collection.sortCompletion")}</option><option value="totalCost">${t("collection.sortCostToFinish")}</option>
       <option value="total">${t("collection.sortSetSize")}</option><option value="ownedValue">${t("collection.sortOwnedValue")}</option></select>
     <button id="dir">${DIR<0?"▼":"▲"}</button>
     <button id="resetFilters" title="${t("collection.resetFiltersTitle")}">${t("collection.resetFilters")}</button>
@@ -4387,7 +4388,7 @@ function collection(){
   $("#sort").onchange=e=>{SORT=e.target.value;render();};
   $("#dir").onclick=()=>{DIR=-DIR;$("#dir").textContent=DIR<0?"▼":"▲";render();};
   $("#resetFilters").onclick=()=>{
-    Q="";FLABELS=null;FSTAT="started";SORT=SHOW_COSTS?"totalCost":"pct";DIR=1;HIDEEXC=true;PAGE=1;collection();};
+    Q="";FLABELS=null;FSTAT="started";SORT="totalCost";DIR=1;HIDEEXC=true;PAGE=1;collection();};
   document.querySelectorAll("#viewSeg button").forEach(b=>b.onclick=()=>{
     VIEW=b.dataset.v;collection();});
   bindCatFilter();
@@ -4477,7 +4478,7 @@ function render(){
   const page=all.slice((PAGE-1)*PER,PAGE*PER);
   $("#out").innerHTML = VIEW==="grid"
    ? `<div class="grid">${page.map(card).join("")}</div>`
-   : `<table><thead><tr><th>${t("collection.thSet")}</th><th class="num nowrap">${t("collection.thCode")}</th><th class="num nowrap">${t("collection.thReleased")}</th><th>${t("collection.thKind")}</th><th class="num">${t("collection.thOwned")}</th><th class="num">${t("collection.thProgress")}</th><th class="num" title="${t("collection.thCurrentValueTip")}">${t("collection.thCurrentValue")}</th>${SHOW_COSTS?`<th class="num" title="${t("collection.thCardsToBuyTip")}">${t("collection.thCardsToBuy")}</th><th class="num">${t("collection.thShip")}</th><th class="num" title="${t("collection.thToFinishTip")}">${t("collection.thToFinish")}</th>`:""}<th></th></tr></thead><tbody>${page.map(trow).join("")}</tbody></table>`;
+   : `<table><thead><tr><th>${t("collection.thSet")}</th><th class="num nowrap">${t("collection.thCode")}</th><th class="num nowrap">${t("collection.thReleased")}</th><th>${t("collection.thKind")}</th><th class="num">${t("collection.thOwned")}</th><th class="num">${t("collection.thProgress")}</th><th class="num" title="${t("collection.thCurrentValueTip")}">${t("collection.thCurrentValue")}</th><th class="num" title="${t("collection.thCardsToBuyTip")}">${t("collection.thCardsToBuy")}</th><th class="num">${t("collection.thShip")}</th><th class="num" title="${t("collection.thToFinishTip")}">${t("collection.thToFinish")}</th><th></th></tr></thead><tbody>${page.map(trow).join("")}</tbody></table>`;
   $("#pg").innerHTML = pages>1 ? `<button ${PAGE<=1?"disabled":""} id="pv">${t("collection.previous")}</button>
     <span>${t("collection.pageOfN",{p:PAGE,n:pages,count:all.length})}</span>
     <button ${PAGE>=pages?"disabled":""} id="nx">${t("collection.next")}</button>` :
@@ -4503,14 +4504,13 @@ const card=s=>`<div class="set ${s.missing===0&&s.counted?"done":""} ${s.counted
     s.counted?"":`<span class="badge">${t("setCard.excludedBadge")}</span>`}</div>
   <div class="st"><span>${s.owned} / ${s.total}</span><span>${pct(s.pct)}</span></div>
   <div class="bar"><span style="width:${s.pct*100}%"></span></div>
-  <div class="st"><span>${SHOW_COSTS?t("setCard.currentValue")+" "+money(s.ownedValue):
-      (s.missing?t("setCard.nMissing",{n:s.missing}):t("setCard.complete"))}</span>
-    <span style="color:var(--gold)">${SHOW_COSTS?(s.missing?money(s.totalCost):t("setCard.complete")):""}</span></div>
-  ${(SHOW_COSTS&&s.missing)?`<div class="st" style="font-size:11px;color:var(--dim)"
+  <div class="st"><span>${t("setCard.currentValue")+" "+money(s.ownedValue)}</span>
+    <span style="color:var(--gold)">${s.missing?money(s.totalCost):t("setCard.complete")}</span></div>
+  ${s.missing?`<div class="st" style="font-size:11px;color:var(--dim)"
     data-tip-title="${t('tip.shipping')}" data-tip="${SHIPCALC(s.missing,s.missingValue)}">
     <span>${t("setCard.cardsToBuy",{n:s.missing,v:money(s.missingValue)})}</span>
     <span>${t("setCard.shipPrefix",{v:money(s.shipping)})}</span></div>`:""}
-  ${(SHOW_COSTS&&s.sealed&&s.sealed.price)?`<div class="st"><span>${t("setCard.sealedNoted")}</span>
+  ${(s.sealed&&s.sealed.price)?`<div class="st"><span>${t("setCard.sealedNoted")}</span>
     <span style="color:${s.sealed.price<s.totalCost?"var(--ok)":"var(--muted)"}">${
       money(s.sealed.price)}${s.sealed.price<s.totalCost?t("setCard.cheaper"):""}</span></div>`:""}
   <div class="spacer"></div>
@@ -4524,10 +4524,10 @@ const trow=s=>`<tr class="${s.missing===0&&s.counted?"done":""} ${s.counted?"":"
   <td class="num nowrap">${s.released}</td><td><span class="kind ${kindClass(s.kind)}">${s.kind}</span></td>
   <td class="num">${s.owned}/${s.total}</td><td class="num">${pct(s.pct)}</td>
   <td class="num">${money(s.ownedValue)}</td>
-  ${SHOW_COSTS?`<td class="num">${s.missing?money(s.missingValue):"—"}</td>
+  <td class="num">${s.missing?money(s.missingValue):"—"}</td>
   <td class="num" style="color:var(--dim)" data-tip-title="${t('tip.shipping')}"
       data-tip="${SHIPCALC(s.missing,s.missingValue)}">${s.missing?money(s.shipping):"—"}</td>
-  <td class="num" style="color:var(--gold)">${s.missing?money(s.totalCost):"—"}</td>`:""}
+  <td class="num" style="color:var(--gold)">${s.missing?money(s.totalCost):"—"}</td>
   <td class="num"><button data-view="${s.code}">${t("setCard.view")}</button>
     <button data-buy="${s.code}" ${s.missing?"":"disabled"}>${t("setCard.buy")}</button>
     <button data-tog="${s.code}">${s.counted?"✕":"✓"}</button></td></tr>`;
