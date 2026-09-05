@@ -16,7 +16,7 @@ import urllib.request
 from datetime import datetime, timedelta
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-VERSION = "5.74"
+VERSION = "5.75"
 SCHEMA = 15
 
 
@@ -6765,16 +6765,28 @@ CM_USERSCRIPT = r'''// ==UserScript==
     var h = host || row.querySelector(".col-seller");
     if(!h) return;
     if(h.tagName === "TD"){
-      // wantlist rows: card names wrap, so an in-cell badge either drops to
-      // its own line or overlaps the name. Put it in the left gutter,
-      // outside the table, just left of the checkbox.
-      var cell = row.firstElementChild || h;      // <td class="select"> with the checkbox
-      cell.style.position = "relative";
-      b.style.position = "absolute";
-      b.style.right = "100%";
-      b.style.marginRight = "6px";
-      b.style.top = "50%";
-      b.style.transform = "translateY(-50%)";
+      // wantlist rows: give the helper its own real column, styled like
+      // Cardmarket's own, with a "Collection" header — an in-cell badge
+      // overlapped wrapping card names.
+      var table = row.closest("table");
+      if(table){
+        var headRow = table.querySelector("thead tr") || table.querySelector("thead");
+        if(headRow && !headRow.querySelector(".bnd-col-th")){
+          var th = document.createElement("th");
+          th.className = "min-size p-2 text-start bnd-col-th";
+          th.textContent = "Collection";
+          headRow.insertBefore(th, headRow.firstElementChild);
+        }
+      }
+      var cell = row.querySelector("td.bnd-col-td");
+      if(!cell){
+        cell = document.createElement("td");
+        cell.className = "min-size p-2 bnd-col-td";
+        cell.style.whiteSpace = "nowrap";
+        cell.style.verticalAlign = "middle";
+        row.insertBefore(cell, row.firstElementChild);
+      }
+      while(cell.firstChild) cell.removeChild(cell.firstChild);
       cell.appendChild(b);
       return;
     }
@@ -6784,6 +6796,7 @@ CM_USERSCRIPT = r'''// ==UserScript==
   function clearRow(row){
     row.style.boxShadow=""; row.style.background="";
     var b=row.querySelector(".bnd-badge"); if(b) b.remove();
+    var col=row.querySelector("td.bnd-col-td"); if(col) col.remove();
   }
   // Idempotent. Cardmarket builds the rows with JS and re-renders their
   // innards after load, so: never blacklist a row that isn't parseable yet
@@ -6932,6 +6945,7 @@ CM_USERSCRIPT = r'''// ==UserScript==
       [].slice.call(document.querySelectorAll(".article-row")).forEach(clearRow);
       [].slice.call(document.querySelectorAll('input[name="checkWantsRow[]"]'))
         .forEach(function(inp){ var r = inp.closest("tr"); if(r) clearRow(r); });
+      [].slice.call(document.querySelectorAll(".bnd-col-th")).forEach(function(th){ th.remove(); });
     }
   };
   document.body.appendChild(btn);
