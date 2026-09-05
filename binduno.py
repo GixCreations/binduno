@@ -16,7 +16,7 @@ import urllib.request
 from datetime import datetime, timedelta
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-VERSION = "5.79"
+VERSION = "5.80"
 SCHEMA = 15
 
 
@@ -2186,6 +2186,7 @@ class Handler(BaseHTTPRequestHandler):
                             "cmHelper": {"on": meta_get(c, "cm_helper_on", "1") == "1",
                                          "lastSeen": meta_get(c, "cm_helper_last_seen", "")},
                             "showCosts": meta_get(c, "show_costs") == "1",
+                            "hideOffGoal": meta_get(c, "hide_offgoal") == "1",
                             "githubRepo": github_repo(c),
                             "update": UPDATE,
                             "autoUpdateCheck": meta_get(c, "auto_update_check", "1") == "1",
@@ -2479,6 +2480,10 @@ class Handler(BaseHTTPRequestHandler):
             d = json.loads(raw)
             meta_set(c, "show_costs", "1" if d.get("show") else "0")
             self.send_json({"ok": True, "showCosts": meta_get(c, "show_costs") == "1"})
+        elif self.path == "/api/setview-pref":
+            d = json.loads(raw)
+            meta_set(c, "hide_offgoal", "1" if d.get("hideOffGoal") else "0")
+            self.send_json({"ok": True})
         elif self.path == "/api/goal-pref":
             d = json.loads(raw)
             for k in GOAL_DEFAULTS:
@@ -2744,9 +2749,10 @@ dialog::backdrop{background:rgba(6,9,13,.8)}
   padding:10px 12px;border:1px solid var(--line);border-radius:5px;margin-bottom:7px;background:var(--panel2)}
 .opt .lb{font-size:14px}
 .opt .n{font-family:var(--mono);font-size:12px;color:var(--muted);text-align:right}
-.have td{color:var(--dim)}
-tr.notgoal td{opacity:.5}
-tr.notgoal td .badge{opacity:1}
+table.setcards tr.have{background:rgba(63,185,80,.09)}
+table.setcards tr.miss{background:rgba(240,85,74,.06)}
+table.setcards tr.notgoal td{opacity:.5}
+table.setcards tr.notgoal td .badge{opacity:1}
 .note{color:var(--r);font-size:12px}
 textarea{width:100%;height:130px;background:var(--panel2);color:var(--text);border:1px solid var(--line);
   font-family:var(--mono);font-size:12px;padding:9px;border-radius:4px;margin-top:10px}
@@ -3361,6 +3367,7 @@ en:{
   "cardPage.allPrintings":"All printings",
   "setPage.noteEndgame":"Endgame","setPage.noteOtherPrinting":"Other printing",
   "setPage.notInGoal":"off-goal","setPage.baseMissing":"base missing",
+  "setPage.hideOffGoal":"Hide off‑goal cards",
   "setPage.onlyExtra":"{n} card(s) owned only as a special printing — base printing still missing",
   "cardPage.added":"Added",
   "cardPage.addToWatchlist":"Add to Watchlist","cardPage.inWatchlist":"★ In Watchlist",
@@ -3773,6 +3780,7 @@ de:{
   "cardPage.allPrintings":"Alle Drucke",
   "setPage.noteEndgame":"Endgame","setPage.noteOtherPrinting":"Anderer Druck",
   "setPage.notInGoal":"zählt nicht","setPage.baseMissing":"Basis fehlt",
+  "setPage.hideOffGoal":"Off‑Goal-Karten ausblenden",
   "setPage.onlyExtra":"{n} Karte(n) nur als Sonderdruck vorhanden — Basis-Druck fehlt noch",
   "cardPage.added":"Hinzugefügt",
   "cardPage.addToWatchlist":"Zur Watchlist hinzufügen","cardPage.inWatchlist":"★ In Watchlist",
@@ -3928,6 +3936,7 @@ async function busyDone(){
 function updateDismissed(v){try{return localStorage.getItem("bnd_upd_dismiss")===v;}catch(e){return false;}}
 function dismissUpdate(v){try{localStorage.setItem("bnd_upd_dismiss",v);}catch(e){}}
 let SHOW_COSTS=false;
+let HIDE_OFFGOAL=false;   // set page: hide printings that don't count toward the goal
 let RARMODE="names";   // "By rarity" on Home: card-name counts vs. every printing
 let FORCE_RELOAD=false;   // set after an import so the next route re-fetches
 let SETS=[],STATS=null,PAGE=1,PER=24,VIEW="grid",SORT="totalCost",DIR=1,
@@ -3959,6 +3968,7 @@ async function load(){
   SHIP_COUNTRY=r.shippingCountry||"DE"; SHIP_RATES=r.shipRates||{};
   AUTO_SYNC=r.autoSync!==false; PRICE_LOGGING=r.priceLogging!==false;
   SHOW_COSTS=!!r.showCosts;
+  HIDE_OFFGOAL=!!r.hideOffGoal;
   ONBOARDING_DONE=!!r.onboardingDone;
   SETS=await getJSON("/api/sets");
   await cartLoad();   // so the nav badge shows a pending cart right after a restart
@@ -4677,7 +4687,7 @@ function drawCards(){
     else if(CS==="foil"){x=a.foil||0;y=b.foil||0;}
     else if(CS==="qty"){x=a.qty||0;y=b.qty||0;}
     if(typeof x==="string")return x.localeCompare(y)*CD;
-    return (x-y)*CD;});
+    return (x-y)*CD;}).filter(c=>!HIDE_OFFGOAL||c.inGoal);
   const sl=isSecretLair(DETAIL.code);
   const head=`${sl?`<div class="msg" style="max-width:720px">${t("cart.secretLairNote")}</div>`:""}
     <div class="tools" style="margin:14px 0 10px">
@@ -4687,7 +4697,9 @@ function drawCards(){
       `<option value="${k}" ${CS===k?"selected":""}>${l}</option>`).join("")}</select>
     <button id="gdir">${CD<0?"▼":"▲"}</button>
     <button id="cartAllMissing" ${sl?"disabled title=\""+t("cart.secretLairWhy")+"\"":""}>${t("setPage.addAllMissing")}</button>
-    <button id="buyFromSet">${t("setPage.buyMissingDots")}</button></div>`;
+    <button id="buyFromSet">${t("setPage.buyMissingDots")}</button>
+    <label class="chk" style="margin:0"><input type="checkbox" id="hideOffGoal" ${
+      HIDE_OFFGOAL?"checked":""}> ${t("setPage.hideOffGoal")}</label></div>`;
   if(DV==="grid"){
     OUT.innerHTML=head+`<div class="cgrid">${rows.map(c=>cardTile(
       {...c,set:DETAIL.code,setName:DETAIL.name})).join("")}</div>`;
@@ -4699,9 +4711,9 @@ function drawCards(){
   }
   const NUMCOLS=new Set(["number","eur","foil","qty"]);
   const cols=[...SORTCOLS.map(([k,l])=>[k,l,NUMCOLS.has(k)?"num":""]),["note",t("setPage.thNote"),""],["",t("missing.thCart"),"num"]];
-  OUT.innerHTML=head+`<table><thead><tr>${cols.map(([k,l,c])=>
+  OUT.innerHTML=head+`<table class="setcards"><thead><tr>${cols.map(([k,l,c])=>
     `<th class="${c}" data-c="${k}">${l}${CS===k?`<span class="ar">${CD>0?"▲":"▼"}</span>`:""}</th>`).join("")}
-    </tr></thead><tbody>${rows.map(c=>`<tr class="${c.have?"have":""} ${c.inGoal?"":"notgoal"}">
+    </tr></thead><tbody>${rows.map(c=>`<tr class="${c.have?"have":"miss"} ${(!c.inGoal&&!c.have)?"notgoal":""}">
       <td class="num">${c.number}</td>
       <td><span class="nmline"><span class="setlink"
         data-card="${DETAIL.code}|${c.number}" data-pop="${c.img||""}">${cardName(c)}</span>${VAR(c)}</span></td>
@@ -4734,6 +4746,13 @@ function bindSetTools(){
     setTimeout(()=>a.textContent=t("setPage.addAllMissing"),1600);
   };
   if(b)b.onclick=()=>openBuy(DETAIL.code);
+  const h=$("#hideOffGoal");
+  if(h)h.onchange=e=>{
+    HIDE_OFFGOAL=e.target.checked;
+    fetch("/api/setview-pref",{method:"POST",headers:{"Content-Type":"application/json"},
+      body:JSON.stringify({hideOffGoal:HIDE_OFFGOAL})}).catch(()=>{});
+    drawCards();
+  };
 }
 
 /* ---------------- Buy page ---------------- */
