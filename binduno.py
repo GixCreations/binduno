@@ -16,7 +16,7 @@ import urllib.request
 from datetime import datetime, timedelta
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-VERSION = "5.81"
+VERSION = "5.82"
 SCHEMA = 15
 
 
@@ -4119,7 +4119,7 @@ async function drawWatchlist(){
       <th class="num">${t("missing.thPrice")}</th><th>${t("home.watchlist7d")}</th>
       <th class="num">${t("home.watchlistChange")}</th><th class="num"></th></tr></thead>
     <tbody>${r.items.map(c=>`<tr>
-      <td><span class="setlink" data-card="${c.set}|${c.number}">${cardName(c)}</span></td>
+      <td><span class="setlink" data-card="${c.set}|${c.number}" data-pop="${c.img||""}">${cardName(c)}</span></td>
       <td><span class="setlink" data-set="${c.set}">${c.setName}</span></td>
       <td class="num" style="color:var(--gold)">${c.eur?money(c.eur):"—"}</td>
       <td>${sparkline(c.series)}</td>
