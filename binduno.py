@@ -16,7 +16,7 @@ import urllib.request
 from datetime import datetime, timedelta
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-VERSION = "5.77"
+VERSION = "5.78"
 SCHEMA = 15
 
 
@@ -1211,6 +1211,14 @@ def set_progress(rows, gp, eg_eur=ENDGAME_EUR):
         by_name.setdefault(r["name"], []).append(r)
     total = owned = missing = only_extra = eg_n = 0
     missing_val = eg_v = 0.0
+
+    def _price(eg):
+        # cheapest printing you could actually buy. A missing Cardmarket price
+        # (foil-only "star" printings in old core sets, thin bulk) must not be
+        # read as "free" — that dragged whole-set "cost to finish" to near zero.
+        p = [r["eur"] for r in eg if r["eur"]]
+        return min(p) if p else 0.0
+
     if gp["scope"] == "printings":
         elig = [r for r in rows if r["inGoal"]]
         total = len(elig)
@@ -1219,7 +1227,7 @@ def set_progress(rows, gp, eg_eur=ENDGAME_EUR):
             eg = [r for r in grp if r["inGoal"]]
             if not eg or any(r["have"] for r in grp):
                 continue
-            price = min((r["eur"] or 0) for r in eg)
+            price = _price(eg)
             if price >= eg_eur:
                 eg_n += 1; eg_v += price
             else:
@@ -1235,7 +1243,7 @@ def set_progress(rows, gp, eg_eur=ENDGAME_EUR):
                 if not any(r["have"] for r in eg):
                     only_extra += 1                      # owns it, but not a base print
                 continue
-            price = min((r["eur"] or 0) for r in eg)
+            price = _price(eg)
             if price >= eg_eur:
                 eg_n += 1; eg_v += price
             else:
@@ -1278,7 +1286,7 @@ def set_rows(c):
                    GROUP BY set_code, number) o
                ON o.set_code = k.set_code AND o.number = k.number
         WHERE k.digital = 0 AND s.released <> '' AND s.released <= ?
-        ORDER BY k.set_code, k.num_int
+        ORDER BY k.set_code, k.num_int, k.number
     """, (today,)).fetchall()
 
     per = {}
@@ -2018,7 +2026,7 @@ def _sets_stamp(c):
         meta_get(c, "collection_updated", ""),
         meta_get(c, "cards_updated", ""),
         datetime.now().strftime("%Y-%m-%d"),
-        SCHEMA,
+        SCHEMA, VERSION,          # a new build may compute the aggregates differently
         json.dumps(goal_prefs(c), sort_keys=True),
         json.dumps(endgame_prefs(c), sort_keys=True),
         shipping_country(c), tracked_shipping_only(c),
