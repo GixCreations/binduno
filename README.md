@@ -8,7 +8,7 @@
 
 One Python file, standard library only. No account, no cloud, nothing to sign up for — your collection never leaves your computer.
 
-![version](https://img.shields.io/badge/version-5.71-d4a629)
+![version](https://img.shields.io/badge/version-5.72-d4a629)
 ![python](https://img.shields.io/badge/python-3.9%2B-4a90c4)
 ![status](https://img.shields.io/badge/status-early%20beta-e0692c)
 ![platform](https://img.shields.io/badge/platform-macOS%20%C2%B7%20Windows%20%C2%B7%20Linux-8d98a7)
@@ -56,7 +56,7 @@ It runs a tiny local web server and opens in your browser. That's the whole app.
 **Cardmarket browser helper** *(optional)*
 - A userscript that marks every single offer on cardmarket.com by whether you already own the card — green (this exact printing), yellow (you own it in another set/version/finish), red (missing), with the copy count
 - Handy for topping up a seller's order with cheap missing cards at no extra shipping
-- Also marks entries on your Cardmarket wantlists that you've already bought, so you can spot stale wants and clean them up
+- Marks every entry on your Cardmarket wantlists the same way — green/yellow/red — so you can spot wants you've since bought and clean them up
 - On a purchase's order page, one button adds every card from that order straight into your Binduno collection
 
 <p align="center"><img src="docs/cm-helper.jpg" width="880" alt="Cardmarket helper marking a seller's singles list"></p>

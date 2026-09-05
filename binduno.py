@@ -16,7 +16,7 @@ import urllib.request
 from datetime import datetime, timedelta
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-VERSION = "5.71"
+VERSION = "5.72"
 SCHEMA = 15
 
 
@@ -6747,9 +6747,8 @@ CM_USERSCRIPT = r'''// ==UserScript==
     var i = row.querySelector('input[name="checkWantsRow[]"]');
     return i ? (i.getAttribute("data-id-want") || "") : "";
   }
-  function paint(row, res, host, hideMissing){
+  function paint(row, res, host){
     var status = res.status, c = COLOR[status];
-    if(hideMissing && status === "missing") c = null;
     var b = row.querySelector(".bnd-badge");
     if(b) b.remove();
     if(!c){ row.style.boxShadow=""; row.style.background=""; return; }
@@ -6783,12 +6782,12 @@ CM_USERSCRIPT = r'''// ==UserScript==
   function ensure(){
     if(!enabled) return;
     var offers = [].slice.call(document.querySelectorAll(".article-row")).map(function(row){
-      return { row:row, id:"o"+rowId(row), parse:parseRow, host:null, hideMissing:false };
+      return { row:row, id:"o"+rowId(row), parse:parseRow, host:null };
     });
     var wants = [].slice.call(document.querySelectorAll('input[name="checkWantsRow[]"]'))
       .map(function(inp){ return inp.closest("tr"); }).filter(Boolean).map(function(row){
         return { row:row, id:"w"+wantRowId(row), parse:parseWantRow,
-                 host:row.querySelector("td.name"), hideMissing:true };
+                 host:row.querySelector("td.name") };
       });
     var all = offers.concat(wants);
     var need=[], map=[], noId=0, notReady=[], cached=0, inflight=0;
@@ -6798,15 +6797,14 @@ CM_USERSCRIPT = r'''// ==UserScript==
       var hit = CACHE[id];
       if(hit){
         cached++;
-        if((COLOR[hit.status] && !(e.hideMissing && hit.status === "missing"))
-           && !row.querySelector(".bnd-badge")) paint(row, hit, e.host, e.hideMissing);
+        if(COLOR[hit.status] && !row.querySelector(".bnd-badge")) paint(row, hit, e.host);
         return;
       }
       if(INFLIGHT[id]){ inflight++; return; }   // a fetch for this row is already on its way
       var p = e.parse(row);
       if(!p){ notReady.push(id); return; }       // not rendered yet — retry next pass
       p.id = id; p.i = need.length; need.push(p);
-      map.push({id:id, row:row, host:e.host, hideMissing:e.hideMissing});
+      map.push({id:id, row:row, host:e.host});
     });
     if(!need.length) return;
     need.forEach(function(p){ INFLIGHT[p.id] = true; });
@@ -6823,7 +6821,7 @@ CM_USERSCRIPT = r'''// ==UserScript==
       res.results.forEach(function(x){
         var m = map[x.i];
         if(!m){ if(DBG) console.warn("[Binduno] no row for i="+x.i, x); return; }
-        CACHE[m.id] = x; paint(m.row, x, m.host, m.hideMissing);
+        CACHE[m.id] = x; paint(m.row, x, m.host);
       });
     });
   }
