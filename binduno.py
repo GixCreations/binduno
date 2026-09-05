@@ -16,7 +16,7 @@ import urllib.request
 from datetime import datetime, timedelta
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-VERSION = "5.70"
+VERSION = "5.71"
 SCHEMA = 15
 
 
@@ -6779,6 +6779,7 @@ CM_USERSCRIPT = r'''// ==UserScript==
   var DBG = false;
   try{ DBG = localStorage.getItem("bnd_debug") === "1"; }catch(e){}
   if(DBG) console.log("[Binduno] debug logging is ON");
+  var INFLIGHT = {};                                          // id -> true while a fetch for it is pending
   function ensure(){
     if(!enabled) return;
     var offers = [].slice.call(document.querySelectorAll(".article-row")).map(function(row){
@@ -6790,7 +6791,7 @@ CM_USERSCRIPT = r'''// ==UserScript==
                  host:row.querySelector("td.name"), hideMissing:true };
       });
     var all = offers.concat(wants);
-    var need=[], map=[], noId=0, notReady=[], cached=0;
+    var need=[], map=[], noId=0, notReady=[], cached=0, inflight=0;
     all.forEach(function(e){
       var row = e.row, id = e.id;
       if(id === "o" || id === "w"){ noId++; return; }
@@ -6801,18 +6802,24 @@ CM_USERSCRIPT = r'''// ==UserScript==
            && !row.querySelector(".bnd-badge")) paint(row, hit, e.host, e.hideMissing);
         return;
       }
+      if(INFLIGHT[id]){ inflight++; return; }   // a fetch for this row is already on its way
       var p = e.parse(row);
       if(!p){ notReady.push(id); return; }       // not rendered yet — retry next pass
       p.id = id; p.i = need.length; need.push(p);
       map.push({id:id, row:row, host:e.host, hideMissing:e.hideMissing});
     });
     if(!need.length) return;
+    need.forEach(function(p){ INFLIGHT[p.id] = true; });
     if(DBG) console.log("[Binduno] ensure: rows="+all.length+" noId="+noId+" cached="+cached
-      +" notReady="+notReady.length+" toFetch="+need.length,
-      need.map(function(p){return p.name+" | "+p.setSlug;}));
+      +" inflight="+inflight+" notReady="+notReady.length+" toFetch="+need.length
+      + "\n" + need.map(function(p){return p.i+": "+p.name+"  ||  "+(p.setTitle||"(no set icon)");}).join("\n"));
     post("/api/cm-match", {items:need}, function(res){
+      need.forEach(function(p){ delete INFLIGHT[p.id]; });
       if(!res || !res.results){ if(DBG) console.warn("[Binduno] cm-match failed", res); return; }
-      if(DBG) console.log("[Binduno] results", JSON.stringify(res.results));
+      if(DBG) console.log("[Binduno] results\n" + res.results.map(function(x){
+        var m = map[x.i]; return x.i+": "+(m?m.row.textContent.trim().replace(/\s+/g," ").slice(0,40):"?")
+          +"  -> "+x.status+" set="+(x.set||"-")+" qty="+(x.qty||0)+" exact="+(x.exactQty||0);
+      }).join("\n"));
       res.results.forEach(function(x){
         var m = map[x.i];
         if(!m){ if(DBG) console.warn("[Binduno] no row for i="+x.i, x); return; }
