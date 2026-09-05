@@ -16,7 +16,7 @@ import urllib.request
 from datetime import datetime, timedelta
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-VERSION = "5.83"
+VERSION = "5.84"
 SCHEMA = 15
 
 
@@ -1916,7 +1916,6 @@ def missing_names(c, p):
     args = list(cc)
     where = [f"k.set_code IN ({marks})", "k.digital=0", "k.extra=0",
              "k.eur IS NOT NULL",
-             "k.type_line NOT LIKE 'Basic %Land%'",   # basic lands aren't part of the "one of each" chase
              "k.name NOT IN (SELECT DISTINCT name FROM collection)"]
     if p.get("q"):
         where.append("k.name LIKE ?"); args.append(f"%{p['q']}%")
@@ -5205,7 +5204,7 @@ function missingView(){
      <input type="search" id="mq" placeholder="${t("missing.searchPlaceholder")}" value="${MF.q}">
      <select id="mset"><option value="">${t("missing.anySet")}</option>${setOpts.map(s=>
        `<option value="${s.code}" ${MF.set===s.code?"selected":""}>${s.name}</option>`).join("")}</select>
-     <div class="seg" id="mrar">${["c","u","r","m","s","b"].map(k=>
+     <div class="seg" id="mrar">${["c","u","r","m","s"].map(k=>
        `<button data-r="${k}" class="${rarSet.has(k)?"on":""}">${rarLabel(k)}</button>`).join("")}</div>
      <input type="number" id="mmin" placeholder="${t("missing.minPricePlaceholder")}" style="width:80px" value="${MF.minprice}">
      <input type="number" id="mmax" placeholder="${t("missing.maxPricePlaceholder")}" style="width:80px" value="${MF.maxprice}">
