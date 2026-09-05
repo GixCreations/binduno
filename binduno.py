@@ -16,7 +16,7 @@ import urllib.request
 from datetime import datetime, timedelta
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-VERSION = "5.80"
+VERSION = "5.81"
 SCHEMA = 15
 
 
@@ -2751,6 +2751,7 @@ dialog::backdrop{background:rgba(6,9,13,.8)}
 .opt .n{font-family:var(--mono);font-size:12px;color:var(--muted);text-align:right}
 table.setcards tr.have{background:rgba(63,185,80,.09)}
 table.setcards tr.miss{background:rgba(240,85,74,.06)}
+table.setcards td{border-bottom-color:var(--line)}
 table.setcards tr.notgoal td{opacity:.5}
 table.setcards tr.notgoal td .badge{opacity:1}
 .note{color:var(--r);font-size:12px}
