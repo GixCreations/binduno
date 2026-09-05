@@ -16,7 +16,7 @@ import urllib.request
 from datetime import datetime, timedelta
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-VERSION = "5.73"
+VERSION = "5.74"
 SCHEMA = 15
 
 
@@ -6765,17 +6765,20 @@ CM_USERSCRIPT = r'''// ==UserScript==
     var h = host || row.querySelector(".col-seller");
     if(!h) return;
     if(h.tagName === "TD"){
-      // wantlist rows: card names wrap and would push an inline badge onto
-      // its own line. Pin it to the right edge of the name cell instead, so
-      // it always sits beside the name at the same spot.
-      h.style.position = "relative";
+      // wantlist rows: card names wrap, so an in-cell badge either drops to
+      // its own line or overlaps the name. Put it in the left gutter,
+      // outside the table, just left of the checkbox.
+      var cell = row.firstElementChild || h;      // <td class="select"> with the checkbox
+      cell.style.position = "relative";
       b.style.position = "absolute";
-      b.style.right = "8px";
+      b.style.right = "100%";
+      b.style.marginRight = "6px";
       b.style.top = "50%";
       b.style.transform = "translateY(-50%)";
-    } else {
-      b.style.marginLeft = "8px";
+      cell.appendChild(b);
+      return;
     }
+    b.style.marginLeft = "8px";
     h.appendChild(b);
   }
   function clearRow(row){
