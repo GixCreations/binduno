@@ -16,7 +16,7 @@ import urllib.request
 from datetime import datetime, timedelta
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-VERSION = "5.82"
+VERSION = "5.83"
 SCHEMA = 15
 
 
@@ -1916,6 +1916,7 @@ def missing_names(c, p):
     args = list(cc)
     where = [f"k.set_code IN ({marks})", "k.digital=0", "k.extra=0",
              "k.eur IS NOT NULL",
+             "k.type_line NOT LIKE 'Basic %Land%'",   # basic lands aren't part of the "one of each" chase
              "k.name NOT IN (SELECT DISTINCT name FROM collection)"]
     if p.get("q"):
         where.append("k.name LIKE ?"); args.append(f"%{p['q']}%")
@@ -4932,7 +4933,7 @@ async function cardsPane(){
          <th class="num">${t("setPage.thCopies")}</th><th class="num">${t("missing.thCart")}</th></tr></thead><tbody>${
          r.cards.map(c=>`<tr>
          <td><span class="nmline"><span class="setlink"
-           data-card="${c.set}|${c.number}">${cardName(c)}</span>${VAR(c)}</span></td>
+           data-card="${c.set}|${c.number}" data-pop="${c.img||""}">${cardName(c)}</span>${VAR(c)}</span></td>
          <td><span class="setlink" data-set="${c.set}">${c.setName}</span></td>
          <td class="num">${c.number}</td><td>${c.type||""}</td>
          <td>${RAR[c.rarity]?rarLabel(c.rarity):"?"}</td>
@@ -5261,7 +5262,7 @@ async function drawMissing(){
       : `<table><thead><tr><th>${t("missing.thCard")}</th><th>${t("missing.thCheapestIn")}</th><th class="num">${t("missing.thNo")}</th>
          <th>${t("missing.thRarity")}</th><th class="num">${t("missing.thPrice")}</th><th class="num">${t("missing.thCart")}</th></tr></thead><tbody>
          ${r.cards.map(c=>`<tr>
-           <td><span class="setlink" data-card="${c.set}|${c.number}">${cardName(c)}</span>${VAR(c)}</td>
+           <td><span class="setlink" data-card="${c.set}|${c.number}" data-pop="${c.img||""}">${cardName(c)}</span>${VAR(c)}</td>
            <td><span class="setlink" data-set="${c.set}">${c.setName}</span></td>
          <td class="num">${c.number}</td>
            <td>${RAR[c.rarity]?rarLabel(c.rarity):"?"}</td>
