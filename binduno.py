@@ -16,7 +16,7 @@ import urllib.request
 from datetime import datetime, timedelta
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-VERSION = "5.75"
+VERSION = "5.76"
 SCHEMA = 15
 
 
@@ -6773,7 +6773,7 @@ CM_USERSCRIPT = r'''// ==UserScript==
         var headRow = table.querySelector("thead tr") || table.querySelector("thead");
         if(headRow && !headRow.querySelector(".bnd-col-th")){
           var th = document.createElement("th");
-          th.className = "min-size p-2 text-start bnd-col-th";
+          th.className = "min-size p-2 text-center bnd-col-th";
           th.textContent = "Collection";
           headRow.insertBefore(th, headRow.firstElementChild);
         }
@@ -6781,7 +6781,7 @@ CM_USERSCRIPT = r'''// ==UserScript==
       var cell = row.querySelector("td.bnd-col-td");
       if(!cell){
         cell = document.createElement("td");
-        cell.className = "min-size p-2 bnd-col-td";
+        cell.className = "min-size p-2 text-center bnd-col-td";
         cell.style.whiteSpace = "nowrap";
         cell.style.verticalAlign = "middle";
         row.insertBefore(cell, row.firstElementChild);
