@@ -16,7 +16,7 @@ import urllib.request
 from datetime import datetime, timedelta
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-VERSION = "5.72"
+VERSION = "5.73"
 SCHEMA = 15
 
 
@@ -6759,11 +6759,24 @@ CM_USERSCRIPT = r'''// ==UserScript==
     b = document.createElement("span");
     b.className = "bnd-badge";
     b.textContent = (LABEL[status] || status) + (res.qty > 0 ? " · " + res.qty + "×" : "");
-    b.style.cssText = "display:inline-block;margin-left:8px;padding:1px 7px;border-radius:4px;"
+    b.style.cssText = "display:inline-block;padding:1px 7px;border-radius:4px;white-space:nowrap;"
       + "font:700 11px/1.5 system-ui;vertical-align:middle;background:" + c
       + ";color:" + (status === "missing" || status === "exact" ? "#fff" : "#241c00");
     var h = host || row.querySelector(".col-seller");
-    if(h) h.appendChild(b);
+    if(!h) return;
+    if(h.tagName === "TD"){
+      // wantlist rows: card names wrap and would push an inline badge onto
+      // its own line. Pin it to the right edge of the name cell instead, so
+      // it always sits beside the name at the same spot.
+      h.style.position = "relative";
+      b.style.position = "absolute";
+      b.style.right = "8px";
+      b.style.top = "50%";
+      b.style.transform = "translateY(-50%)";
+    } else {
+      b.style.marginLeft = "8px";
+    }
+    h.appendChild(b);
   }
   function clearRow(row){
     row.style.boxShadow=""; row.style.background="";
