@@ -16,7 +16,7 @@ import urllib.request
 from datetime import datetime, timedelta
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-VERSION = "5.76"
+VERSION = "5.77"
 SCHEMA = 15
 
 
@@ -2658,7 +2658,7 @@ h2{font-family:var(--serif);font-weight:400;font-size:20px;margin:34px 0 12px}
 input,select,button{font-family:var(--sans);font-size:13.5px}
 input[type=search],select{background:var(--panel2);border:1px solid var(--line);color:var(--text);
   padding:8px 10px;border-radius:4px}
-input[type=search]{flex:1 1 220px;min-width:160px}
+input[type=search]{flex:1 1 220px;min-width:108px}
 button{background:var(--panel);border:1px solid var(--line);color:var(--text);padding:8px 13px;
   border-radius:4px;cursor:pointer}
 button:hover{border-color:var(--gold);color:var(--gold)}
@@ -2823,7 +2823,8 @@ textarea{width:100%;height:130px;background:var(--panel2);color:var(--text);bord
 .chk input{width:auto}
 .catfilter{position:relative}
 .catfilter summary{background:var(--panel2);border:1px solid var(--line);color:var(--text);
-  padding:8px 10px;border-radius:4px;cursor:pointer;font-size:13.5px;list-style:none;user-select:none}
+  padding:8px 10px;border-radius:4px;cursor:pointer;font-size:13.5px;list-style:none;user-select:none;
+  white-space:nowrap}
 .catfilter summary::-webkit-details-marker{display:none}
 .catfilter summary:after{content:"▾";margin-left:6px;color:var(--muted)}
 .catfilter[open] summary{border-color:var(--gold)}
