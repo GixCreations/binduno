@@ -16,7 +16,7 @@ import urllib.request
 from datetime import datetime, timedelta
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-VERSION = "5.78"
+VERSION = "5.79"
 SCHEMA = 15
 
 
@@ -3462,7 +3462,7 @@ en:{
   "cm.stepSafariEnable":"In Safari → Settings → Extensions, switch Userscripts on and allow it on cardmarket.com.",
   "cm.bmIntro":"No extension to install — the catch is you must click it once on every page.",
   "cm.bmDrag":"Drag this link onto your bookmarks bar:",
-  "cm.bmClick":"On a Cardmarket seller's singles page, click the bookmark. It marks the visible rows and keeps refreshing for about 90 seconds; click it again whenever you change page.",
+  "cm.bmClick":"On a Cardmarket seller's singles page, a wantlist, or one of your purchases, click the bookmark. It marks the visible rows (or adds an import button on a purchase) and keeps working for about 90 seconds; click it again whenever you change page.",
   "cm.bmNote":"Does not work in Safari — Safari blocks the bookmarklet's connection to the local app. On Safari, use the extension method above instead.",
 },
 de:{
@@ -3875,7 +3875,7 @@ de:{
   "cm.stepSafariEnable":"In Safari → Einstellungen → Erweiterungen „Userscripts“ einschalten und für cardmarket.com erlauben.",
   "cm.bmIntro":"Nichts zu installieren — dafür musst du es auf jeder Seite einmal anklicken.",
   "cm.bmDrag":"Zieh diesen Link in deine Lesezeichenleiste:",
-  "cm.bmClick":"Auf der Singles-Seite eines Cardmarket-Händlers das Lesezeichen anklicken. Es markiert die sichtbaren Zeilen und aktualisiert ~90 Sekunden lang; nach einem Seitenwechsel erneut klicken.",
+  "cm.bmClick":"Auf der Singles-Seite eines Händlers, einer Wantliste oder einem deiner Käufe das Lesezeichen anklicken. Es markiert die sichtbaren Zeilen (bzw. blendet bei einem Kauf einen Import-Knopf ein) und arbeitet ~90 Sekunden lang; nach einem Seitenwechsel erneut klicken.",
   "cm.bmNote":"Funktioniert nicht in Safari — Safari blockiert die Verbindung des Bookmarklets zur lokalen App. Unter Safari stattdessen die Erweiterungs-Methode oben nutzen.",
 },
 };
@@ -6982,43 +6982,83 @@ CM_USERSCRIPT = r'''// ==UserScript==
 # exempt from page CSP, but can't keep running across navigations). It refreshes
 # for ~90 s to catch in-page filtering/sorting, then stops.
 CM_BOOKMARKLET = r'''(function(){
+console.log("[Binduno] bookmarklet __VERSION__ on "+location.href);
 var A="http://127.0.0.1:__PORT__",
 C={exact:"#3fb950",otherFinish:"#e3b341",otherVersion:"#e3b341",otherSet:"#e3b341",missing:"#f0554a"},
 T={exact:"rgba(63,185,80,.14)",otherFinish:"rgba(227,179,65,.15)",otherVersion:"rgba(227,179,65,.15)",otherSet:"rgba(227,179,65,.15)",missing:"rgba(240,85,74,.13)"},
 L={exact:"in collection",otherFinish:"other finish",otherVersion:"other version",otherSet:"other set",missing:"missing"},
+LG={1:"en",2:"fr",3:"de",4:"es",5:"it",6:"zh",7:"ja",8:"pt",9:"ru",10:"ko",11:"zh"},
 CA={};
 function tl(e){return e?(e.getAttribute("title")||e.getAttribute("data-bs-original-title")||"").trim():"";}
 function pr(r){var a=r.querySelector(".col-seller a"),x=r.querySelector('a[href*="/Magic/Expansions/"]');if(!a||!x)return null;
 var h=x.getAttribute("href")||"",f=false,s=r.querySelectorAll(".st_SpecialIcon"),i;
 for(i=0;i<s.length;i++){var v=tl(s[i]);if(v=="Foil"||v=="Folie")f=true;}
 return{name:(a.textContent||"").trim(),setSlug:(h.split("/Magic/Expansions/")[1]||"").split(/[?#]/)[0],setTitle:tl(x),foil:f};}
+function pw(r){var a=r.querySelector("td.name a");if(!a)return null;
+var x=r.querySelector(".expansion-symbol"),tn=r.querySelectorAll("td.ternary-header"),
+ft=tn[0]?(tn[0].textContent||"").trim().toLowerCase():"";
+return{name:(a.textContent||"").trim(),setSlug:"",setTitle:x?tl(x):"",foil:ft=="yes"||ft=="ja"};}
 function id(r){var m=/stockRow(\d+)/.exec(r.id||"");return m?m[1]:"";}
-function pt(r,res){var st=res.status,c=C[st],b=r.querySelector(".bnd-b");if(b)b.remove();
-if(!c){r.style.boxShadow="";r.style.background="";return;}
-r.style.boxShadow="inset 4px 0 0 "+c;r.style.background=T[st]||"";
-b=document.createElement("span");b.className="bnd-b";
+function wid(r){var i=r.querySelector('input[name="checkWantsRow[]"]');return i?(i.getAttribute("data-id-want")||""):"";}
+function badge(res){var st=res.status,c=C[st];if(!c)return null;
+var b=document.createElement("span");b.className="bnd-b";
 b.textContent=(L[st]||st)+(res.qty>0?" · "+res.qty+"×":"");
-b.style.cssText="display:inline-block;margin-left:8px;padding:1px 7px;border-radius:4px;font:700 11px/1.5 system-ui;vertical-align:middle;background:"+c+";color:"+(st=="missing"||st=="exact"?"#fff":"#241c00");
-var hs=r.querySelector(".col-seller");if(hs)hs.appendChild(b);}
+b.style.cssText="display:inline-block;padding:1px 7px;border-radius:4px;white-space:nowrap;font:700 11px/1.5 system-ui;vertical-align:middle;background:"+c+";color:"+(st=="missing"||st=="exact"?"#fff":"#241c00");
+return b;}
+function pt(r,res){var b=r.querySelector(".bnd-b");if(b)b.remove();var c=C[res.status];
+if(!c){r.style.boxShadow="";r.style.background="";return;}
+r.style.boxShadow="inset 4px 0 0 "+c;r.style.background=T[res.status]||"";
+b=badge(res);b.style.marginLeft="8px";var hs=r.querySelector(".col-seller");if(hs)hs.appendChild(b);}
+function ptw(r,res){var b=r.querySelector(".bnd-b");if(b)b.remove();var c=C[res.status];
+if(!c){r.style.boxShadow="";r.style.background="";return;}
+r.style.boxShadow="inset 4px 0 0 "+c;r.style.background=T[res.status]||"";
+var tab=r.closest("table");if(tab){var hd=tab.querySelector("thead tr")||tab.querySelector("thead");
+if(hd&&!hd.querySelector(".bnd-col-th")){var th=document.createElement("th");th.className="min-size p-2 text-center bnd-col-th";th.textContent="Collection";hd.insertBefore(th,hd.firstElementChild);}}
+var cell=r.querySelector("td.bnd-col-td");
+if(!cell){cell=document.createElement("td");cell.className="min-size p-2 text-center bnd-col-td";cell.style.whiteSpace="nowrap";cell.style.verticalAlign="middle";r.insertBefore(cell,r.firstElementChild);}
+while(cell.firstChild)cell.removeChild(cell.firstChild);cell.appendChild(badge(res));}
 function run(){
-var rows=[].slice.call(document.querySelectorAll(".article-row")),need=[],map=[];
-rows.forEach(function(r){var i=id(r);if(!i)return;
-if(CA[i]){if(C[CA[i].status]&&!r.querySelector(".bnd-b"))pt(r,CA[i]);return;}
-var p=pr(r);if(!p)return;p.i=need.length;need.push(p);map.push(r);});
+var need=[],map=[],rows=[].slice.call(document.querySelectorAll(".article-row"));
+rows.forEach(function(r){var i=id(r);if(!i)return;var k="o"+i;
+if(CA[k]){if(!r.querySelector(".bnd-b"))pt(r,CA[k]);return;}
+var p=pr(r);if(!p)return;p.i=need.length;need.push(p);map.push({r:r,k:k,w:0});});
+[].slice.call(document.querySelectorAll('input[name="checkWantsRow[]"]')).forEach(function(inp){
+var r=inp.closest("tr");if(!r)return;var k="w"+wid(r);
+if(CA[k]){if(!r.querySelector(".bnd-b"))ptw(r,CA[k]);return;}
+var p=pw(r);if(!p)return;p.i=need.length;need.push(p);map.push({r:r,k:k,w:1});});
 if(!need.length)return;
 fetch(A+"/api/cm-match",{method:"POST",mode:"cors",headers:{"Content-Type":"application/json"},body:JSON.stringify({items:need})})
 .then(function(x){return x.json();}).then(function(res){
 if(!res||!res.results)return;
-res.results.forEach(function(x){var r=map[x.i];if(r){CA[id(r)]=x;pt(r,x);}});})
+res.results.forEach(function(x){var m=map[x.i];if(!m)return;CA[m.k]=x;(m.w?ptw:pt)(m.r,x);});})
 .catch(fail);}
+function purch(){
+var rs=[].slice.call(document.querySelectorAll("tr[data-article-id][data-expansion-name]"));
+if(!rs.length||document.getElementById("bnd-imp-btn"))return;
+var an=document.getElementById("SellerBuyerInfo"),b=document.createElement("button");b.id="bnd-imp-btn";
+b.style.cssText=an?"padding:5px 10px;border-radius:6px;border:1px solid #3fb950;background:#1a1d24;color:#e8ebef;font:600 12px/1.2 system-ui;cursor:pointer;white-space:nowrap;margin-left:8px":"position:fixed;left:14px;bottom:14px;z-index:99999;padding:7px 12px;border-radius:8px;border:1px solid #3fb950;background:#1a1d24;color:#e8ebef;font:600 12px/1.2 system-ui;cursor:pointer;box-shadow:0 4px 16px rgba(0,0,0,.4)";
+function rst(){b.textContent="Add this purchase to Binduno";}rst();
+b.onclick=function(){var items=rs.map(function(r){
+var el=r.querySelector('a[href*="/Magic/Expansions/"]'),sl="",tt=r.getAttribute("data-expansion-name")||"";
+if(el){sl=(el.getAttribute("href")||"").split("/Magic/Expansions/")[1]||"";sl=sl.split(/[?#]/)[0];tt=tl(el)||tt;}
+var f=false,ic=r.querySelectorAll(".col-extras [title], .col-extras [data-bs-original-title]"),j;
+for(j=0;j<ic.length;j++){var v=tl(ic[j]);if(v=="Foil"||v=="Folie")f=true;}
+return{name:r.getAttribute("data-name")||"",number:r.getAttribute("data-number")||"",qty:parseInt(r.getAttribute("data-amount"),10)||1,setSlug:sl,setTitle:tt,foil:f,lang:LG[r.getAttribute("data-language")]||"en"};});
+b.disabled=true;b.textContent="Adding…";
+fetch(A+"/api/cm-purchase-import",{method:"POST",mode:"cors",headers:{"Content-Type":"application/json"},body:JSON.stringify({items:items,mode:"add"})})
+.then(function(x){return x.json();}).then(function(res){b.disabled=false;
+if(!res||!res.ok){b.textContent="Failed - is Binduno running?";setTimeout(rst,4000);return;}
+b.textContent="Added "+res.cards+(res.skipped?" ("+res.skipped+" not matched)":"");setTimeout(rst,6000);})
+.catch(function(){b.disabled=false;b.textContent="Failed - is Binduno running?";setTimeout(rst,4000);});};
+(an||document.body).appendChild(b);}
 function fail(){if(!S.err){S.err=true;
 alert("Binduno: could not reach the app on "+A+".\nChrome/Firefox: make sure Binduno is running, then click the bookmarklet again.\nSafari blocks this connection - use the extension method instead.");}
 S.stop();}
 if(window.__bndS)window.__bndS.stop();
 var S=window.__bndS={err:false,n:0,stop:function(){clearInterval(S.iv);try{S.mo.disconnect();}catch(e){}}};
-run();
-S.iv=setInterval(function(){if(S.err)return;run();if(++S.n>28)S.stop();},3000);
-S.mo=new MutationObserver(function(){if(S.err)return;clearTimeout(S.t);S.t=setTimeout(run,300);});
+run();purch();
+S.iv=setInterval(function(){if(S.err)return;run();purch();if(++S.n>28)S.stop();},3000);
+S.mo=new MutationObserver(function(){if(S.err)return;clearTimeout(S.t);S.t=setTimeout(function(){run();purch();},300);});
 S.mo.observe(document.body,{childList:true,subtree:true});
 setTimeout(S.stop,92000);
 var t=document.createElement("div");t.textContent="Binduno: checking this page…";
