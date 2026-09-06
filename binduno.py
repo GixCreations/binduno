@@ -16,7 +16,7 @@ import urllib.request
 from datetime import datetime, timedelta
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-VERSION = "5.85"
+VERSION = "5.86"
 SCHEMA = 15
 
 
@@ -2600,7 +2600,7 @@ PAGE = r"""<!DOCTYPE html><html lang="en"><head><meta charset="utf-8">
  --w:#8a7a3a;--u:#2b6ea8;--b:#6b5a92;--r:#a83f2e;--g:#3d7a4f;
  --gold:#93690f;--mythic:#b8460f;--ok:#3d7a4f;--good-bg:#e3efe4;
  --bad:#a83f2e;--bad-bg:#f7e2df;
- --row-have-bg:rgba(61,122,79,.13);--row-miss-bg:rgba(168,63,46,.10);
+ --row-have-bg:rgba(55,120,75,.28);--row-miss-bg:rgba(178,55,40,.20);
  --kind-normal-bd:#a9c3db;--kind-normal-fg:#2b6ea8;
  --kind-special-bd:#cdb9e0;--kind-special-fg:#6b4a92;--kind-sealed-bd:#e0c98a;
  --nav-bg:rgba(245,243,238,.92)}
