@@ -16,7 +16,7 @@ import urllib.request
 from datetime import datetime, timedelta
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-VERSION = "5.86"
+VERSION = "5.87"
 SCHEMA = 15
 
 
@@ -2662,6 +2662,7 @@ h2{font-family:var(--serif);font-weight:400;font-size:20px;margin:34px 0 12px}
 .li:last-child{border-bottom:0}
 .li:hover{background:var(--panel2)}
 .seticon{filter:invert(80%) sepia(10%) saturate(250%);vertical-align:-3px}
+:root[data-theme="light"] .seticon{filter:invert(30%) sepia(8%) saturate(180%)}
 .li img{width:19px;height:19px}
 .li .nm{flex:1;font-size:14px}
 .li .mt{font-family:var(--mono);font-size:12px;color:var(--muted)}
@@ -3953,7 +3954,7 @@ function donut(p,color,size=96){
     <circle cx="50" cy="50" r="${R}" fill="none" stroke="${color}" stroke-width="12"
       stroke-dasharray="${C}" stroke-dashoffset="${off}" stroke-linecap="round"
       transform="rotate(-90 50 50)"/>
-    <text x="50" y="55" text-anchor="middle" fill="#e8ebef"
+    <text x="50" y="55" text-anchor="middle" fill="var(--text)"
       style="font:600 19px var(--sans)">${(p*100).toFixed(0)}%</text></svg>`;
 }
 const icon=(s,sz=26)=>s.icon?`<img class="seticon" src="${s.icon}" alt="" width="${sz}" height="${sz}" loading="lazy">`
