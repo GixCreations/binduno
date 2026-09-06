@@ -16,7 +16,7 @@ import urllib.request
 from datetime import datetime, timedelta
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-VERSION = "5.84"
+VERSION = "5.85"
 SCHEMA = 15
 
 
@@ -2587,6 +2587,7 @@ PAGE = r"""<!DOCTYPE html><html lang="en"><head><meta charset="utf-8">
  --w:#e8dcb5;--u:#4a90c4;--b:#8b7fa8;--r:#c8503c;--g:#4f9d69;
  --gold:#d4a629;--mythic:#e0692c;--ok:#4f9d69;--good-bg:#183024;
  --bad:#d98a8a;--bad-bg:#33191b;
+ --row-have-bg:rgba(79,157,105,.11);--row-miss-bg:rgba(200,80,60,.10);
  --kind-normal-bd:#33506b;--kind-normal-fg:#8fb6d8;
  --kind-special-bd:#5b4a72;--kind-special-fg:#b49ed0;--kind-sealed-bd:#6b5324;
  --serif:"Iowan Old Style","Palatino Linotype",Palatino,Georgia,serif;
@@ -2599,6 +2600,7 @@ PAGE = r"""<!DOCTYPE html><html lang="en"><head><meta charset="utf-8">
  --w:#8a7a3a;--u:#2b6ea8;--b:#6b5a92;--r:#a83f2e;--g:#3d7a4f;
  --gold:#93690f;--mythic:#b8460f;--ok:#3d7a4f;--good-bg:#e3efe4;
  --bad:#a83f2e;--bad-bg:#f7e2df;
+ --row-have-bg:rgba(61,122,79,.13);--row-miss-bg:rgba(168,63,46,.10);
  --kind-normal-bd:#a9c3db;--kind-normal-fg:#2b6ea8;
  --kind-special-bd:#cdb9e0;--kind-special-fg:#6b4a92;--kind-sealed-bd:#e0c98a;
  --nav-bg:rgba(245,243,238,.92)}
@@ -2606,7 +2608,8 @@ PAGE = r"""<!DOCTYPE html><html lang="en"><head><meta charset="utf-8">
    from green-vs-red (hard to tell apart with deuteranopia/protanopia) to the
    blue-vs-orange pairing that stays distinguishable across all common types. */
 :root[data-theme="colorblind"]{
- --ok:#4a90c4;--good-bg:#16283a;--bad:#e0a458;--bad-bg:#3a2712}
+ --ok:#4a90c4;--good-bg:#16283a;--bad:#e0a458;--bad-bg:#3a2712;
+ --row-have-bg:rgba(74,144,196,.14);--row-miss-bg:rgba(224,164,88,.14)}
 *{box-sizing:border-box}
 /* always reserve the scrollbar gutter so switching between a short and a tall
    page doesn't nudge the whole centred layout sideways */
@@ -2749,8 +2752,8 @@ dialog::backdrop{background:rgba(6,9,13,.8)}
   padding:10px 12px;border:1px solid var(--line);border-radius:5px;margin-bottom:7px;background:var(--panel2)}
 .opt .lb{font-size:14px}
 .opt .n{font-family:var(--mono);font-size:12px;color:var(--muted);text-align:right}
-table.setcards tr.have{background:rgba(63,185,80,.09)}
-table.setcards tr.miss{background:rgba(240,85,74,.06)}
+table.setcards tr.have{background:var(--row-have-bg)}
+table.setcards tr.miss{background:var(--row-miss-bg)}
 table.setcards td{border-bottom-color:var(--line)}
 table.setcards tr.notgoal td{opacity:.5}
 table.setcards tr.notgoal td .badge{opacity:1}
