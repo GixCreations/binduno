@@ -16,7 +16,7 @@ import urllib.request
 from datetime import datetime, timedelta
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-VERSION = "5.89"
+VERSION = "5.90"
 SCHEMA = 16
 
 
@@ -5157,13 +5157,13 @@ async function drawCart(){
 const CM_LIMIT=150;
 // Cardmarket want-list syntax, confirmed by testing:
 //   Card Name (V.n) (Expansion)
-// The version comes first, in its own brackets, and the expansion follows.
-// Special treatments live in a separate expansion called "<Set>: Extras";
-// the "Version 1/2/3" shown in Cardmarket's dropdown is the V.n inside it.
+// The version always comes first, in its own brackets, and the expansion is
+// the LAST parenthesised group (Cardmarket's parser reads the trailing "(...)"
+// as the expansion — putting "(V.n)" there instead, as we used to for base
+// printings, made it look for an expansion literally called "V.2").
+// Special treatments live in a separate expansion "<Set>: Extras"; the
+// "Version 1/2/3" in Cardmarket's dropdown is the V.n inside it.
 //   Smaug the Magnificent (V.1) (The Hobbit: Extras)
-// Cardmarket's bracket order differs between the two cases, confirmed by testing:
-//   base printing : Smaug the Magnificent (The Hobbit) (V.1)
-//   extra printing: Smaug the Magnificent (V.1) (The Hobbit: Extras)
 function wantLine(c, setName, qty){
   const n = qty && qty > 1 ? `${qty}x ` : "";
   // Cardmarket splits Secret Lair into hundreds of separate expansions and
@@ -5174,11 +5174,8 @@ function wantLine(c, setName, qty){
     return `${n}${c.name} (Secret Lair Drop Series)`;
   const base = cmName(setName);
   const v = c.cmVer;                 // 0 / null => only one printing of this name here, no (V.n)
-  if(c.cmSuffix)
-    return v ? `${n}${c.name} (V.${v}) (${base}${c.cmSuffix})`
-             : `${n}${c.name} (${base}${c.cmSuffix})`;
-  return v ? `${n}${c.name} (${base}) (V.${v})`
-           : `${n}${c.name} (${base})`;
+  return v ? `${n}${c.name} (V.${v}) (${base}${c.cmSuffix || ""})`
+           : `${n}${c.name} (${base}${c.cmSuffix || ""})`;
 }
 
 function wantChunks(lines){
@@ -5877,11 +5874,11 @@ function helpPane(sel){
      <li><b>Special printings</b> — borderless, showcase, surge foil and similar are labelled
          in orange next to the card name.</li></ul>
      <h3>Want lists</h3>
-     <p>Cardmarket uses two different bracket orders. A regular printing reads
-        <code>Card Name (Set) (V.n)</code>, a special treatment reads
-        <code>Card Name (V.n) (Set: Extras)</code>. If a card has only one printing
-        in that set the <code>(V.n)</code> is dropped — Cardmarket won't resolve
-        the expansion otherwise. Special treatments such as borderless or
+     <p>A line reads <code>Card Name (V.n) (Set)</code> — the version first, the
+        set always last (Cardmarket reads the trailing brackets as the expansion).
+        A special treatment reads <code>Card Name (V.n) (Set: Extras)</code>. If a
+        card has only one printing in that set the <code>(V.n)</code> is dropped —
+        Cardmarket won't resolve the expansion otherwise. Special treatments such as borderless or
         surge foil are not part of the main set on Cardmarket; they live in an expansion
         called <code>&lt;Set&gt;: Extras</code>, and the number Cardmarket shows as
         “Version 1/2/3” is the <code>V.n</code> inside that expansion. A borderless Smaug
@@ -5982,11 +5979,11 @@ function helpPane(sel){
      <li><b>Sonderdrucke</b> — Borderless, Showcase, Surge-Foil und Ähnliches werden orange
          neben dem Kartennamen markiert.</li></ul>
      <h3>Wantlisten</h3>
-     <p>Cardmarket nutzt zwei unterschiedliche Klammerreihenfolgen. Ein regulärer Druck liest
-        sich <code>Card Name (Set) (V.n)</code>, ein Sonderdruck
-        <code>Card Name (V.n) (Set: Extras)</code>. Hat eine Karte in dem Set nur einen
-        Druck, entfällt das <code>(V.n)</code> — sonst erkennt Cardmarket die Erweiterung
-        nicht. Sonderdrucke wie Borderless oder Surge-Foil
+     <p>Eine Zeile liest sich <code>Card Name (V.n) (Set)</code> — Version zuerst,
+        das Set immer als letzte Klammer (Cardmarket wertet die letzte Klammer als
+        Erweiterung). Ein Sonderdruck liest sich <code>Card Name (V.n) (Set: Extras)</code>.
+        Hat eine Karte in dem Set nur einen Druck, entfällt das <code>(V.n)</code> —
+        sonst erkennt Cardmarket die Erweiterung nicht. Sonderdrucke wie Borderless oder Surge-Foil
         gehören auf Cardmarket nicht zum Hauptset; sie leben in einer Erweiterung namens
         <code>&lt;Set&gt;: Extras</code>, und die Nummer, die Cardmarket als „Version 1/2/3“
         zeigt, ist das <code>V.n</code> innerhalb dieser Erweiterung. Ein Borderless-Smaug liest
