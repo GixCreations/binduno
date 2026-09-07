@@ -16,7 +16,7 @@ import urllib.request
 from datetime import datetime, timedelta
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-VERSION = "5.88"
+VERSION = "5.89"
 SCHEMA = 16
 
 
@@ -5879,7 +5879,9 @@ function helpPane(sel){
      <h3>Want lists</h3>
      <p>Cardmarket uses two different bracket orders. A regular printing reads
         <code>Card Name (Set) (V.n)</code>, a special treatment reads
-        <code>Card Name (V.n) (Set: Extras)</code>. Special treatments such as borderless or
+        <code>Card Name (V.n) (Set: Extras)</code>. If a card has only one printing
+        in that set the <code>(V.n)</code> is dropped — Cardmarket won't resolve
+        the expansion otherwise. Special treatments such as borderless or
         surge foil are not part of the main set on Cardmarket; they live in an expansion
         called <code>&lt;Set&gt;: Extras</code>, and the number Cardmarket shows as
         “Version 1/2/3” is the <code>V.n</code> inside that expansion. A borderless Smaug
@@ -5982,7 +5984,9 @@ function helpPane(sel){
      <h3>Wantlisten</h3>
      <p>Cardmarket nutzt zwei unterschiedliche Klammerreihenfolgen. Ein regulärer Druck liest
         sich <code>Card Name (Set) (V.n)</code>, ein Sonderdruck
-        <code>Card Name (V.n) (Set: Extras)</code>. Sonderdrucke wie Borderless oder Surge-Foil
+        <code>Card Name (V.n) (Set: Extras)</code>. Hat eine Karte in dem Set nur einen
+        Druck, entfällt das <code>(V.n)</code> — sonst erkennt Cardmarket die Erweiterung
+        nicht. Sonderdrucke wie Borderless oder Surge-Foil
         gehören auf Cardmarket nicht zum Hauptset; sie leben in einer Erweiterung namens
         <code>&lt;Set&gt;: Extras</code>, und die Nummer, die Cardmarket als „Version 1/2/3“
         zeigt, ist das <code>V.n</code> innerhalb dieser Erweiterung. Ein Borderless-Smaug liest
