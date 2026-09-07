@@ -16,7 +16,7 @@ import urllib.request
 from datetime import datetime, timedelta
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-VERSION = "5.90"
+VERSION = "5.91"
 SCHEMA = 16
 
 
@@ -4572,7 +4572,7 @@ const trow=s=>`<tr class="${s.missing===0&&s.counted?"done":""} ${s.counted?"":"
     <button data-tog="${s.code}">${s.counted?"✕":"✓"}</button></td></tr>`;
 
 /* ---------------- Set dialogs ---------------- */
-let DETAIL=null,CS="number",CD=1,DV="table",CRUMBS=[],LAST_SET_CODE=null;
+let DETAIL=null,CS="number",CD=1,DV="table",CRUMBS=[],LAST_SET_CODE=null,SETQ="";
 function crumbs(items){
   if(items.length<2)return "";
   return `<div class="crumbs">${items.map((it,i)=>i===items.length-1
@@ -4671,7 +4671,7 @@ async function openSet(code){go("set/"+code);}
 async function setPage(code){
   DETAIL=await getJSON("/api/set/"+code);
   CRUMBS=[{label:t("nav.collection"),hash:"collection"},{label:DETAIL.name,hash:"set/"+code}];
-  if(code!==LAST_SET_CODE){CS="number";CD=1;}
+  if(code!==LAST_SET_CODE){CS="number";CD=1;SETQ="";}
   LAST_SET_CODE=code;
   const pct=DETAIL.total?Math.round(DETAIL.pct*100):0;
   $("#view").innerHTML=crumbs(CRUMBS.slice(0,1).concat([{label:DETAIL.name}]))+
@@ -4698,10 +4698,14 @@ function drawCards(){
     else if(CS==="foil"){x=a.foil||0;y=b.foil||0;}
     else if(CS==="qty"){x=a.qty||0;y=b.qty||0;}
     if(typeof x==="string")return x.localeCompare(y)*CD;
-    return (x-y)*CD;}).filter(c=>!HIDE_OFFGOAL||c.inGoal);
+    return (x-y)*CD;}).filter(c=>!HIDE_OFFGOAL||c.inGoal)
+    .filter(c=>{if(!SETQ)return true;const q=SETQ.toLowerCase();
+      return cardName(c).toLowerCase().includes(q)||(c.name||"").toLowerCase().includes(q)
+        ||String(c.number).toLowerCase()===q;});
   const sl=isSecretLair(DETAIL.code);
   const head=`${sl?`<div class="msg" style="max-width:720px">${t("cart.secretLairNote")}</div>`:""}
     <div class="tools" style="margin:14px 0 10px">
+    <input type="search" id="gq" placeholder="${t("missing.searchPlaceholder")}" value="${SETQ}" style="flex:1 1 180px;min-width:120px">
     <div class="seg"><button data-dv="table" class="${DV==="table"?"on":""}">${t("collection.table")}</button>
     <button data-dv="grid" class="${DV==="grid"?"on":""}">${t("collection.grid")}</button></div>
     <select id="gsort">${SORTCOLS.map(([k,l])=>
@@ -4736,7 +4740,7 @@ function drawCards(){
         c.inGoal?"":`<span class="badge">${t("setPage.notInGoal")}</span> `}${
         {Endgame:t("setPage.noteEndgame"),BaseMissing:t("setPage.baseMissing"),
          "Other printing":t("setPage.noteOtherPrinting")}[c.note]||c.note||""}</td>
-      <td class="num"><button data-cart="${DETAIL.code}|${c.number}" ${c.have?"disabled":""}
+      <td class="num"><button data-cart="${DETAIL.code}|${c.number}"
         >+</button></td></tr>`).join("")}
     </tbody></table>`;
   OUT.querySelectorAll("th").forEach(th=>th.onclick=()=>{
@@ -4764,6 +4768,13 @@ function bindSetTools(){
       body:JSON.stringify({hideOffGoal:HIDE_OFFGOAL})}).catch(()=>{});
     drawCards();
   };
+  const gq=$("#gq");
+  if(gq)gq.oninput=debounce(()=>{
+    SETQ=gq.value;
+    drawCards();
+    const n=$("#gq");
+    if(n){n.focus();try{n.setSelectionRange(n.value.length,n.value.length);}catch(e){}}
+  },220);
 }
 
 /* ---------------- Buy page ---------------- */
