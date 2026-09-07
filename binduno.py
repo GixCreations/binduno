@@ -16,8 +16,8 @@ import urllib.request
 from datetime import datetime, timedelta
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-VERSION = "5.87"
-SCHEMA = 15
+VERSION = "5.88"
+SCHEMA = 16
 
 
 def _env(name, *legacy):
@@ -745,12 +745,18 @@ def refresh_cards():
         # position among the extras, counted separately from the base printings.
         suffixes, cmvers = [""] * len(rows), [1] * len(rows)
         for _key, idxs in by_name.items():
+            n_base = sum(1 for i in idxs if not rows[i][10])
+            n_extra = sum(1 for i in idxs if rows[i][10])
             for i in idxs:
                 if extras[i]:
                     suffixes[i] = ": Extras"
-                    cmvers[i] = extras[i]
+                    # cm_ver 0 = "this name has just one printing here, so
+                    # Cardmarket shows no Version dropdown". Emitting "(V.1)"
+                    # anyway makes some sets (Magic 2010 among them) fail to
+                    # resolve the expansion at all.
+                    cmvers[i] = extras[i] if n_extra > 1 else 0
                 else:
-                    cmvers[i] = vers[i]
+                    cmvers[i] = vers[i] if n_base > 1 else 0
         rows = [r + (vers[i], extras[i], suffixes[i], cmvers[i],
                      _norm_name(de_names.get((r[0], r[1]), "")),
                      de_types.get((r[0], r[1]), ""), de_oracle.get((r[0], r[1]), ""))
@@ -1446,7 +1452,7 @@ def set_detail(c, code):
                       "foil": round(r["eur_foil"], 2) if r["eur_foil"] else 0,
                       "img": r["img"], "mana": r["mana"], "artist": r["artist"],
                       "variant": r["variant"] or "", "finishes": r["finishes"] or "",
-                      "ver": r["ver"] or 1, "extras": r["extras_idx"] or 0, "cmSuffix": r["cm_suffix"] or "", "cmVer": r["cm_ver"] or 1,
+                      "ver": r["ver"] or 1, "extras": r["extras_idx"] or 0, "cmSuffix": r["cm_suffix"] or "", "cmVer": r["cm_ver"] if r["cm_ver"] is not None else 1,
                       "qty": r["qty"], "have": have, "note": "", "want": False})
     # Decide want / note per card. "names" scope: one owned printing of a name
     # settles it, and a still-missing name flags exactly one printing to buy —
@@ -1854,7 +1860,7 @@ def card_search(c, p):
                        "eur": round(r["eur"] or 0, 2), "foil": round(r["eur_foil"] or 0, 2),
                        "img": r["img"], "mana": r["mana"], "artist": r["artist"],
                        "colors": r["colors"], "variant": r["variant"] or "",
-                       "finishes": r["finishes"] or "", "ver": r["ver"] or 1, "extras": r["extras_idx"] or 0, "cmSuffix": r["cm_suffix"] or "", "cmVer": r["cm_ver"] or 1,
+                       "finishes": r["finishes"] or "", "ver": r["ver"] or 1, "extras": r["extras_idx"] or 0, "cmSuffix": r["cm_suffix"] or "", "cmVer": r["cm_ver"] if r["cm_ver"] is not None else 1,
                        "qty": r["qty"]} for r in rows]}
 
 
@@ -1902,7 +1908,7 @@ def card_detail(c, code, number):
             "pt": r["pt"], "img": r["img"], "colors": r["colors"],
             "eur": round(r["eur"] or 0, 2), "foil": round(r["eur_foil"] or 0, 2),
             "variant": r["variant"] or "", "finishes": r["finishes"] or "",
-            "ver": r["ver"] or 1, "extras": r["extras_idx"] or 0, "cmSuffix": r["cm_suffix"] or "", "cmVer": r["cm_ver"] or 1, "cardmarket": r["cm_uri"], "scryfall": r["scry_uri"],
+            "ver": r["ver"] or 1, "extras": r["extras_idx"] or 0, "cmSuffix": r["cm_suffix"] or "", "cmVer": r["cm_ver"] if r["cm_ver"] is not None else 1, "cardmarket": r["cm_uri"], "scryfall": r["scry_uri"],
             "qty": qty, "qtyNormal": qty_normal, "qtyFoil": qty_foil,
             "legal": legal, "printings": prints}
 
@@ -1957,7 +1963,7 @@ def missing_names(c, p):
                        "number": r["number"], "rarity": r["rarity"],
                        "eur": round(r["eur"], 2), "img": r["img"],
                        "type": r["type_line"], "variant": r["variant"] or "",
-                       "ver": r["ver"] or 1, "extras": r["extras_idx"] or 0, "cmSuffix": r["cm_suffix"] or "", "cmVer": r["cm_ver"] or 1} for r in rows]}
+                       "ver": r["ver"] or 1, "extras": r["extras_idx"] or 0, "cmSuffix": r["cm_suffix"] or "", "cmVer": r["cm_ver"] if r["cm_ver"] is not None else 1} for r in rows]}
 
 
 def secret_lair_codes(c):
@@ -1979,7 +1985,7 @@ def cart_rows(c):
               "name": r["name"], "nameDe": r["name_de"] or "", "qty": r["qty"], "rarity": r["rarity"],
               "eur": round(r["eur"] or 0, 2), "foil": round(r["eur_foil"] or 0, 2),
               "img": r["img"], "variant": r["variant"] or "",
-              "ver": r["ver"] or 1, "extras": r["extras_idx"] or 0, "cmSuffix": r["cm_suffix"] or "", "cmVer": r["cm_ver"] or 1} for r in rows]
+              "ver": r["ver"] or 1, "extras": r["extras_idx"] or 0, "cmSuffix": r["cm_suffix"] or "", "cmVer": r["cm_ver"] if r["cm_ver"] is not None else 1} for r in rows]
     goods = sum(i["eur"] * i["qty"] for i in items)
     n = sum(i["qty"] for i in items)
     ship = shipping(n, goods, tracked_shipping_only(c), shipping_country(c))
@@ -5167,10 +5173,12 @@ function wantLine(c, setName, qty){
   if((setName || "").trim() === "Secret Lair Drop")
     return `${n}${c.name} (Secret Lair Drop Series)`;
   const base = cmName(setName);
-  const v = c.cmVer || 1;
-  return c.cmSuffix
-    ? `${n}${c.name} (V.${v}) (${base}${c.cmSuffix})`
-    : `${n}${c.name} (${base}) (V.${v})`;
+  const v = c.cmVer;                 // 0 / null => only one printing of this name here, no (V.n)
+  if(c.cmSuffix)
+    return v ? `${n}${c.name} (V.${v}) (${base}${c.cmSuffix})`
+             : `${n}${c.name} (${base}${c.cmSuffix})`;
+  return v ? `${n}${c.name} (${base}) (V.${v})`
+           : `${n}${c.name} (${base})`;
 }
 
 function wantChunks(lines){
