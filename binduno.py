@@ -16,7 +16,7 @@ import urllib.request
 from datetime import datetime, timedelta
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-VERSION = "5.94"
+VERSION = "5.95"
 SCHEMA = 16
 
 
@@ -307,7 +307,15 @@ def init(c):
                 except sqlite3.Error:
                     pass
     c.commit()
-    if meta_get(c, "schema") != str(SCHEMA):
+    old_schema = meta_get(c, "schema")
+    if old_schema != str(SCHEMA):
+        # A schema bump only rebuilds the regenerable Scryfall catalog, never
+        # the hand-built tables — but snapshot them anyway before touching the
+        # DB, so an interrupted / offline re-download can't leave the user
+        # stranded and there's always a rollback point.
+        if old_schema is not None and \
+                c.execute("SELECT 1 FROM collection LIMIT 1").fetchone():
+            backup_user_data(c, f"update-schema{old_schema}-to-{SCHEMA}")
         c.execute("DROP TABLE IF EXISTS cards")
         c.executescript("""
         CREATE TABLE cards(
@@ -343,6 +351,102 @@ def log(c, action, detail):
     c.execute("DELETE FROM history WHERE id NOT IN "
               "(SELECT id FROM history ORDER BY id DESC LIMIT 100)")
     c.commit()
+
+
+# Everything the user built up by hand — NOT the regenerable Scryfall catalog
+# (cards/sets) and NOT price_history (re-downloadable from MTGJSON, and bulky).
+BACKUP_TABLES = ("collection", "cart", "watchlist", "set_pref", "history", "meta")
+# A restore only swaps the user's holdings + set prefs; `meta` (schema,
+# sync timestamps…) and the `history` log are left as they are.
+RESTORE_TABLES = ("collection", "cart", "watchlist", "set_pref")
+BACKUP_KEEP = 12
+
+
+def backup_user_data(c, tag):
+    """Snapshot the hand-built tables to a small standalone SQLite file under
+    <data>/backups/ before anything destructive (schema migration, a
+    replace-import, a reset). Best effort — a failure here must never block
+    the operation it is guarding. Returns the path or None."""
+    try:
+        d = os.path.join(BASE, "backups")
+        os.makedirs(d, exist_ok=True)
+        stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
+        path = os.path.join(d, f"{stamp}-{tag}.db")
+        bk = sqlite3.connect(path)
+        try:
+            for t in BACKUP_TABLES:
+                ddl = c.execute("SELECT sql FROM sqlite_master WHERE type='table' AND name=?",
+                                (t,)).fetchone()
+                if not ddl or not ddl["sql"]:
+                    continue
+                bk.execute(ddl["sql"])
+                rows = c.execute(f"SELECT * FROM {t}").fetchall()
+                if rows:
+                    bk.executemany(f"INSERT INTO {t} VALUES({','.join('?' * len(rows[0]))})",
+                                   [tuple(r) for r in rows])
+            bk.commit()
+        finally:
+            bk.close()
+        kept = sorted(f for f in os.listdir(d) if f.endswith(".db"))
+        for old in kept[:-BACKUP_KEEP]:
+            try:
+                os.remove(os.path.join(d, old))
+            except OSError:
+                pass
+        try:
+            log(c, "Backup", f"Saved a pre-{tag} snapshot: {os.path.basename(path)}")
+        except sqlite3.Error:
+            pass
+        return path
+    except Exception as e:                          # noqa: BLE001 — never block on a backup
+        try:
+            log(c, "Backup", f"pre-{tag} snapshot failed: {e}")
+        except sqlite3.Error:
+            pass
+        return None
+
+
+def list_backups():
+    d = os.path.join(BASE, "backups")
+    if not os.path.isdir(d):
+        return []
+    out = []
+    for f in sorted((f for f in os.listdir(d) if f.endswith(".db")), reverse=True):
+        p = os.path.join(d, f)
+        try:
+            st = os.stat(p)
+            out.append({"name": f, "size": st.st_size,
+                        "mtime": datetime.fromtimestamp(st.st_mtime).isoformat(timespec="seconds")})
+        except OSError:
+            pass
+    return out
+
+
+def restore_user_data(c, name):
+    """Replace the hand-built tables from a backup file in <data>/backups/."""
+    d = os.path.join(BASE, "backups")
+    src = os.path.realpath(os.path.join(d, name))
+    if os.path.dirname(src) != os.path.realpath(d) or not os.path.isfile(src):
+        raise ValueError("unknown backup file")
+    backup_user_data(c, "restore")                  # guard the current state first
+    bk = sqlite3.connect(src)
+    bk.row_factory = sqlite3.Row
+    try:
+        have = {r["name"] for r in bk.execute(
+            "SELECT name FROM sqlite_master WHERE type='table'")}
+        for t in RESTORE_TABLES:
+            if t not in have:
+                continue
+            rows = bk.execute(f"SELECT * FROM {t}").fetchall()
+            c.execute(f"DELETE FROM {t}")
+            if rows:
+                c.executemany(f"INSERT INTO {t} VALUES({','.join('?' * len(rows[0]))})",
+                              [tuple(r) for r in rows])
+        c.commit()
+    finally:
+        bk.close()
+    meta_set(c, "collection_updated", datetime.now().isoformat(timespec="seconds"))
+    log(c, "Backup", f"Restored hand-built data from {name}")
 
 
 # ------------------------------------------------------- GitHub self-update
@@ -1170,6 +1274,8 @@ def _commit_collection_rows(c, raw_rows, mode, label):
     if not rows:
         return {"rows": 0, "cards": 0, "mode": mode}
     if mode == "replace":
+        if c.execute("SELECT 1 FROM collection LIMIT 1").fetchone():
+            backup_user_data(c, "replace-import")
         c.execute("DELETE FROM collection")
         c.executemany("INSERT OR REPLACE INTO collection VALUES(?,?,?,?,?,?)", rows)
     else:
@@ -2360,6 +2466,9 @@ class Handler(BaseHTTPRequestHandler):
         elif p == "/api/history":
             self.send_json([dict(r) for r in c.execute(
                 "SELECT ts,action,detail FROM history ORDER BY id DESC LIMIT 100")])
+        elif p == "/api/backups":
+            self.send_json({"items": list_backups(),
+                            "dir": os.path.join(BASE, "backups")})
         elif p == "/api/refresh-status":
             self.send_json(REFRESH)
         elif p == "/api/github-latest":
@@ -2671,12 +2780,22 @@ class Handler(BaseHTTPRequestHandler):
                     f'{set_code.upper()} #{number} -> {new_qty}x')
             self.send_json(card_detail(c, set_code, number))
         elif self.path == "/api/reset":
+            if c.execute("SELECT 1 FROM collection LIMIT 1").fetchone():
+                backup_user_data(c, "reset")
             c.execute("DELETE FROM collection")
             log(c, "Collection", "Collection cleared")
             c.commit()
             bust()
             cached_home(c)     # rebuild sets + home now, on the connection that committed
             self.send_json({"ok": True})
+        elif self.path == "/api/restore":
+            try:
+                restore_user_data(c, json.loads(raw).get("name", ""))
+                bust()
+                cached_home(c)
+                self.send_json({"ok": True})
+            except Exception as e:                            # noqa: BLE001
+                self.send_json({"ok": False, "error": str(e)}, 400)
         else:
             self.send_json({"error": "not found"}, 404)
 
@@ -3415,6 +3534,15 @@ en:{
   "manageUpdate.backupDesc":"Export everything you own as CSV in ManaBox column layout, "+
     "so it can be re-imported here or loaded into ManaBox.",
   "manageUpdate.exportBtn":"Export collection as CSV",
+  "manageUpdate.autoBackupDesc":"Binduno also snapshots your collection, cart, watchlist and "+
+    "set settings automatically right before anything that could overwrite them — a version "+
+    "update that rebuilds card data, a replace-import, or a reset. The last 12 are kept.",
+  "manageUpdate.autoBackupNone":"No automatic snapshots yet.",
+  "manageUpdate.autoBackupWhere":"Files: {dir}",
+  "manageUpdate.restoreBtn":"Restore this snapshot",
+  "manageUpdate.confirmRestore":"Replace your current collection, cart, watchlist and set "+
+    "settings with this snapshot? (The current state is snapshotted first.)",
+  "manageUpdate.restoring":"Restoring…",
   "manageUpdate.dangerZone":"Danger zone","manageUpdate.clearBtn":"Clear stored collection",
   "manageUpdate.confirmClear":"Remove every card from the stored collection?",
   "manageUpdate.cardDataUpToDate":"Card data up to date.",
@@ -3827,6 +3955,16 @@ de:{
   "manageUpdate.backupDesc":"Alles Besessene als CSV im ManaBox-Spaltenformat exportieren, "+
     "zum Re-Import hier oder in ManaBox.",
   "manageUpdate.exportBtn":"Sammlung als CSV exportieren",
+  "manageUpdate.autoBackupDesc":"Binduno sichert Sammlung, Cart, Watchlist und Set-"+
+    "Einstellungen zusätzlich automatisch, direkt bevor etwas sie überschreiben könnte — "+
+    "ein Versions-Update, das die Kartendaten neu aufbaut, ein Replace-Import oder ein "+
+    "Zurücksetzen. Die letzten 12 werden aufbewahrt.",
+  "manageUpdate.autoBackupNone":"Noch keine automatischen Sicherungen.",
+  "manageUpdate.autoBackupWhere":"Dateien: {dir}",
+  "manageUpdate.restoreBtn":"Diese Sicherung wiederherstellen",
+  "manageUpdate.confirmRestore":"Aktuelle Sammlung, Cart, Watchlist und Set-Einstellungen "+
+    "durch diese Sicherung ersetzen? (Der jetzige Stand wird vorher gesichert.)",
+  "manageUpdate.restoring":"Wird wiederhergestellt…",
   "manageUpdate.dangerZone":"Gefahrenzone","manageUpdate.clearBtn":"Gespeicherte Sammlung löschen",
   "manageUpdate.confirmClear":"Wirklich jede Karte aus der gespeicherten Sammlung entfernen?",
   "manageUpdate.cardDataUpToDate":"Kartendaten aktuell.",
@@ -5691,6 +5829,8 @@ function updatePane(){
   <h2>${t("manageUpdate.backupTitle")}</h2>
   <p class="sub">${t("manageUpdate.backupDesc")}</p>
   <a class="buybtn" href="/api/export" download>${t("manageUpdate.exportBtn")}</a>
+  <p class="sub" style="margin-top:14px">${t("manageUpdate.autoBackupDesc")}</p>
+  <div id="bkList" class="sub">${t("missing.loading")}</div>
   <h2>${t("manageUpdate.dangerZone")}</h2>
   <button id="clr">${t("manageUpdate.clearBtn")}</button>`;
   let text=null;
@@ -5749,6 +5889,29 @@ function updatePane(){
     await busyDone();
     manage();
   };
+  drawBackups();
+  async function drawBackups(){
+    const el=$("#bkList");if(!el)return;
+    let r;try{r=await fetch("/api/backups").then(x=>x.json());}catch(e){r={items:[]};}
+    if(!r.items||!r.items.length){el.textContent=t("manageUpdate.autoBackupNone");return;}
+    el.innerHTML=`<div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center;margin-top:6px">
+      <select id="bkSel">${r.items.map(b=>`<option value="${b.name}">${
+        b.name} · ${(b.size/1024).toFixed(0)} KB</option>`).join("")}</select>
+      <button id="bkRestore">${t("manageUpdate.restoreBtn")}</button></div>
+      <div style="margin-top:4px">${t("manageUpdate.autoBackupWhere",{dir:r.dir})}</div>`;
+    $("#bkRestore").onclick=async()=>{
+      if(!confirm(t("manageUpdate.confirmRestore")))return;
+      busyStart(t("manageUpdate.restoring"));
+      let res;
+      try{res=await fetch("/api/restore",{method:"POST",
+        body:JSON.stringify({name:$("#bkSel").value})}).then(x=>x.json());
+        if(res.ok){busyStep(t("busy.recount"));FORCE_RELOAD=true;await load();}
+      }catch(e){res={ok:false,error:String(e)};}
+      await busyDone();
+      if(!res.ok)alert(t("manageUpdate.failed",{err:res.error}));
+      manage();
+    };
+  }
   async function poll(doneMsg){
     const s=await fetch("/api/refresh-status").then(r=>r.json());
     $("#pb").style.width=s.pct+"%";
