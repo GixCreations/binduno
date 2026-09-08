@@ -16,7 +16,7 @@ import urllib.request
 from datetime import datetime, timedelta
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-VERSION = "5.95"
+VERSION = "5.96"
 SCHEMA = 16
 
 
@@ -1354,6 +1354,148 @@ def import_cm_purchase(c, items, mode="add"):
     return result
 
 
+# --------------------------------------------------- decklist -> want list
+DECK_FORMATS = ["auto", "moxfield", "archidekt", "mtga", "mtgo", "tappedout",
+                "deckstats", "plain"]
+# a section header line (whole line, case-insensitive) switches the running
+# section; "sb:" as a line prefix marks just that one card
+_DECK_SECTIONS = {"deck": "deck", "mainboard": "deck", "maindeck": "deck",
+                  "commander": "commander", "commanders": "commander",
+                  "companion": "companion", "sideboard": "sideboard",
+                  "sb": "sideboard", "maybeboard": "maybeboard", "maybe": "maybeboard"}
+# n / nx / "n x" quantity, name, optional "(SET) 123" — Cardmarket/Arena/Moxfield
+# all converge on this once Archidekt's [cats]/^tags^/*F* decorations are peeled
+_DECK_LINE = re.compile(
+    r"^\s*(?:(?P<qty>\d+)\s*[xX]?\s+)?(?P<rest>.+?)\s*$")
+_DECK_SET = re.compile(r"\(([A-Za-z0-9]{2,7})\)\s*([A-Za-z0-9★\-]+)?\s*$")
+
+
+def parse_decklist(text, fmt="auto"):
+    """Text decklist -> [{qty, name, set, num, foil, section}]. Tolerant of the
+    common export shapes (Moxfield, Archidekt, MTG Arena, MTGO, TappedOut,
+    Deckstats, plain); `fmt` only decides whether a blank line starts the
+    sideboard (Arena/MTGO do that, the others use explicit headers)."""
+    blank_starts_sb = fmt in ("auto", "mtga", "mtgo", "plain")
+    section = "deck"
+    seen_card = seen_header = False
+    agg = {}
+    order = []
+    for raw in (text or "").replace("\r", "").split("\n"):
+        line = raw.strip()
+        if not line:
+            if blank_starts_sb and seen_card and not seen_header and section == "deck":
+                section = "sideboard"
+            continue
+        low = line.lower()
+        if low.startswith("//"):
+            low = low[2:].strip()
+            line = line[2:].strip()
+        if low in _DECK_SECTIONS:                       # a whole-line header
+            section = _DECK_SECTIONS[low]
+            seen_header = True
+            continue
+        row_section = section
+        if low.startswith("sb:"):                       # MTGO per-line sideboard
+            row_section = "sideboard"
+            line = line[3:].strip()
+        if line.lower().startswith(("about", "name ", "deck\t")):
+            continue
+        m = _DECK_LINE.match(line)
+        if not m:
+            continue
+        qty = int(m.group("qty")) if m.group("qty") else 1
+        rest = m.group("rest")
+        foil = False
+        # peel Archidekt decorations from the end
+        for _ in range(6):
+            r2 = re.sub(r"\s*(\*[A-Za-z]?\*|\^[^^]*\^|\[[^\]]*\]|<[^>]*>)\s*$", "", rest)
+            if r2 == rest:
+                break
+            if re.search(r"\*[FfEe]?\*\s*$", rest):
+                foil = True
+            rest = r2
+        setc = num = None
+        sm = _DECK_SET.search(rest)
+        if sm:
+            setc = sm.group(1).lower()
+            num = (sm.group(2) or "").strip() or None
+            rest = rest[:sm.start()].strip()
+        name = rest.strip().strip("-").strip()
+        name = re.sub(r"\s+/\s+", " // ", name)         # split/DFC "A / B" -> "A // B"
+        if not name:
+            continue
+        seen_card = True
+        key = (name.lower(), setc or "", num or "", row_section)
+        if key in agg:
+            agg[key]["qty"] += qty
+        else:
+            agg[key] = {"qty": qty, "name": name, "set": setc, "num": num,
+                        "foil": foil, "section": row_section}
+            order.append(key)
+    return [agg[k] for k in order]
+
+
+def resolve_deck(c, parsed):
+    """Match each parsed line against the catalog. Printings are collapsed to
+    one entry per set (the lowest collector number = the base printing, whose
+    cm_ver/cm_suffix are what a want line needs), newest set first. Each card
+    carries that list so the review UI can offer 'keep the deck's set' vs
+    'any set' vs pick a different set, with an image per set."""
+    out = []
+    for it in parsed:
+        name = _norm_name(it["name"].strip())
+        front = name.split(" // ")[0]
+        qty = max(1, int(it.get("qty") or 1))
+        rows = c.execute(
+            """SELECT k.set_code, s.name set_name, k.number, k.num_int, s.released,
+                      k.eur, k.eur_foil, k.img, k.cm_suffix, k.cm_ver
+               FROM cards k JOIN sets s ON s.code=k.set_code
+               WHERE k.digital=0 AND k.extra=0
+                 AND (k.name=? COLLATE NOCASE OR k.name_de=? COLLATE NOCASE
+                      OR k.name LIKE ? COLLATE NOCASE)""",
+            (name, name, front + " // %")).fetchall()
+        if not rows:                                   # allow extras if that's all there is
+            rows = c.execute(
+                """SELECT k.set_code, s.name set_name, k.number, k.num_int, s.released,
+                          k.eur, k.eur_foil, k.img, k.cm_suffix, k.cm_ver
+                   FROM cards k JOIN sets s ON s.code=k.set_code
+                   WHERE k.digital=0
+                     AND (k.name=? COLLATE NOCASE OR k.name_de=? COLLATE NOCASE
+                          OR k.name LIKE ? COLLATE NOCASE)""",
+                (name, name, front + " // %")).fetchall()
+        by_set = {}
+        for r in rows:
+            s = r["set_code"]
+            if s not in by_set or (r["num_int"] or 0) < (by_set[s]["num_int"] or 0):
+                by_set[s] = r
+        printings = [{"set": r["set_code"], "setName": r["set_name"], "number": r["number"],
+                      "released": r["released"] or "", "eur": round(r["eur"] or 0, 2),
+                      "img": r["img"] or "", "cmSuffix": r["cm_suffix"] or "",
+                      "cmVer": r["cm_ver"] if r["cm_ver"] is not None else 1}
+                     for r in sorted(by_set.values(),
+                                     key=lambda r: r["released"] or "", reverse=True)]
+        pset = (it.get("set") or "").lower()
+        pnum = str(it.get("num") or "").strip()
+        deck_pr = next((p for p in printings if p["set"] == pset), None) if pset else None
+        num_mismatch = bool(deck_pr and pnum and str(deck_pr["number"]) != pnum)
+        if not printings:
+            status = "notFound"
+        elif pset and not deck_pr:
+            status = "deckSetMissing"                   # deck named a set Binduno doesn't have
+        elif num_mismatch:
+            status = "numMismatch"
+        else:
+            status = "ok"
+        out.append({"qty": qty, "name": name, "section": it.get("section", "deck"),
+                    "foil": bool(it.get("foil")),
+                    "deckSet": pset or "", "deckNum": pnum,
+                    "deckPrinting": deck_pr,
+                    "mode": "deck" if deck_pr else "any",
+                    "chosen": deck_pr,
+                    "printings": printings, "status": status})
+    return {"cards": out}
+
+
 # --------------------------------------------------------------- computation
 def shipping(n, value, tracked_only=False, country="DE"):
     if n <= 0:
@@ -2504,6 +2646,13 @@ class Handler(BaseHTTPRequestHandler):
                 self.send_json({"ok": True, **res}, cors=True)
             except Exception as e:                            # noqa: BLE001
                 self.send_json({"ok": False, "error": str(e)}, 400, cors=True)
+        elif self.path == "/api/parse-deck":
+            try:
+                d = json.loads(raw)
+                parsed = parse_decklist(d.get("text", ""), d.get("format", "auto"))
+                self.send_json({"ok": True, **resolve_deck(c, parsed)})
+            except Exception as e:                            # noqa: BLE001
+                self.send_json({"ok": False, "error": str(e)}, 400)
         elif self.path == "/api/import":
             try:
                 payload = json.loads(raw)
@@ -3413,6 +3562,21 @@ en:{
   "cart.sortCardName":"Card name","cart.sortPrice":"Price","cart.sortLineTotal":"Line total",
   "cart.sortQuantity":"Quantity","cart.empty":"Empty Wantlist-Cart",
   "cart.buildWantlist":"Build wantlist","cart.remove":"Remove",
+  "deck.fromDeckBtn":"Build from a deck list",
+  "deck.title":"Deck list → want list",
+  "deck.desc":"Paste a deck list from Moxfield, Archidekt, MTG Arena, MTGO… — pick which cards "+
+    "to buy in the exact printing the list names and which ones any set will do for, then "+
+    "generate the Cardmarket want list.",
+  "deck.fmtAuto":"Auto-detect","deck.fmtPlain":"Plain text",
+  "deck.pastePlaceholder":"1 Sol Ring (LTC) 264\n1 Arcane Signet\n…",
+  "deck.parseBtn":"Read deck list","deck.parsing":"Reading…",
+  "deck.startOver":"New list","deck.allAny":"All: any set","deck.allDeck":"All: keep deck's set",
+  "deck.generateBtn":"Generate want list",
+  "deck.nToBuy":"{n} to buy","deck.nNotFound":"{n} not found",
+  "deck.anySet":"Any set","deck.pickSet":"Pick set…",
+  "deck.notFound":"not in card data","deck.numMismatch":"deck said #{n}",
+  "deck.section.deck":"","deck.section.commander":"commander","deck.section.sideboard":"sideboard",
+  "deck.section.maybeboard":"maybe","deck.section.companion":"companion",
   "cart.secretLairWhy":"Secret Lair want lists aren't supported yet",
   "cart.secretLairSkipped":"{n} Secret Lair card(s) were skipped — see the note on the set page.",
   "cart.secretLairNote":"Secret Lair cards can't be added to the Wantlist-Cart yet. Cardmarket splits Secret Lair into hundreds of separate expansions with no reliable mapping, so a generated want list wouldn't match. Buy these directly from the card's Cardmarket page.",
@@ -3833,6 +3997,21 @@ de:{
   "cart.sortCardName":"Kartenname","cart.sortPrice":"Preis","cart.sortLineTotal":"Zeilensumme",
   "cart.sortQuantity":"Menge","cart.empty":"Wantlist-Cart leeren",
   "cart.buildWantlist":"Wantlist erzeugen","cart.remove":"Entfernen",
+  "deck.fromDeckBtn":"Aus Deckliste erstellen",
+  "deck.title":"Deckliste → Wantlist",
+  "deck.desc":"Deckliste aus Moxfield, Archidekt, MTG Arena, MTGO … einfügen — pro Karte "+
+    "wählen, ob genau der im Text genannte Druck gekauft werden soll oder irgendein Set "+
+    "reicht, dann die Cardmarket-Wantlist erzeugen.",
+  "deck.fmtAuto":"Automatisch erkennen","deck.fmtPlain":"Klartext",
+  "deck.pastePlaceholder":"1 Sol Ring (LTC) 264\n1 Arcane Signet\n…",
+  "deck.parseBtn":"Deckliste einlesen","deck.parsing":"Wird gelesen…",
+  "deck.startOver":"Neue Liste","deck.allAny":"Alle: irgendein Set","deck.allDeck":"Alle: Deck-Set behalten",
+  "deck.generateBtn":"Wantlist erzeugen",
+  "deck.nToBuy":"{n} zu kaufen","deck.nNotFound":"{n} nicht gefunden",
+  "deck.anySet":"Irgendein Set","deck.pickSet":"Set wählen…",
+  "deck.notFound":"nicht in den Kartendaten","deck.numMismatch":"Deck nannte #{n}",
+  "deck.section.deck":"","deck.section.commander":"Commander","deck.section.sideboard":"Sideboard",
+  "deck.section.maybeboard":"Maybe","deck.section.companion":"Companion",
   "cart.secretLairWhy":"Wantlisten für Secret Lair werden noch nicht unterstützt",
   "cart.secretLairSkipped":"{n} Secret-Lair-Karte(n) übersprungen — siehe Hinweis auf der Set-Seite.",
   "cart.secretLairNote":"Secret-Lair-Karten können noch nicht in den Wantlist-Cart. Cardmarket teilt Secret Lair in hunderte einzelne Erweiterungen ohne verlässliche Zuordnung auf, eine erzeugte Wantlist würde also nicht treffen. Diese Karten direkt über die Cardmarket-Seite der Karte kaufen.",
@@ -5338,7 +5517,8 @@ async function drawCart(){
   await cartLoad();
   const el=$("#cartBody");
   if(!CART.items.length){el.innerHTML=`<div class="empty"><h2>${t("cart.emptyTitle")}</h2>
-    <p>${t("cart.emptyDesc")}</p></div>`;return;}
+    <p>${t("cart.emptyDesc")}</p>
+    <button class="pri" style="margin-top:14px" onclick="go('deck')">${t("deck.fromDeckBtn")}</button></div>`;return;}
   el.innerHTML=`<div class="cards" style="margin-top:0">
       <div class="card"><div class="k">${t("cart.cards")}</div><div class="v">${num(CART.count)}</div>
         <div class="n">${t("cart.fromNSets",{n:CART.sets})}</div></div>
@@ -5360,6 +5540,7 @@ async function drawCart(){
       <button id="cdir">${CDIR<0?"\u25bc":"\u25b2"}</button>
       <button id="cartClear">${t("cart.empty")}</button>
       <button id="cartToColl">${t("cart.addAllToCollection")}</button>
+      <button onclick="go('deck')">${t("deck.fromDeckBtn")}</button>
       <button id="cartWant" class="pri">${t("cart.buildWantlist")}</button></div>
     <div id="cartWL"></div>
     <div class="list" style="margin-top:14px">${cartView().map(i=>`<div class="cartrow">
@@ -5399,6 +5580,130 @@ async function drawCart(){
   $("#cartWant").onclick=()=>{
     $("#cartWL").innerHTML=wantChunks(cartView().map(i=>wantLine(i,i.setName,i.qty)));
     bindChunks();};
+}
+
+/* ---------------- deck list -> want list ---------------- */
+let DECK={text:"",format:"auto",cards:null};
+const DECK_FORMATS=[["auto","deck.fmtAuto"],["moxfield","Moxfield"],["archidekt","Archidekt"],
+  ["mtga","MTG Arena"],["mtgo","MTGO"],["tappedout","TappedOut"],["deckstats","Deckstats"],
+  ["plain","deck.fmtPlain"]];
+function deckPage(){
+  $("#view").innerHTML=crumbs([{label:t("nav.cart"),hash:"cart"},{label:t("deck.title")}])
+    +`<h1>${t("deck.title")}</h1><p class="sub">${t("deck.desc")}</p><div id="deckBody"></div>`;
+  bindCrumbs();drawDeck();
+}
+function drawDeck(){
+  const el=$("#deckBody");if(!el)return;
+  if(!DECK.cards){
+    el.innerHTML=`<div class="tools" style="margin:0 0 8px">
+      <select id="dfmt">${DECK_FORMATS.map(([v,l])=>
+        `<option value="${v}" ${DECK.format===v?"selected":""}>${l.includes(".")?t(l):l}</option>`).join("")}</select></div>
+      <textarea id="dtext" style="height:260px" placeholder="${t("deck.pastePlaceholder")}">${esc(DECK.text)}</textarea>
+      <div class="tools" style="margin-top:8px"><button id="dparse" class="pri">${t("deck.parseBtn")}</button></div>
+      <div id="dmsg"></div>`;
+    $("#dfmt").onchange=e=>DECK.format=e.target.value;
+    $("#dtext").oninput=e=>DECK.text=e.target.value;
+    $("#dparse").onclick=async()=>{
+      DECK.text=$("#dtext").value;DECK.format=$("#dfmt").value;
+      if(!DECK.text.trim())return;
+      $("#dparse").disabled=true;$("#dparse").textContent=t("deck.parsing");
+      let r;
+      try{r=await fetch("/api/parse-deck",{method:"POST",
+        body:JSON.stringify({text:DECK.text,format:DECK.format})}).then(x=>x.json());}
+      catch(e){r={ok:false,error:String(e)};}
+      $("#dparse").disabled=false;$("#dparse").textContent=t("deck.parseBtn");
+      if(!r.ok){$("#dmsg").innerHTML=`<div class="msg err">${r.error}</div>`;return;}
+      DECK.cards=r.cards;drawDeck();
+    };
+    return;
+  }
+  const cs=DECK.cards;
+  const nOut=cs.filter(c=>c.status!=="notFound"&&!c.removed).length;
+  const nBad=cs.filter(c=>c.status==="notFound").length;
+  el.innerHTML=`<div class="tools" style="margin:0 0 6px">
+      <button id="dback">${t("deck.startOver")}</button>
+      <button id="dallAny">${t("deck.allAny")}</button>
+      <button id="dallDeck">${t("deck.allDeck")}</button>
+      <span class="pill">${t("deck.nToBuy",{n:nOut})}${nBad?" · "+t("deck.nNotFound",{n:nBad}):""}</span>
+      <button id="dgen" class="pri" style="margin-left:auto">${t("deck.generateBtn")}</button></div>
+    <div id="deckWL"></div>
+    <div class="list" style="margin-top:12px">${cs.map((c,i)=>deckRow(c,i)).join("")}</div>`;
+  $("#dback").onclick=()=>{DECK.cards=null;drawDeck();};
+  $("#dallAny").onclick=()=>{cs.forEach(c=>{if(c.status!=="notFound"){c.mode="any";c.chosen=null;}});drawDeck();};
+  $("#dallDeck").onclick=()=>{cs.forEach(c=>{if(c.deckPrinting){c.mode="deck";c.chosen=c.deckPrinting;}});drawDeck();};
+  $("#dgen").onclick=deckGenerate;
+  bindDeckRows();
+}
+function deckRow(c,i){
+  if(c.status==="notFound")
+    return `<div class="li" data-di="${i}" style="opacity:.6">
+      <span class="nm">${c.qty>1?c.qty+"× ":""}${esc(c.name)}</span>
+      <span class="badge" style="background:var(--bad-bg);color:var(--bad)">${t("deck.notFound")}</span>
+      <button data-drm="${i}" style="flex:0 0 auto">✕</button></div>`;
+  const p = c.mode==="deck" ? c.deckPrinting : c.mode==="set" ? c.chosen : null;
+  const note = c.status==="numMismatch"&&c.mode==="deck"
+      ? `<span class="mt" style="color:var(--gold)">${t("deck.numMismatch",{n:c.deckNum})}</span>` : "";
+  const SEC={commander:1,sideboard:1,maybeboard:1,companion:1};
+  const secLabel = SEC[c.section] ? ` <span class="mt" style="color:var(--dim)">${t("deck.section."+c.section)}</span>` : "";
+  return `<div class="li" data-di="${i}" style="flex-wrap:wrap;row-gap:6px">
+    ${p&&p.img?`<img src="${p.img}" width="30" height="42" loading="lazy"
+      data-pop="${p.img}" style="border-radius:3px;flex:0 0 auto">`:`<span style="flex:0 0 30px"></span>`}
+    <span class="nm">${c.qty>1?c.qty+"× ":""}${esc(c.name)}${secLabel}</span>
+    <div class="seg" style="flex:0 0 auto">
+      ${c.deckPrinting?`<button data-dm="${i}|deck" class="${c.mode==="deck"?"on":""}"
+        data-pop="${c.deckPrinting.img||""}">${c.deckPrinting.set.toUpperCase()}</button>`:""}
+      <button data-dm="${i}|any" class="${c.mode==="any"?"on":""}">${t("deck.anySet")}</button>
+      <button data-dm="${i}|pick" class="${c.mode==="set"?"on":""}">${
+        c.mode==="set"&&c.chosen?c.chosen.set.toUpperCase():t("deck.pickSet")}</button>
+    </div>${note}
+    <div class="dpick" data-dpick="${i}" style="display:none;flex:0 0 100%"></div>
+  </div>`;
+}
+function bindDeckRows(){
+  bindTiles();
+  document.querySelectorAll("[data-drm]").forEach(b=>b.onclick=()=>{
+    DECK.cards[+b.dataset.drm].removed=true;
+    DECK.cards.splice(+b.dataset.drm,1);drawDeck();});
+  document.querySelectorAll("[data-dm]").forEach(b=>b.onclick=()=>{
+    const [i,mode]=b.dataset.dm.split("|"),c=DECK.cards[+i];
+    if(mode==="deck"){c.mode="deck";c.chosen=c.deckPrinting;drawDeck();}
+    else if(mode==="any"){c.mode="any";c.chosen=null;drawDeck();}
+    else{                                    // pick: toggle the set panel
+      const panel=document.querySelector(`[data-dpick="${i}"]`);
+      const open=panel.style.display!=="none";
+      document.querySelectorAll("[data-dpick]").forEach(p=>p.style.display="none");
+      if(open){return;}
+      panel.style.display="block";
+      panel.innerHTML=`<input type="search" class="dpq" placeholder="${t("missing.searchPlaceholder")}"
+          style="width:100%;margin:6px 0">
+        <div class="list dplist" style="max-height:280px;overflow:auto;border:1px solid var(--line);border-radius:5px">
+        ${c.printings.map((p,pi)=>`<div class="li dpr" data-dpr="${i}|${pi}" data-name="${p.setName.toLowerCase()} ${p.set}">
+          ${p.img?`<img src="${p.img}" width="26" height="36" loading="lazy" data-pop="${p.img}" style="border-radius:3px">`:"<span style='flex:0 0 26px'></span>"}
+          <span class="nm">${esc(p.setName)}</span>
+          <span class="mt">${p.set.toUpperCase()} · #${p.number}${p.released?" · "+p.released.slice(0,4):""}</span>
+          <span class="mt" style="flex:0 0 64px;text-align:right;color:var(--gold)">${p.eur?money(p.eur):"—"}</span>
+        </div>`).join("")}</div>`;
+      const q=panel.querySelector(".dpq");
+      q.oninput=()=>{const s=q.value.toLowerCase();
+        panel.querySelectorAll(".dpr").forEach(r=>r.style.display=r.dataset.name.includes(s)?"":"none");};
+      q.focus();
+      panel.querySelectorAll("[data-dpr]").forEach(r=>r.onclick=()=>{
+        const [ri,pi]=r.dataset.dpr.split("|");
+        const cc=DECK.cards[+ri];cc.mode="set";cc.chosen=cc.printings[+pi];drawDeck();});
+      bindTiles(panel);
+    }
+  });
+}
+function deckGenerate(){
+  const lines=DECK.cards.filter(c=>c.status!=="notFound").map(c=>{
+    if(c.mode==="any"||(!c.deckPrinting&&c.mode!=="set"))
+      return (c.qty>1?c.qty+"x ":"")+c.name;
+    const p=c.mode==="set"?c.chosen:c.deckPrinting;
+    return wantLine({name:c.name,cmVer:p.cmVer,cmSuffix:p.cmSuffix},p.setName,c.qty);
+  });
+  $("#deckWL").innerHTML=wantChunks(lines);
+  bindChunks();
+  $("#deckWL").scrollIntoView({behavior:"smooth",block:"start"});
 }
 
 /* ---------------- want list ---------------- */
@@ -6340,7 +6645,7 @@ let SECTION_HASH={}, RESTORE_NEXT=false, RESTORE_SECTION=null, CUR_SECTION="home
 // whatever section we were already in rather than a section of their own.
 function sectionFor(p){
   if(p==="collection"||p==="missing"||p.startsWith("set/")) return "collection";
-  if(p==="cart") return "cart";
+  if(p==="cart"||p==="deck") return "cart";
   if(p==="manage") return "manage";
   if(p==="wizard") return null;
   if(p.startsWith("card/")||p.startsWith("buy/")) return CUR_SECTION;
@@ -6368,7 +6673,7 @@ async function doRoute(){
   const p=(location.hash||"#home").slice(1);
   const restoreSec=RESTORE_SECTION; RESTORE_SECTION=null;
   const cameFromHistory=!SUPPRESS_RESTORE; SUPPRESS_RESTORE=false;
-  const navP=p==="missing"?"collection":p;
+  const navP=p==="missing"?"collection":p==="deck"?"cart":p;
   document.querySelectorAll(".tab").forEach(t=>t.classList.toggle("on",t.dataset.p===navP));
   try{
     if(FORCE_RELOAD||!SETS.length||!STATS){FORCE_RELOAD=false;await load();}
@@ -6387,6 +6692,8 @@ async function doRoute(){
     }else if(p.startsWith("card/")){
       const [,sc,nr]=p.split("/");
       await cardPage(sc,decodeURIComponent(nr));
+    }else if(p==="deck"){
+      deckPage();
     }else{
       if(p==="collection")CRUMBS=[{label:t("nav.collection"),hash:"collection"}];
       if(p==="missing"){CRUMBS=[{label:t("nav.collection"),hash:"collection"}];CMODE="missing";}
