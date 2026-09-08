@@ -16,7 +16,7 @@ import urllib.request
 from datetime import datetime, timedelta
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-VERSION = "6.01"
+VERSION = "6.02"
 SCHEMA = 16
 
 
@@ -3213,10 +3213,9 @@ table.setcards tr.notgoal td .badge{opacity:1}
 table.setcards .seg.deckseg button{min-width:60px}
 .cc .seg.deckseg{display:flex;width:100%}
 .cc .seg.deckseg button{flex:1 1 0;min-width:0;padding:5px 4px;font-size:11px}
-.cc .tilex{position:absolute;top:7px;left:7px;z-index:3;width:24px;height:24px;line-height:1;
-  display:flex;align-items:center;justify-content:center;padding:0;
-  background:rgba(15,19,25,.92);border:1px solid var(--line);border-radius:5px}
-.cc .tilex:hover{border-color:var(--bad);color:var(--bad)}
+.cc .dtrow{margin-top:7px;display:flex;justify-content:flex-end}
+.cc .dtrow .tilerm{padding:3px 12px;font-size:12px;line-height:1.4}
+.cc .dtrow .tilerm:hover{border-color:var(--bad);color:var(--bad)}
 table.setcards thead th[data-sk]{cursor:pointer;user-select:none}
 table.setcards thead th[data-sk]:hover{color:var(--gold)}
 .phsvg{width:100%;height:240px;max-width:820px;display:block;border:1px solid var(--line);
@@ -3272,7 +3271,7 @@ textarea{width:100%;height:130px;background:var(--panel2);color:var(--text);bord
 .msg.ok{background:#152a1e;border:1px solid #2c5a3e;color:#8fd6a8}
 .msg.err{background:#2a1616;border:1px solid #5c2c2c;color:#e0a0a0}
 .cgrid{display:grid;grid-template-columns:repeat(auto-fill,minmax(210px,1fr));gap:16px}
-.cc{background:var(--panel);border:1px solid var(--line);border-radius:7px;overflow:hidden;position:relative;
+.cc{background:var(--panel);border:1px solid var(--line);border-radius:7px;overflow:hidden;
   display:flex;flex-direction:column;cursor:pointer;transition:border-color .13s,transform .13s}
 .cc:hover{border-color:var(--gold);transform:translateY(-2px)}
 .cc .imgwrap{aspect-ratio:488/680;background:#0c1016;position:relative}
@@ -3284,10 +3283,10 @@ textarea{width:100%;height:130px;background:var(--panel2);color:var(--text);bord
   font-size:14px;line-height:1.3;opacity:0;transition:opacity .13s}
 .cc:hover .tilecart{opacity:1}
 .cc .tilecart:hover{border-color:var(--gold);color:var(--gold)}
-.cc .owned{position:absolute;top:7px;right:7px;background:rgba(15,19,25,.9);
+.cc .owned{position:absolute;bottom:7px;left:7px;background:rgba(15,19,25,.92);
   border:1px solid var(--ok);color:var(--ok);border-radius:11px;padding:1px 8px;
   font-family:var(--mono);font-size:11px}
-.cc .miss{position:absolute;top:7px;right:7px;background:rgba(15,19,25,.9);
+.cc .miss{position:absolute;bottom:7px;left:7px;background:rgba(15,19,25,.92);
   border:1px solid var(--line);color:var(--muted);border-radius:11px;padding:1px 8px;
   font-family:var(--mono);font-size:11px}
 .cc .meta{padding:8px 10px;display:flex;flex-direction:column;gap:3px}
@@ -6065,20 +6064,21 @@ function deckRow(c,i){
     <td class="num"><button data-drm="${i}">✕</button></td></tr>`;
 }
 function deckTile(c,i){
-  const x=`<button class="tilex" data-drm="${i}" title="${t("cart.remove")}">✕</button>`;
+  // qty and the remove button live in the meta block, never on the card art
+  const nm=`${c.qty>1?`<b>${c.qty}×</b> `:""}${esc(c.name)}`;
+  const rm=`<div class="dtrow"><button class="tilerm" data-drm="${i}" title="${t("cart.remove")}">✕</button></div>`;
   if(c.status==="notFound")
-    return `<div class="cc" data-di="${i}" style="opacity:.6">${x}<div class="meta">
-      <div class="cn">${esc(c.name)}</div>
-      <div class="cset"><span class="tag b">${t("deck.notFound")}</span></div></div></div>`;
+    return `<div class="cc" data-di="${i}" style="opacity:.6"><div class="meta">
+      <div class="cn">${nm}</div>
+      <div class="cset"><span class="tag b">${t("deck.notFound")}</span></div>${rm}</div></div>`;
   const img=deckPop(c);
-  return `<div class="cc" data-di="${i}">${x}
+  return `<div class="cc" data-di="${i}">
     <div class="imgwrap">${img?`<img class="face" src="${img}" alt="${esc(c.name)}" loading="lazy">`
-      :`<div class="noimg">${esc(c.name)}</div>`}
-      <span class="miss">${c.qty}×</span></div>
-    <div class="meta"><div class="cn">${esc(c.name)}</div>
+      :`<div class="noimg">${esc(c.name)}</div>`}</div>
+    <div class="meta"><div class="cn">${nm}</div>
       <div class="cset">${deckCollBadge(c)} ${deckSecLbl(c)} ${deckMiss(c)}</div>
       <div class="cp">${deckPriceHtml(c)}</div>
-      ${deckSeg(c,i)}
+      ${deckSeg(c,i)}${rm}
     </div></div>`;
 }
 function bindDeckRows(){
