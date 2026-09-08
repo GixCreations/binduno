@@ -90,7 +90,7 @@ Paste a deck list from **Moxfield, Archidekt, MTG Arena, MTGO, TappedOut, Deckst
 - A running **price + shipping estimate** for the whole list, sortable columns, table or grid view
 - The Wants‑List Cart is never touched — you just get the text blocks
 
-<p align="center"><img src="docs/deck.jpg" width="760" alt="Deck list turned into a reviewable Wants-List"></p>
+<p align="center"><img src="docs/deck.jpg" width="880" alt="Deck list turned into a reviewable Wants-List"></p>
 
 ### Price history and watchlist
 
