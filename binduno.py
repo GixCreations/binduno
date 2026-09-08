@@ -16,7 +16,7 @@ import urllib.request
 from datetime import datetime, timedelta
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-VERSION = "5.92"
+VERSION = "5.93"
 SCHEMA = 16
 
 
@@ -479,15 +479,18 @@ def fetch(url):
 def _resumable_download(url, dest, on_progress=None):
     """Stream url -> dest, resuming with an HTTP Range request after a dropped
     connection (WinError 10054 / connection reset mid-transfer is common on the
-    ~500 MB Scryfall bulk). Scryfall's and MTGJSON's CDNs both honour Range;
-    if a server ignores it and replies 200, we restart from scratch. Retries a
-    handful of times with backoff before giving up."""
+    big Scryfall and MTGJSON bulks, especially behind Windows AV/firewalls).
+    Both CDNs honour Range; if a server ignores it and replies 200 we restart
+    from scratch. Keeps retrying as long as each attempt downloads *some* more
+    bytes; gives up only after 6 attempts in a row that made no progress."""
     import http.client
     retriable = (urllib.error.URLError, ConnectionError, TimeoutError,
                  http.client.IncompleteRead, OSError)
     total = 0
-    for attempt in range(8):
-        got = os.path.getsize(dest) if os.path.exists(dest) else 0
+    stalls = 0
+    for _ in range(60):
+        start_size = os.path.getsize(dest) if os.path.exists(dest) else 0
+        got = start_size
         headers = dict(UA)
         if got:
             headers["Range"] = "bytes=%d-" % got
@@ -513,10 +516,22 @@ def _resumable_download(url, dest, on_progress=None):
             if not total or got >= total:
                 return
             raise OSError("incomplete download: %d/%d bytes" % (got, total))
-        except retriable:
-            if attempt == 7:
+        except urllib.error.HTTPError as e:
+            if e.code == 416 and os.path.exists(dest):    # stale partial past EOF — restart clean
+                os.remove(dest); total = 0; continue
+            if e.code in (400, 401, 403, 404, 410):       # permanent — no point retrying
                 raise
-            time.sleep(min(3 * (attempt + 1), 20))
+            stalls += 1
+            if stalls >= 6:
+                raise
+            time.sleep(min(2 * (stalls + 1), 15))
+        except retriable:
+            grew = (os.path.getsize(dest) if os.path.exists(dest) else 0) > start_size
+            stalls = 0 if grew else stalls + 1
+            if stalls >= 6:
+                raise
+            time.sleep(min(2 * (stalls + 1), 15))
+    raise OSError("download did not finish after 60 attempts")
 
 
 def find_bulk_url(entry):
@@ -954,37 +969,49 @@ def _download_to(url, dest):
     _resumable_download(url, dest)
 
 
-def backfill_price_history():
+def backfill_price_history(auto=False):
+    # auto=True: kicked off in the background (fresh install / gap catch-up).
+    # MTGJSON can be flaky, so a failure there must NOT hijack the shared
+    # REFRESH channel with a red "Failed" — the card data is fine, price
+    # history is bonus depth. Only a user-clicked backfill surfaces errors.
     c = connect(); init(c)
+
+    def _p(**kw):
+        if not auto:
+            REFRESH.update(**kw)
+
+    if auto:
+        meta_set(c, "price_backfill_last_try",
+                 datetime.now().isoformat(timespec="seconds"))
     tmp_dir = tempfile.mkdtemp(prefix="binduno_price_backfill_")
     try:
-        REFRESH.update(running=True, step="Downloading MTGJSON card index", pct=5, error="")
+        _p(running=True, step="Downloading MTGJSON card index", pct=5, error="")
         printings_gz = os.path.join(tmp_dir, "AllPrintings.sqlite.gz")
         _download_to(MTGJSON_PRINTINGS_URL, printings_gz)
 
-        REFRESH.update(step="Extracting card index", pct=30)
+        _p(step="Extracting card index", pct=30)
         printings_db = os.path.join(tmp_dir, "AllPrintings.sqlite")
         with gzip.open(printings_gz, "rb") as fin, open(printings_db, "wb") as fout:
             shutil.copyfileobj(fin, fout)
         os.remove(printings_gz)
 
-        REFRESH.update(step="Building card index", pct=40)
+        _p(step="Building card index", pct=40)
         idx_conn = sqlite3.connect(printings_db)
         crosswalk = {u: (sc.lower(), num)
                      for u, sc, num in idx_conn.execute("SELECT uuid, setCode, number FROM cards")}
         idx_conn.close()
         os.remove(printings_db)
 
-        REFRESH.update(step="Downloading 90-day price history", pct=50)
+        _p(step="Downloading 90-day price history", pct=50)
         prices_gz = os.path.join(tmp_dir, "AllPrices.json.gz")
         _download_to(MTGJSON_PRICES_URL, prices_gz)
 
-        REFRESH.update(step="Reading price history", pct=75)
+        _p(step="Reading price history", pct=75)
         with gzip.open(prices_gz, "rt", encoding="utf-8") as f:
             prices = json.load(f)["data"]
         os.remove(prices_gz)
 
-        REFRESH.update(step="Matching and logging prices", pct=90)
+        _p(step="Matching and logging prices", pct=90)
         rows = []
         for uuid, entry in prices.items():
             key = crosswalk.get(uuid)
@@ -1016,9 +1043,16 @@ def backfill_price_history():
         downsample_price_history(c)
         meta_set(c, "price_backfill_done", "1")
         log(c, "Price history", f"Backfilled {len(rows):,} price point(s) from MTGJSON (90 days)")
-        REFRESH.update(running=False, step="Done", pct=100)
+        _p(running=False, step="Done", pct=100)
     except Exception as e:                                   # noqa: BLE001
-        REFRESH.update(running=False, step="Failed", error=str(e))
+        if auto:
+            try:
+                log(c, "Price history",
+                    f"Auto backfill from MTGJSON failed, will retry in a few days: {e}")
+            except Exception:                               # noqa: BLE001
+                pass
+        else:
+            REFRESH.update(running=False, step="Failed", error=str(e))
     finally:
         shutil.rmtree(tmp_dir, ignore_errors=True)
         c.close()
@@ -7313,6 +7347,7 @@ def already_running(url):
 AUTO_SYNC_INTERVAL = 24 * 3600     # how old cards_updated must be to trigger
 AUTO_SYNC_CHECK = 3600             # how often the background thread checks
 PRICE_GAP_BACKFILL_DAYS = 2        # missing at least this many days triggers a catch-up
+PRICE_BACKFILL_RETRY_DAYS = 3      # after a failed auto backfill, wait this long before another go
 
 
 def auto_sync_enabled(c):
@@ -7350,9 +7385,17 @@ def _price_gap_check():
     c = connect()
     if not price_logging_enabled(c) or REFRESH["running"]:
         return
+    lt = meta_get(c, "price_backfill_last_try")
+    if lt:
+        try:
+            if (datetime.now() - datetime.fromisoformat(lt)).total_seconds() \
+                    < PRICE_BACKFILL_RETRY_DAYS * 86400:
+                return                      # tried recently — don't hammer a flaky MTGJSON
+        except ValueError:
+            pass
     if not meta_get(c, "price_backfill_done"):
         log(c, "Price history", "No backfill yet, loading 90 days from MTGJSON")
-        backfill_price_history()
+        backfill_price_history(auto=True)
         return
     last = c.execute("SELECT MAX(date) FROM price_history").fetchone()[0]
     gap = True
@@ -7364,7 +7407,7 @@ def _price_gap_check():
             gap = True
     if gap:
         log(c, "Price history", "Gap since last use detected, backfilling from MTGJSON")
-        backfill_price_history()
+        backfill_price_history(auto=True)
 
 
 def auto_sync_loop():
