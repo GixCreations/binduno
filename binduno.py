@@ -16,7 +16,7 @@ import urllib.request
 from datetime import datetime, timedelta
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-VERSION = "5.91"
+VERSION = "5.92"
 SCHEMA = 16
 
 
@@ -476,6 +476,49 @@ def fetch(url):
     return urllib.request.urlopen(urllib.request.Request(url, headers=UA), timeout=240)
 
 
+def _resumable_download(url, dest, on_progress=None):
+    """Stream url -> dest, resuming with an HTTP Range request after a dropped
+    connection (WinError 10054 / connection reset mid-transfer is common on the
+    ~500 MB Scryfall bulk). Scryfall's and MTGJSON's CDNs both honour Range;
+    if a server ignores it and replies 200, we restart from scratch. Retries a
+    handful of times with backoff before giving up."""
+    import http.client
+    retriable = (urllib.error.URLError, ConnectionError, TimeoutError,
+                 http.client.IncompleteRead, OSError)
+    total = 0
+    for attempt in range(8):
+        got = os.path.getsize(dest) if os.path.exists(dest) else 0
+        headers = dict(UA)
+        if got:
+            headers["Range"] = "bytes=%d-" % got
+        try:
+            with urllib.request.urlopen(
+                    urllib.request.Request(url, headers=headers), timeout=120) as resp:
+                resuming = bool(got) and getattr(resp, "status", 200) == 206
+                if got and not resuming:                 # server ignored Range
+                    got = 0
+                cr = resp.headers.get("Content-Range") or ""
+                if "/" in cr and cr.rsplit("/", 1)[-1].isdigit():
+                    total = int(cr.rsplit("/", 1)[-1])
+                elif not total:
+                    total = int(resp.headers.get("Content-Length") or 0) + got
+                with open(dest, "ab" if resuming else "wb") as f:
+                    while True:
+                        b = resp.read(1 << 20)
+                        if not b:
+                            break
+                        f.write(b); got += len(b)
+                        if on_progress:
+                            on_progress(got, total)
+            if not total or got >= total:
+                return
+            raise OSError("incomplete download: %d/%d bytes" % (got, total))
+        except retriable:
+            if attempt == 7:
+                raise
+            time.sleep(min(3 * (attempt + 1), 20))
+
+
 def find_bulk_url(entry):
     hits = []
 
@@ -542,17 +585,18 @@ def refresh_cards():
             raise RuntimeError("no download link in bulk-data entry")
 
         tmp = os.path.join(BASE, "bulk.tmp")
-        total = entry.get("compressed_size") or entry.get("size", 0) or 1
+        # a leftover partial from a previous failed run would belong to an older
+        # bulk URL (Scryfall dates them) — resuming onto it corrupts the file.
+        if os.path.exists(tmp):
+            os.remove(tmp)
+        est = entry.get("compressed_size") or entry.get("size", 0) or 1
         REFRESH.update(step="Downloading card data", pct=10)
-        with fetch(durl) as r, open(tmp, "wb") as f:
-            got = 0
-            while True:
-                b = r.read(1 << 20)
-                if not b:
-                    break
-                f.write(b); got += len(b)
-                REFRESH["pct"] = 10 + min(55, int(got / total * 55))
-                REFRESH["step"] = f"Downloading card data — {got/1e6:.0f} MB"
+
+        def _dl_progress(got, total):
+            REFRESH["pct"] = 10 + min(55, int(got / (total or est) * 55))
+            REFRESH["step"] = f"Downloading card data — {got/1e6:.0f} MB"
+
+        _resumable_download(durl, tmp, _dl_progress)
 
         with open(tmp, "rb") as f:
             magic = f.read(2)
@@ -906,9 +950,8 @@ MTGJSON_PRICES_URL = "https://mtgjson.com/api/v5/AllPrices.json.gz"
 def _download_to(url, dest):
     # urlretrieve sends no headers at all — mtgjson.com/GitHub 403s the
     # default urllib User-Agent, same as Scryfall's UA requirement elsewhere.
-    req = urllib.request.Request(url, headers=UA)
-    with urllib.request.urlopen(req, timeout=240) as resp, open(dest, "wb") as f:
-        shutil.copyfileobj(resp, f)
+    # Resumable + retrying: the MTGJSON files are large too.
+    _resumable_download(url, dest)
 
 
 def backfill_price_history():
