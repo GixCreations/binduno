@@ -16,7 +16,7 @@ import urllib.request
 from datetime import datetime, timedelta
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-VERSION = "5.99"
+VERSION = "5.101"
 SCHEMA = 16
 
 
@@ -1026,53 +1026,77 @@ def downsample_price_history(c):
 
 
 WATCHLIST_MAX = 100
+PH_RANGES = {"7": 7, "30": 30, "90": 90, "365": 365, "1y": 365, "max": None}
 
 
-def watchlist_rows(c):
-    """One row per watched card: current price plus a 7-point daily series
-    built by forward-filling price_history (which only has a row on days
-    the price actually changed) — cards with no history yet just show a
-    flat line at the current price."""
-    watched = c.execute("SELECT set_code, number FROM watchlist ORDER BY added DESC").fetchall()
-    if not watched:
-        return []
-    keys = [(w["set_code"], w["number"]) for w in watched]
-    values_sql = ",".join("(?,?)" for _ in keys)
-    args = [x for k in keys for x in k]
-    cards = {(r["set_code"], r["number"]): r for r in c.execute(
-        f"""SELECT k.set_code, k.number, k.name, k.name_de, k.eur, k.img, k.rarity, s.name set_name
-            FROM cards k JOIN sets s ON s.code=k.set_code
-            WHERE (k.set_code, k.number) IN (VALUES {values_sql})""", args)}
-    hist = {}
-    for r in c.execute(
-            f"""SELECT set_code, number, date, eur_cents FROM price_history
-                WHERE (set_code, number) IN (VALUES {values_sql}) ORDER BY date""", args):
-        hist.setdefault((r["set_code"], r["number"]), []).append((r["date"], r["eur_cents"]))
+def _range_days(s):
+    return PH_RANGES.get(str(s or "30"), 30)
 
-    today = datetime.now().date()
-    days = [(today - timedelta(days=i)).isoformat() for i in range(6, -1, -1)]
-    out = []
-    for k in keys:
-        card = cards.get(k)
-        if not card:
+
+def price_history_series(c, set_code, number, days):
+    """Cardmarket price over time for one printing. `price_history` only holds a
+    row on days the price actually changed, so the returned series is the raw
+    logged points inside the window, left-anchored with the value carried in
+    from before it and right-anchored to today's live price. `days=None` = all
+    history. Non-foil and foil are both returned."""
+    row = c.execute("SELECT eur, eur_foil FROM cards WHERE set_code=? AND number=?",
+                    (set_code, number)).fetchone()
+    cur_eur = round((row["eur"] or 0) if row else 0, 2)
+    cur_foil = round((row["eur_foil"] or 0) if row else 0, 2)
+    pts = c.execute(
+        """SELECT date, eur_cents, eur_foil_cents FROM price_history
+           WHERE set_code=? AND number=? ORDER BY date""", (set_code, number)).fetchall()
+    today = datetime.now().date().isoformat()
+    cutoff = None
+    if days:
+        cutoff = (datetime.now().date() - timedelta(days=days)).isoformat()
+    mk = lambda d, r: {"d": d,
+                       "eur": round((r["eur_cents"] or 0) / 100, 2),
+                       "foil": round((r["eur_foil_cents"] or 0) / 100, 2)}
+    # a logged 0 means "Cardmarket had no price that day" (common for the first
+    # backfilled weeks of a brand-new card), NOT that the card was free — drop
+    # those points so the line doesn't start from zero.
+    real = [r for r in pts if (r["eur_cents"] or 0) > 0]
+    series, carry = [], None
+    for r in real:
+        if cutoff and r["date"] < cutoff:
+            carry = r
             continue
-        points = hist.get(k, [])
-        vals, cur, idx = [], None, 0
-        for day in days:
-            while idx < len(points) and points[idx][0] <= day:
-                cur = points[idx][1]
-                idx += 1
-            vals.append(cur)
-        if vals[0] is None:
-            fallback = round((card["eur"] or 0) * 100)
-            vals = [v if v is not None else fallback for v in vals]
-        first, last = vals[0], vals[-1]
-        change = round((last - first) / first * 100, 1) if first else None
-        out.append({"set": k[0], "number": k[1], "name": card["name"], "nameDe": card["name_de"] or "",
-                     "setName": card["set_name"], "img": card["img"], "rarity": card["rarity"],
-                     "eur": round(card["eur"] or 0, 2),
-                     "series": [v / 100 for v in vals], "changePct": change,
-                     "changeEur": round((last - first) / 100, 2)})
+        series.append(mk(r["date"], r))
+    if carry is not None:
+        series.insert(0, mk(cutoff, carry))
+    if cur_eur > 0 and (not series or series[-1]["d"] != today):
+        series.append({"d": today, "eur": cur_eur, "foil": cur_foil})
+    if not series:
+        series = [{"d": today, "eur": cur_eur, "foil": cur_foil}]
+    lo = min(p["eur"] for p in series)
+    hi = max(p["eur"] for p in series)
+    first, last = series[0]["eur"], series[-1]["eur"]
+    return {"eur": cur_eur, "foil": cur_foil, "series": series,
+            "lo": lo, "hi": hi, "changeEur": round(last - first, 2),
+            "changePct": round((last - first) / first * 100, 1) if first else None,
+            "start": series[0]["d"], "end": series[-1]["d"], "npts": len(series)}
+
+
+def watchlist_rows(c, days=7):
+    """One row per watched card: current price plus a price series over the
+    requested window (see price_history_series)."""
+    watched = c.execute("SELECT set_code, number FROM watchlist ORDER BY added DESC").fetchall()
+    out = []
+    for w in watched:
+        k = (w["set_code"], w["number"])
+        m = c.execute(
+            """SELECT k.name, k.name_de, k.img, k.rarity, s.name set_name
+               FROM cards k JOIN sets s ON s.code=k.set_code
+               WHERE k.set_code=? AND k.number=?""", k).fetchone()
+        if not m:
+            continue
+        h = price_history_series(c, k[0], k[1], days)
+        out.append({"set": k[0], "number": k[1], "name": m["name"],
+                    "nameDe": m["name_de"] or "", "setName": m["set_name"],
+                    "img": m["img"], "rarity": m["rarity"], "eur": h["eur"],
+                    "series": [p["eur"] for p in h["series"]],
+                    "changePct": h["changePct"], "changeEur": h["changeEur"]})
     return out
 
 
@@ -1387,7 +1411,7 @@ def parse_decklist(text, fmt="auto"):
     _numbered = sum(1 for l in _cand if re.match(r"^\d+\s*[xX]?\s+\S", l))
     # true when the list clearly prefixes every card with a count, so the few
     # lines that lack one are category headers rather than cards
-    strict_counts = _numbered >= 5 and _numbered > len(_cand) - _numbered
+    strict_counts = _numbered >= 3 and _numbered > len(_cand) - _numbered
 
     def _looks_like_header(s):
         return (strict_counts and not re.match(r"^\d", s) and not _DECK_SET.search(s)
@@ -2305,7 +2329,8 @@ def card_detail(c, code, number):
             "variant": r["variant"] or "", "finishes": r["finishes"] or "",
             "ver": r["ver"] or 1, "extras": r["extras_idx"] or 0, "cmSuffix": r["cm_suffix"] or "", "cmVer": r["cm_ver"] if r["cm_ver"] is not None else 1, "cardmarket": r["cm_uri"], "scryfall": r["scry_uri"],
             "qty": qty, "qtyNormal": qty_normal, "qtyFoil": qty_foil,
-            "legal": legal, "printings": prints}
+            "legal": legal, "printings": prints,
+            "hist": price_history_series(c, code, number, 30)}
 
 
 def missing_names(c, p):
@@ -2643,7 +2668,12 @@ class Handler(BaseHTTPRequestHandler):
         elif p == "/api/cart":
             self.send_json(cart_rows(c))
         elif p == "/api/watchlist":
-            self.send_json({"items": watchlist_rows(c), "max": WATCHLIST_MAX})
+            self.send_json({"items": watchlist_rows(c, _range_days(qs.get("range", "7"))),
+                            "max": WATCHLIST_MAX})
+        elif p == "/api/price-history":
+            self.send_json(price_history_series(
+                c, qs.get("set", ""), qs.get("number", ""),
+                _range_days(qs.get("range", "30"))))
         elif p == "/api/export":
             body = export_collection(c).encode()
             self.send_response(200)
@@ -3179,7 +3209,26 @@ table.setcards tr.miss{background:var(--row-miss-bg)}
 table.setcards td{border-bottom-color:var(--line)}
 table.setcards tr.notgoal td{opacity:.5}
 table.setcards tr.notgoal td .badge{opacity:1}
-.seg.deckseg button{min-width:60px;padding:5px 6px;text-align:center}
+.seg.deckseg button{padding:5px 6px;text-align:center}
+table.setcards .seg.deckseg button{min-width:60px}
+.cc .seg.deckseg{display:flex;width:100%}
+.cc .seg.deckseg button{flex:1 1 0;min-width:0;padding:5px 4px;font-size:11px}
+.cc .tilex{position:absolute;top:7px;left:7px;z-index:3;width:24px;height:24px;line-height:1;
+  display:flex;align-items:center;justify-content:center;padding:0;
+  background:rgba(15,19,25,.92);border:1px solid var(--line);border-radius:5px}
+.cc .tilex:hover{border-color:var(--bad);color:var(--bad)}
+table.setcards thead th[data-sk]{cursor:pointer;user-select:none}
+table.setcards thead th[data-sk]:hover{color:var(--gold)}
+.phsvg{width:100%;height:240px;max-width:820px;display:block;border:1px solid var(--line);
+  border-radius:8px;background:var(--panel);padding:4px}
+.phgrid{stroke:var(--line);stroke-width:1;opacity:.6}
+.phlbl{fill:var(--muted);font-size:10px;font-family:var(--mono)}
+.phhit{cursor:crosshair}
+.phcur .phvl{stroke:var(--muted);stroke-width:1;stroke-dasharray:3 3}
+.phcur circle{fill:var(--gold)}
+.phcur .phtbg{fill:var(--bg);stroke:var(--line)}
+.phcur .phtt{fill:var(--text);font-size:11px;font-family:var(--mono)}
+.seg.phrangeseg button{padding:5px 11px;font-size:12px}
 tr.deckpickrow>td{padding:6px 0}
 .deckpick{border:1px solid var(--line);border-radius:6px;padding:10px;margin:2px 0 4px;background:var(--panel)}
 .deckpick .dpr{cursor:pointer;align-items:center}
@@ -3213,7 +3262,7 @@ textarea{width:100%;height:130px;background:var(--panel2);color:var(--text);bord
 .msg.ok{background:#152a1e;border:1px solid #2c5a3e;color:#8fd6a8}
 .msg.err{background:#2a1616;border:1px solid #5c2c2c;color:#e0a0a0}
 .cgrid{display:grid;grid-template-columns:repeat(auto-fill,minmax(210px,1fr));gap:16px}
-.cc{background:var(--panel);border:1px solid var(--line);border-radius:7px;overflow:hidden;
+.cc{background:var(--panel);border:1px solid var(--line);border-radius:7px;overflow:hidden;position:relative;
   display:flex;flex-direction:column;cursor:pointer;transition:border-color .13s,transform .13s}
 .cc:hover{border-color:var(--gold);transform:translateY(-2px)}
 .cc .imgwrap{aspect-ratio:488/680;background:#0c1016;position:relative}
@@ -3516,10 +3565,13 @@ en:{
   "home.cheapestDesc":"Sets you could close out for the least money, shipping included.",
   "home.shopByName":"Or shop by card name instead →","home.nothingLoaded":"Nothing loaded yet",
   "home.watchlist":"Watchlist","home.watchlistDesc":"Cards you're keeping an eye on, with "+
-    "their Cardmarket price trend over the last 7 days. Add cards from any card page.",
+    "their Cardmarket price trend. Add cards from any card page.",
   "home.watchlistEmpty":"No cards on the watchlist yet — open a card and click "+
     "\"Add to Watchlist\".",
   "home.watchlist7d":"Last 7 days","home.watchlistChange":"Change",
+  "range.d7":"7 D","range.d30":"30 D","range.y1":"1 Y","range.max":"Max",
+  "ph.title":"Price history","ph.none":"No price history logged yet.",
+  "ph.lohi":"low {lo} · high {hi}",
   "home.watchlistRemove":"Remove from watchlist",
   "home.watchlistCount":"{n} of {max} cards",
   "home.nothingLoadedDesc":"Download the card data and import your ManaBox export to get started.",
@@ -3631,6 +3683,7 @@ en:{
   "deck.deckSetMissing":"not printed in {s}",
   "deck.noMatch":"No cards match this filter.",
   "deck.priceFrom":"from","deck.thCollection":"Collection","deck.extras":"Extras",
+  "deck.priceApprox":"Totals are a lower bound — cards on “any set” use their cheapest printing, and cards with no Cardmarket price count as 0.",
   "deck.collIn":"in collection","deck.collOther":"other set","deck.collMissing":"missing",
   "deck.sortOrig":"Deck order","deck.sortSection":"Section","deck.sortColl":"Collection status",
   "deck.filterAll":"All cards","deck.filterBuy":"To buy","deck.filterOwned":"In collection",
@@ -3956,11 +4009,13 @@ de:{
   "home.cheapestDesc":"Sets, die du mit dem geringsten Geldeinsatz abschließen könntest, Versand inklusive.",
   "home.shopByName":"Oder nach Kartennamen einkaufen →","home.nothingLoaded":"Noch nichts geladen",
   "home.watchlist":"Watchlist","home.watchlistDesc":"Karten, die du im Blick behältst, mit "+
-    "ihrem Cardmarket-Preisverlauf der letzten 7 Tage. Karten über eine beliebige "+
-    "Kartenseite hinzufügen.",
+    "ihrem Cardmarket-Preisverlauf. Karten über eine beliebige Kartenseite hinzufügen.",
   "home.watchlistEmpty":"Noch keine Karten auf der Watchlist — auf einer Kartenseite auf "+
     "„Zur Watchlist hinzufügen“ klicken.",
   "home.watchlist7d":"Letzte 7 Tage","home.watchlistChange":"Änderung",
+  "range.d7":"7 T","range.d30":"30 T","range.y1":"1 J","range.max":"Max",
+  "ph.title":"Preisverlauf","ph.none":"Noch kein Preisverlauf aufgezeichnet.",
+  "ph.lohi":"Tief {lo} · Hoch {hi}",
   "home.watchlistRemove":"Von Watchlist entfernen",
   "home.watchlistCount":"{n} von {max} Karten",
   "home.nothingLoadedDesc":"Lade zuerst die Kartendaten herunter und importiere deinen ManaBox-Export.",
@@ -4074,6 +4129,7 @@ de:{
   "deck.deckSetMissing":"nicht in {s} gedruckt",
   "deck.noMatch":"Keine Karte passt zu diesem Filter.",
   "deck.priceFrom":"ab","deck.thCollection":"Sammlung","deck.extras":"Extras",
+  "deck.priceApprox":"Die Summen sind eine Untergrenze — Karten auf „irgendein Set“ rechnen mit dem günstigsten Druck, Karten ohne Cardmarket-Preis zählen als 0.",
   "deck.collIn":"in Sammlung","deck.collOther":"anderes Set","deck.collMissing":"fehlt",
   "deck.sortOrig":"Deck-Reihenfolge","deck.sortSection":"Bereich","deck.sortColl":"Sammlungsstatus",
   "deck.filterAll":"Alle Karten","deck.filterBuy":"Zu kaufen","deck.filterOwned":"In Sammlung",
@@ -4602,16 +4658,105 @@ function sparkline(vals){
     <polyline points="${pts}" fill="none" stroke="${color}" stroke-width="1.6"
       stroke-linecap="round" stroke-linejoin="round"/></svg>`;
 }
+// 7 / 30 days / 1 year / everything — shared by the Home watchlist and every
+// card page. Value is the `range` query param price_history_series() expects.
+const PH_RANGES=[["7","range.d7"],["30","range.d30"],["365","range.y1"],["max","range.max"]];
+let WL_RANGE="7", PH_RANGE="30";
+function phRangeSeg(cur,id){
+  return `<div class="seg phrangeseg" id="${id}">${PH_RANGES.map(([v,l])=>
+    `<button data-phr="${v}" class="${cur===v?"on":""}">${t(l)}</button>`).join("")}</div>`;
+}
+function phDate(s){
+  const [y,m,d]=s.split("-");
+  return d+"."+m+"."+(new Date().getFullYear()!=+y?" "+y:"");
+}
+// a proper price chart: y grid with € labels, x date labels, an area fill,
+// min/max dots and a crosshair that follows the pointer.
+function priceGraph(h,opt){
+  opt=opt||{};
+  const S=(h&&h.series)||[];
+  if(S.length<2)return `<p class="sub">${t("ph.none")}</p>`;
+  const key=opt.foil?"foil":"eur";
+  const W=960,H=opt.h||260,PL=52,PR=16,PT=14,PB=28;
+  const t0=Date.parse(S[0].d),t1=Date.parse(S[S.length-1].d),span=(t1-t0)||1;
+  let lo=Math.min(...S.map(p=>p[key])),hi=Math.max(...S.map(p=>p[key]));
+  if(lo===hi){lo=Math.max(0,lo*0.9);hi=hi*1.1||1;}
+  const gap=(hi-lo)*0.14;lo=Math.max(0,lo-gap);hi=hi+gap;
+  const X=d=>PL+(Date.parse(d)-t0)/span*(W-PL-PR);
+  const Y=v=>PT+(1-(v-lo)/((hi-lo)||1))*(H-PT-PB);
+  const P=S.map(p=>[X(p.d),Y(p[key])]);
+  const line=P.map((q,i)=>(i?"L":"M")+q[0].toFixed(1)+" "+q[1].toFixed(1)).join(" ");
+  const area=`M${P[0][0].toFixed(1)} ${(H-PB).toFixed(1)} `+
+    P.map(q=>"L"+q[0].toFixed(1)+" "+q[1].toFixed(1)).join(" ")+
+    ` L${P[P.length-1][0].toFixed(1)} ${(H-PB).toFixed(1)} Z`;
+  const up=S[S.length-1][key]>=S[0][key];
+  const col=up?"var(--ok)":"var(--bad)";
+  const grid=[0,.25,.5,.75,1].map(f=>{
+    const y=PT+f*(H-PT-PB),v=hi-(hi-lo)*f;
+    return `<line x1="${PL}" y1="${y.toFixed(1)}" x2="${W-PR}" y2="${y.toFixed(1)}" class="phgrid"/>`+
+      `<text x="${PL-7}" y="${(y+3).toFixed(1)}" text-anchor="end" class="phlbl">${money(v)}</text>`;
+  }).join("");
+  const xl=[0,.5,1].map(f=>{const d=S[Math.round(f*(S.length-1))].d;
+    return `<text x="${X(d).toFixed(1)}" y="${H-9}" text-anchor="${f?f<1?"middle":"end":"start"}" class="phlbl">${phDate(d)}</text>`;
+  }).join("");
+  const iMin=S.reduce((a,p,i)=>p[key]<S[a][key]?i:a,0);
+  const iMax=S.reduce((a,p,i)=>p[key]>S[a][key]?i:a,0);
+  const dot=i=>`<circle cx="${X(S[i].d).toFixed(1)}" cy="${Y(S[i][key]).toFixed(1)}" r="3.2" fill="${col}"/>`;
+  const meta=JSON.stringify({W,H,PL,PR,PT,PB,lo,hi,t0,span,key,
+    S:S.map(p=>[p.d,p[key]])});
+  return `<svg class="phsvg" viewBox="0 0 ${W} ${H}" preserveAspectRatio="none"
+      data-ph='${esc(meta)}'>
+    ${grid}
+    <path d="${area}" fill="${col}" opacity=".09"/>
+    <path d="${line}" fill="none" stroke="${col}" stroke-width="2" stroke-linejoin="round"/>
+    ${dot(iMin)}${dot(iMax)}${xl}
+    <g class="phcur" style="display:none">
+      <line class="phvl" y1="${PT}" y2="${H-PB}"/><circle r="4"/>
+      <rect class="phtbg" rx="3"/><text class="phtt"></text></g>
+    <rect x="${PL}" y="${PT}" width="${(W-PL-PR).toFixed(1)}" height="${(H-PT-PB).toFixed(1)}"
+      fill="transparent" class="phhit"/>
+  </svg>`;
+}
+function bindPriceGraph(root){
+  const svg=(root||document).querySelector(".phsvg");if(!svg)return;
+  const m=JSON.parse(svg.dataset.ph),hit=svg.querySelector(".phhit"),cur=svg.querySelector(".phcur");
+  if(!hit)return;
+  const X=d=>m.PL+(Date.parse(d)-m.t0)/m.span*(m.W-m.PL-m.PR);
+  const Y=v=>m.PT+(1-(v-m.lo)/((m.hi-m.lo)||1))*(m.H-m.PT-m.PB);
+  const move=ev=>{
+    const r=svg.getBoundingClientRect();
+    const px=(ev.clientX-r.left)/r.width*m.W;
+    let best=0,bd=1e9;
+    m.S.forEach((p,i)=>{const dx=Math.abs(X(p[0])-px);if(dx<bd){bd=dx;best=i;}});
+    const p=m.S[best],x=X(p[0]),y=Y(p[1]);
+    cur.style.display="";
+    cur.querySelector(".phvl").setAttribute("x1",x.toFixed(1));
+    cur.querySelector(".phvl").setAttribute("x2",x.toFixed(1));
+    const cc=cur.querySelector("circle");cc.setAttribute("cx",x.toFixed(1));cc.setAttribute("cy",y.toFixed(1));
+    const label=phDate(p[0])+"  "+money(p[1]);
+    const tt=cur.querySelector(".phtt"),bg=cur.querySelector(".phtbg");
+    tt.textContent=label;
+    const w=label.length*6.6+12,left=x+10+w>m.W-m.PR?x-10-w:x+10;
+    tt.setAttribute("x",(left+6).toFixed(1));tt.setAttribute("y",(m.PT+14).toFixed(1));
+    bg.setAttribute("x",left.toFixed(1));bg.setAttribute("y",(m.PT+2).toFixed(1));
+    bg.setAttribute("width",w.toFixed(1));bg.setAttribute("height","18");
+  };
+  hit.addEventListener("mousemove",move);
+  hit.addEventListener("mouseleave",()=>cur.style.display="none");
+}
 async function drawWatchlist(){
   const out=$("#watchlistOut");
   if(!out)return;
-  const r=await getJSON("/api/watchlist");
+  const r=await getJSON("/api/watchlist?range="+WL_RANGE);
+  const rangeUI=`<div class="tools" style="margin:0 0 10px">${phRangeSeg(WL_RANGE,"wlRange")}</div>`;
   if(!r.items.length){
-    out.innerHTML=`<div class="empty"><p>${t("home.watchlistEmpty")}</p></div>`;
+    out.innerHTML=rangeUI+`<div class="empty"><p>${t("home.watchlistEmpty")}</p></div>`;
+    $("#wlRange")&&bindPhRange("#wlRange",v=>{WL_RANGE=v;drawWatchlist();});
     return;
   }
-  out.innerHTML=`<div class="tscroll"><table><thead><tr><th>${t("missing.thCard")}</th><th>${t("cardPage.set")}</th>
-      <th class="num">${t("missing.thPrice")}</th><th>${t("home.watchlist7d")}</th>
+  const rl=PH_RANGES.find(x=>x[0]===WL_RANGE);
+  out.innerHTML=rangeUI+`<div class="tscroll"><table><thead><tr><th>${t("missing.thCard")}</th><th>${t("cardPage.set")}</th>
+      <th class="num">${t("missing.thPrice")}</th><th>${rl?t(rl[1]):""}</th>
       <th class="num">${t("home.watchlistChange")}</th><th class="num"></th></tr></thead>
     <tbody>${r.items.map(c=>`<tr>
       <td><span class="setlink" data-card="${c.set}|${c.number}" data-pop="${c.img||""}">${cardName(c)}</span></td>
@@ -4626,12 +4771,17 @@ async function drawWatchlist(){
     </tr>`).join("")}</tbody></table></div>
     <p class="sub" style="margin-top:8px">${t("home.watchlistCount",{n:r.items.length,max:r.max})}</p>`;
   bindSetLinks();bindTiles();
+  bindPhRange("#wlRange",v=>{WL_RANGE=v;drawWatchlist();});
   document.querySelectorAll("[data-unwatch]").forEach(b=>b.onclick=async()=>{
     const [sc,nr]=b.dataset.unwatch.split("|");
     await fetch("/api/watchlist",{method:"POST",
       body:JSON.stringify({action:"remove",set:sc,number:nr})});
     drawWatchlist();
   });
+}
+function bindPhRange(sel,cb){
+  const box=$(sel);if(!box)return;
+  box.querySelectorAll("[data-phr]").forEach(b=>b.onclick=()=>cb(b.dataset.phr));
 }
 const row=(x,cost)=>`<div class="li" data-code="${x.code}">${icon(x,19)}
   <span class="nm">${x.name}</span>
@@ -5104,6 +5254,14 @@ const CPS=10;
 let TRACKED_SHIP=false, SHIP_COUNTRY="DE", SHIP_RATES={}, AUTO_SYNC=true, PRICE_LOGGING=true,
     ONBOARDING_DONE=true;
 const shipNote=()=>t("common.shipNote",{cps:CPS});
+// plain shipping estimate (number) — mirrors the server-side shipping()
+function shipCost(n,value){
+  if(n<=0)return 0;
+  const orders=Math.max(1,Math.ceil(n/CPS));
+  const rates=SHIP_RATES[SHIP_COUNTRY]||{untracked:1.25,tracked:3.95};
+  const unit=(TRACKED_SHIP||(value/orders)>25)?rates.tracked:rates.untracked;
+  return Math.round(orders*unit*100)/100;
+}
 function SHIPCALC(n,value){
   if(!n)return "No shipping";
   const orders=Math.max(1,Math.ceil(n/CPS));
@@ -5337,6 +5495,10 @@ async function cardPage(sc,nr){
         <div class="card"><div class="k">${t("missing.thRarity")}</div>
           <div class="v" style="font-size:22px">${RAR[d.rarity]?rarLabel(d.rarity):"?"}</div></div>
       </div>
+      <h2>${t("ph.title")}</h2>
+      <div class="tools" style="margin:0 0 8px">${phRangeSeg(PH_RANGE,"cardPhRange")}
+        <span class="mt" id="cardPhChg" style="align-self:center"></span></div>
+      <div id="cardPhGraph"></div>
       <h2>${t("cardPage.yourCollection")}</h2>
       <div class="cards" style="grid-template-columns:repeat(auto-fit,minmax(200px,1fr))">
         <div class="card"><div class="k">${t("cardPage.nonfoil")}</div>
@@ -5379,6 +5541,24 @@ async function cardPage(sc,nr){
       </div>`).join("")}</div>
     </div></div>`;
   bindCrumbs();bindTiles();bindSetLinks();
+  const renderCardPh=h=>{
+    const g=$("#cardPhGraph"),chg=$("#cardPhChg");if(!g)return;
+    g.innerHTML=priceGraph(h,{h:260});bindPriceGraph(g);
+    if(!chg)return;
+    if(h.changePct==null){chg.textContent="";return;}
+    chg.innerHTML=`${h.changeEur>0?"+":""}${money(h.changeEur)} `+
+      `(${h.changePct>0?"+":""}${h.changePct.toFixed(1)} %) · ${t("ph.lohi",{lo:money(h.lo),hi:money(h.hi)})}`;
+    chg.style.color=h.changeEur>0?"var(--ok)":h.changeEur<0?"var(--bad)":"var(--muted)";
+  };
+  const fetchCardPh=async v=>renderCardPh(await getJSON(
+    `/api/price-history?set=${d.set}&number=${encodeURIComponent(d.number)}&range=${v}`));
+  renderCardPh(d.hist);
+  if(PH_RANGE!=="30")fetchCardPh(PH_RANGE);
+  bindPhRange("#cardPhRange",v=>{
+    PH_RANGE=v;
+    document.querySelectorAll("#cardPhRange [data-phr]").forEach(b=>b.classList.toggle("on",b.dataset.phr===v));
+    fetchCardPh(v);
+  });
   $("#cardCart").onclick=async()=>{
     await cartPost({action:"add",set:d.set,number:d.number,qty:1});
     $("#cardCart").textContent=t("cardPage.added");
@@ -5741,7 +5921,8 @@ function drawDeck(){
   DECK._hasSec=hasSec;
   const SORTS=[["orig","deck.sortOrig"],["name","collection.sortName"],
     ...(hasSec?[["section","deck.sortSection"]]:[]),
-    ["set","cardPage.set"],["price","cart.sortPrice"],["coll","deck.sortColl"]];
+    ["coll","deck.sortColl"],["qty","setPage.thCopies"],
+    ["set","cardPage.set"],["price","cart.sortPrice"]];
   const FILTERS=[["all","deck.filterAll"],["buy","deck.filterBuy"],["missing","deck.filterMissing"],
     ["owned","deck.filterOwned"],["other","deck.filterOther"],
     ["needset","deck.filterNeedSet"],["notfound","deck.filterNotFound"]];
@@ -5760,22 +5941,31 @@ function drawDeck(){
         <button data-dv="grid" class="${DECK.view==="grid"?"on":""}">${t("collection.grid")}</button></div>
       <span class="pill">${t("deck.nToBuy",{n:nOut})}${nBad?" · "+t("deck.nNotFound",{n:nBad}):""}</span>
       <button id="dgen" class="pri" style="margin-left:auto">${t("deck.generateBtn")}</button></div>
+    <div id="deckSummary" style="margin:0 0 12px"></div>
     <div id="deckWL"></div>
     <div id="deckListWrap" style="margin-top:12px"></div>
     <div class="tools" style="margin-top:14px"><button id="dgen2" class="pri">${t("deck.generateBtn")}</button></div>`;
+  deckRefreshSummary();
   const view=deckSelect();
   const wrap=$("#deckListWrap");
+  const sarrow=k=>DECK.sort===k?`<span class="mt">${DECK.dir<0?"▼":"▲"}</span>`:"";
+  const th=(k,l,cls)=>`<th${cls?` class="${cls}"`:""} data-sk="${k}">${l} ${sarrow(k)}</th>`;
   if(!view.length){
     wrap.innerHTML=`<p class="sub">${t("deck.noMatch")}</p>`;
   }else if(DECK.view==="grid"){
     wrap.innerHTML=`<div class="cgrid">${view.map(o=>deckTile(o.c,o.i)).join("")}</div>`;
   }else{
     wrap.innerHTML=`<table class="setcards"><thead><tr>
-      <th>${t("missing.thCard")}</th>${hasSec?`<th>${t("deck.sortSection")}</th>`:""}
-      <th>${t("deck.thCollection")}</th>
-      <th class="num">${t("setPage.thCopies")}</th><th>${t("cardPage.set")}</th>
-      <th class="num">${t("missing.thPrice")}</th><th></th></tr></thead><tbody>${
+      ${th("name",t("missing.thCard"))}${hasSec?th("section",t("deck.sortSection")):""}
+      ${th("coll",t("deck.thCollection"))}
+      ${th("qty",t("setPage.thCopies"),"num")}${th("set",t("cardPage.set"))}
+      ${th("price",t("missing.thPrice"),"num")}<th></th></tr></thead><tbody>${
       view.map(o=>deckRow(o.c,o.i)).join("")}</tbody></table>`;
+    wrap.querySelectorAll("th[data-sk]").forEach(h=>h.onclick=()=>{
+      const k=h.dataset.sk;
+      if(DECK.sort===k)DECK.dir=-DECK.dir; else{DECK.sort=k;DECK.dir=1;}
+      drawDeck();
+    });
   }
   $("#dback").onclick=()=>{DECK.cards=null;DECK.pick=null;drawDeck();};
   $("#dallAny").onclick=()=>{cs.forEach(c=>{if(c.status!=="notFound"){c.mode="any";c.chosen=null;}});DECK.pick=null;drawDeck();};
@@ -5807,6 +5997,7 @@ function deckSelect(){
     if(S==="name"){p=x.c.name.toLowerCase();r=y.c.name.toLowerCase();}
     else if(S==="section"){p=x.c.section||"";r=y.c.section||"";}
     else if(S==="set"){p=(deckChosen(x.c)||{}).set||"";r=(deckChosen(y.c)||{}).set||"";}
+    else if(S==="qty"){p=x.c.qty||0;r=y.c.qty||0;}
     else if(S==="coll"){const o={missing:0,other:1,in:2,na:3};p=o[deckColl(x.c)];r=o[deckColl(y.c)];}
     else{p=x.c.mode==="any"?(x.c.minEur||0):(deckChosen(x.c)||{}).eur||0;
          r=y.c.mode==="any"?(y.c.minEur||0):(deckChosen(y.c)||{}).eur||0;}
@@ -5836,27 +6027,26 @@ function deckRow(c,i){
     <td><span class="setlink" data-pop="${deckPop(c)}">${esc(c.name)}</span> ${deckMiss(c)}</td>
     ${DECK._hasSec?`<td>${deckSecLbl(c)}</td>`:""}
     <td>${deckCollBadge(c)}</td>
-    <td class="num">${c.qty>1?c.qty:""}</td>
+    <td class="num">${c.qty}</td>
     <td>${deckSeg(c,i)}</td>
     <td class="num">${deckPriceHtml(c)}</td>
     <td class="num"><button data-drm="${i}">✕</button></td></tr>`;
 }
 function deckTile(c,i){
+  const x=`<button class="tilex" data-drm="${i}" title="${t("cart.remove")}">✕</button>`;
   if(c.status==="notFound")
-    return `<div class="cc" data-di="${i}" style="opacity:.55"><div class="meta">
+    return `<div class="cc" data-di="${i}" style="opacity:.6">${x}<div class="meta">
       <div class="cn">${esc(c.name)}</div>
-      <div class="cset"><span class="tag b">${t("deck.notFound")}</span></div>
-      <div style="margin-top:6px"><button data-drm="${i}">✕</button></div></div></div>`;
+      <div class="cset"><span class="tag b">${t("deck.notFound")}</span></div></div></div>`;
   const img=deckPop(c);
-  return `<div class="cc" data-di="${i}">
+  return `<div class="cc" data-di="${i}">${x}
     <div class="imgwrap">${img?`<img class="face" src="${img}" alt="${esc(c.name)}" loading="lazy">`
       :`<div class="noimg">${esc(c.name)}</div>`}
-      ${c.qty>1?`<span class="miss">${c.qty}×</span>`:""}</div>
+      <span class="miss">${c.qty}×</span></div>
     <div class="meta"><div class="cn">${esc(c.name)}</div>
       <div class="cset">${deckCollBadge(c)} ${deckSecLbl(c)} ${deckMiss(c)}</div>
       <div class="cp">${deckPriceHtml(c)}</div>
       ${deckSeg(c,i)}
-      <div style="margin-top:6px"><button data-drm="${i}">✕</button></div>
     </div></div>`;
 }
 function bindDeckRows(){
@@ -5886,7 +6076,37 @@ function deckUpdateOne(i){
   if(!node){drawDeck();return;}
   node.outerHTML=DECK.view==="grid"?deckTile(DECK.cards[i],i):deckRow(DECK.cards[i],i);
   bindDeckNode(document.querySelector(`[data-di="${i}"]`));
+  deckRefreshSummary();
   const wl=$("#deckWL");if(wl)wl.innerHTML="";
+}
+// price + shipping estimate for the whole list. "any set" cards are priced at
+// their cheapest printing, so the goods total is a lower bound when any card is
+// still on "any set" or has no Cardmarket price.
+function deckTotals(){
+  let goods=0,count=0,approx=false;
+  for(const c of DECK.cards){
+    if(c.status==="notFound")continue;
+    const unit=c.mode==="any"?(c.minEur||0):((deckChosen(c)||{}).eur||0);
+    if(!unit||c.mode==="any")approx=true;
+    goods+=unit*c.qty;count+=c.qty;
+  }
+  const ship=shipCost(count,goods);
+  return {goods,count,ship,total:goods+ship,approx};
+}
+function deckRefreshSummary(){
+  const el=$("#deckSummary");if(!el)return;
+  if(!DECK.cards||!DECK.cards.length){el.innerHTML="";return;}
+  const s=deckTotals(),a=s.approx?"~ ":"";
+  el.innerHTML=`<div class="cards" style="margin:0;grid-template-columns:repeat(auto-fit,minmax(150px,1fr))">
+    <div class="card"><div class="k">${t("cart.cards")}</div><div class="v">${num(s.count)}</div></div>
+    <div class="card"><div class="k">${t("cart.cardsTotal")}</div>
+      <div class="v" style="font-size:22px">${a}${money(s.goods)}</div></div>
+    <div class="card" data-tip-title="${t('tip.shipping')}" data-tip="${SHIPCALC(s.count,s.goods)}">
+      <div class="k">${t("cart.shippingEst")}</div><div class="v" style="font-size:22px">~ ${money(s.ship)}</div></div>
+    <div class="card"><div class="k">${t("cart.total")}</div>
+      <div class="v" style="font-size:22px;color:var(--gold)">${a}${money(s.total)}</div>
+      <div class="n">${t("cart.cardsPlusShipping")}</div></div></div>
+  ${s.approx?`<p class="mt" style="color:var(--muted);margin:6px 2px 0">${t("deck.priceApprox")}</p>`:""}`;
 }
 function deckClosePick(){
   if(DECK._outside){document.removeEventListener("click",DECK._outside,true);DECK._outside=null;}
