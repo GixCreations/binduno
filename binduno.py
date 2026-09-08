@@ -16,7 +16,7 @@ import urllib.request
 from datetime import datetime, timedelta
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-VERSION = "5.96"
+VERSION = "5.97"
 SCHEMA = 16
 
 
@@ -1436,11 +1436,12 @@ def parse_decklist(text, fmt="auto"):
 
 
 def resolve_deck(c, parsed):
-    """Match each parsed line against the catalog. Printings are collapsed to
-    one entry per set (the lowest collector number = the base printing, whose
-    cm_ver/cm_suffix are what a want line needs), newest set first. Each card
-    carries that list so the review UI can offer 'keep the deck's set' vs
-    'any set' vs pick a different set, with an image per set."""
+    """Match each parsed line against the catalog. `deckPrinting` is the exact
+    (set, collector-number) the list named when both resolve; if only the set
+    resolves, its base printing. `printings` (for the 'pick a set' list) is
+    collapsed to one entry per set, newest first. A `(Foil)`/`(Etched)` etc.
+    that the parser mistook for a set code is ignored here."""
+    real_sets = {r["code"] for r in c.execute("SELECT code FROM sets")}
     out = []
     for it in parsed:
         name = _norm_name(it["name"].strip())
@@ -1448,42 +1449,40 @@ def resolve_deck(c, parsed):
         qty = max(1, int(it.get("qty") or 1))
         rows = c.execute(
             """SELECT k.set_code, s.name set_name, k.number, k.num_int, s.released,
-                      k.eur, k.eur_foil, k.img, k.cm_suffix, k.cm_ver
+                      k.eur, k.img, k.cm_suffix, k.cm_ver, k.extra
                FROM cards k JOIN sets s ON s.code=k.set_code
-               WHERE k.digital=0 AND k.extra=0
+               WHERE k.digital=0
                  AND (k.name=? COLLATE NOCASE OR k.name_de=? COLLATE NOCASE
                       OR k.name LIKE ? COLLATE NOCASE)""",
             (name, name, front + " // %")).fetchall()
-        if not rows:                                   # allow extras if that's all there is
-            rows = c.execute(
-                """SELECT k.set_code, s.name set_name, k.number, k.num_int, s.released,
-                          k.eur, k.eur_foil, k.img, k.cm_suffix, k.cm_ver
-                   FROM cards k JOIN sets s ON s.code=k.set_code
-                   WHERE k.digital=0
-                     AND (k.name=? COLLATE NOCASE OR k.name_de=? COLLATE NOCASE
-                          OR k.name LIKE ? COLLATE NOCASE)""",
-                (name, name, front + " // %")).fetchall()
+        base_rows = [r for r in rows if not r["extra"]] or rows
         by_set = {}
-        for r in rows:
+        for r in base_rows:
             s = r["set_code"]
             if s not in by_set or (r["num_int"] or 0) < (by_set[s]["num_int"] or 0):
                 by_set[s] = r
-        printings = [{"set": r["set_code"], "setName": r["set_name"], "number": r["number"],
-                      "released": r["released"] or "", "eur": round(r["eur"] or 0, 2),
-                      "img": r["img"] or "", "cmSuffix": r["cm_suffix"] or "",
-                      "cmVer": r["cm_ver"] if r["cm_ver"] is not None else 1}
-                     for r in sorted(by_set.values(),
-                                     key=lambda r: r["released"] or "", reverse=True)]
+        pr = lambda r: {"set": r["set_code"], "setName": r["set_name"], "number": r["number"],
+                        "released": r["released"] or "", "eur": round(r["eur"] or 0, 2),
+                        "img": r["img"] or "", "cmSuffix": r["cm_suffix"] or "",
+                        "cmVer": r["cm_ver"] if r["cm_ver"] is not None else 1}
+        printings = [pr(r) for r in sorted(by_set.values(),
+                                           key=lambda r: r["released"] or "", reverse=True)]
         pset = (it.get("set") or "").lower()
         pnum = str(it.get("num") or "").strip()
-        deck_pr = next((p for p in printings if p["set"] == pset), None) if pset else None
-        num_mismatch = bool(deck_pr and pnum and str(deck_pr["number"]) != pnum)
+        if pset and pset not in real_sets:             # parser grabbed "(Foil)" etc.
+            pset = pnum = ""
+        deck_pr = None
+        if pset:
+            if pnum:                                    # exact printing wins (keeps its own cm_ver)
+                exact = next((r for r in rows if r["set_code"] == pset
+                              and str(r["number"]) == pnum), None)
+                deck_pr = pr(exact) if exact else None
+            if not deck_pr and pset in by_set:           # set matched, number didn't — base of that set
+                deck_pr = pr(by_set[pset])
         if not printings:
             status = "notFound"
         elif pset and not deck_pr:
-            status = "deckSetMissing"                   # deck named a set Binduno doesn't have
-        elif num_mismatch:
-            status = "numMismatch"
+            status = "deckSetMissing"                   # deck named a set this card isn't in
         else:
             status = "ok"
         out.append({"qty": qty, "name": name, "section": it.get("section", "deck"),
@@ -3574,7 +3573,12 @@ en:{
   "deck.generateBtn":"Generate want list",
   "deck.nToBuy":"{n} to buy","deck.nNotFound":"{n} not found",
   "deck.anySet":"Any set","deck.pickSet":"Pick set…",
-  "deck.notFound":"not in card data","deck.numMismatch":"deck said #{n}",
+  "deck.notFound":"not in card data",
+  "deck.deckSetMissing":"not printed in {s}",
+  "deck.noMatch":"No cards match this filter.",
+  "deck.sortOrig":"Deck order","deck.sortSection":"Section",
+  "deck.filterAll":"All cards","deck.filterBuy":"To buy","deck.filterNeedSet":"Needs a set",
+  "deck.filterNotFound":"Not found",
   "deck.section.deck":"","deck.section.commander":"commander","deck.section.sideboard":"sideboard",
   "deck.section.maybeboard":"maybe","deck.section.companion":"companion",
   "cart.secretLairWhy":"Secret Lair want lists aren't supported yet",
@@ -4009,7 +4013,12 @@ de:{
   "deck.generateBtn":"Wantlist erzeugen",
   "deck.nToBuy":"{n} zu kaufen","deck.nNotFound":"{n} nicht gefunden",
   "deck.anySet":"Irgendein Set","deck.pickSet":"Set wählen…",
-  "deck.notFound":"nicht in den Kartendaten","deck.numMismatch":"Deck nannte #{n}",
+  "deck.notFound":"nicht in den Kartendaten",
+  "deck.deckSetMissing":"nicht in {s} gedruckt",
+  "deck.noMatch":"Keine Karte passt zu diesem Filter.",
+  "deck.sortOrig":"Deck-Reihenfolge","deck.sortSection":"Bereich",
+  "deck.filterAll":"Alle Karten","deck.filterBuy":"Zu kaufen","deck.filterNeedSet":"Set nötig",
+  "deck.filterNotFound":"Nicht gefunden",
   "deck.section.deck":"","deck.section.commander":"Commander","deck.section.sideboard":"Sideboard",
   "deck.section.maybeboard":"Maybe","deck.section.companion":"Companion",
   "cart.secretLairWhy":"Wantlisten für Secret Lair werden noch nicht unterstützt",
@@ -5510,6 +5519,7 @@ function cartView(){
 function cartPage(){
   $("#view").innerHTML=crumbs([{label:t("nav.cart")}])+`<h1>${t("nav.cart")}</h1>
   <p class="sub">${t("cart.desc")}</p>
+  <div class="tools" style="margin:0 0 4px"><button onclick="go('deck')">${t("deck.fromDeckBtn")}</button></div>
   <div id="cartBody"></div>`;
   bindCrumbs();drawCart();
 }
@@ -5517,8 +5527,7 @@ async function drawCart(){
   await cartLoad();
   const el=$("#cartBody");
   if(!CART.items.length){el.innerHTML=`<div class="empty"><h2>${t("cart.emptyTitle")}</h2>
-    <p>${t("cart.emptyDesc")}</p>
-    <button class="pri" style="margin-top:14px" onclick="go('deck')">${t("deck.fromDeckBtn")}</button></div>`;return;}
+    <p>${t("cart.emptyDesc")}</p></div>`;return;}
   el.innerHTML=`<div class="cards" style="margin-top:0">
       <div class="card"><div class="k">${t("cart.cards")}</div><div class="v">${num(CART.count)}</div>
         <div class="n">${t("cart.fromNSets",{n:CART.sets})}</div></div>
@@ -5540,7 +5549,6 @@ async function drawCart(){
       <button id="cdir">${CDIR<0?"\u25bc":"\u25b2"}</button>
       <button id="cartClear">${t("cart.empty")}</button>
       <button id="cartToColl">${t("cart.addAllToCollection")}</button>
-      <button onclick="go('deck')">${t("deck.fromDeckBtn")}</button>
       <button id="cartWant" class="pri">${t("cart.buildWantlist")}</button></div>
     <div id="cartWL"></div>
     <div class="list" style="margin-top:14px">${cartView().map(i=>`<div class="cartrow">
@@ -5583,14 +5591,31 @@ async function drawCart(){
 }
 
 /* ---------------- deck list -> want list ---------------- */
-let DECK={text:"",format:"auto",cards:null};
+let DECK={text:"",format:"auto",cards:null,view:"table",q:"",sort:"orig",dir:1,filter:"all",pick:null};
 const DECK_FORMATS=[["auto","deck.fmtAuto"],["moxfield","Moxfield"],["archidekt","Archidekt"],
   ["mtga","MTG Arena"],["mtgo","MTGO"],["tappedout","TappedOut"],["deckstats","Deckstats"],
   ["plain","deck.fmtPlain"]];
+const DSEC={commander:1,sideboard:1,maybeboard:1,companion:1};
 function deckPage(){
   $("#view").innerHTML=crumbs([{label:t("nav.cart"),hash:"cart"},{label:t("deck.title")}])
     +`<h1>${t("deck.title")}</h1><p class="sub">${t("deck.desc")}</p><div id="deckBody"></div>`;
   bindCrumbs();drawDeck();
+}
+// The printing whose image/price/cm-tag a row currently stands for. In "any"
+// mode there is no committed set, so we borrow the newest printing just for the
+// hover image and the price column.
+function deckChosen(c){
+  return c.mode==="deck"?c.deckPrinting
+       : c.mode==="set"?c.chosen
+       : (c.printings&&c.printings[0])||null;
+}
+function deckPop(c){const p=deckChosen(c);return (p&&p.img)||"";}
+function deckSecLbl(c){
+  return DSEC[c.section]?`<span class="mt" style="color:var(--dim)">${t("deck.section."+c.section)}</span>`:"";
+}
+function deckMiss(c){
+  return c.status==="deckSetMissing"&&c.deckSet
+    ? `<span class="mt" style="color:var(--gold)">${t("deck.deckSetMissing",{s:c.deckSet.toUpperCase()})}</span>` : "";
 }
 function drawDeck(){
   const el=$("#deckBody");if(!el)return;
@@ -5613,86 +5638,166 @@ function drawDeck(){
       catch(e){r={ok:false,error:String(e)};}
       $("#dparse").disabled=false;$("#dparse").textContent=t("deck.parseBtn");
       if(!r.ok){$("#dmsg").innerHTML=`<div class="msg err">${r.error}</div>`;return;}
-      DECK.cards=r.cards;drawDeck();
+      DECK.cards=r.cards;DECK.pick=null;drawDeck();
     };
     return;
   }
   const cs=DECK.cards;
-  const nOut=cs.filter(c=>c.status!=="notFound"&&!c.removed).length;
+  const nOut=cs.filter(c=>c.status!=="notFound").length;
   const nBad=cs.filter(c=>c.status==="notFound").length;
-  el.innerHTML=`<div class="tools" style="margin:0 0 6px">
+  const SORTS=[["orig","deck.sortOrig"],["name","collection.sortName"],["section","deck.sortSection"],
+    ["set","cardPage.set"],["price","cart.sortPrice"]];
+  const FILTERS=[["all","deck.filterAll"],["buy","deck.filterBuy"],["needset","deck.filterNeedSet"],
+    ["notfound","deck.filterNotFound"],["any","deck.anySet"],
+    ["commander","deck.section.commander"],["sideboard","deck.section.sideboard"],
+    ["maybeboard","deck.section.maybeboard"]];
+  el.innerHTML=`<div class="tools" style="margin:0 0 6px;flex-wrap:wrap">
       <button id="dback">${t("deck.startOver")}</button>
       <button id="dallAny">${t("deck.allAny")}</button>
       <button id="dallDeck">${t("deck.allDeck")}</button>
+      <input type="search" id="dq" placeholder="${t("missing.searchPlaceholder")}" value="${esc(DECK.q)}"
+        style="flex:1 1 150px;min-width:110px">
+      <select id="dsort">${SORTS.map(([v,l])=>
+        `<option value="${v}" ${DECK.sort===v?"selected":""}>${t(l)}</option>`).join("")}</select>
+      <button id="ddir">${DECK.dir<0?"▼":"▲"}</button>
+      <select id="dfilt">${FILTERS.map(([v,l])=>
+        `<option value="${v}" ${DECK.filter===v?"selected":""}>${t(l)}</option>`).join("")}</select>
+      <div class="seg"><button data-dv="table" class="${DECK.view==="table"?"on":""}">${t("collection.table")}</button>
+        <button data-dv="grid" class="${DECK.view==="grid"?"on":""}">${t("collection.grid")}</button></div>
       <span class="pill">${t("deck.nToBuy",{n:nOut})}${nBad?" · "+t("deck.nNotFound",{n:nBad}):""}</span>
       <button id="dgen" class="pri" style="margin-left:auto">${t("deck.generateBtn")}</button></div>
     <div id="deckWL"></div>
-    <div class="list" style="margin-top:12px">${cs.map((c,i)=>deckRow(c,i)).join("")}</div>`;
-  $("#dback").onclick=()=>{DECK.cards=null;drawDeck();};
-  $("#dallAny").onclick=()=>{cs.forEach(c=>{if(c.status!=="notFound"){c.mode="any";c.chosen=null;}});drawDeck();};
-  $("#dallDeck").onclick=()=>{cs.forEach(c=>{if(c.deckPrinting){c.mode="deck";c.chosen=c.deckPrinting;}});drawDeck();};
-  $("#dgen").onclick=deckGenerate;
+    <div id="deckListWrap" style="margin-top:12px"></div>
+    <div id="deckPickPanel" style="display:none;margin-top:10px"></div>
+    <div class="tools" style="margin-top:14px"><button id="dgen2" class="pri">${t("deck.generateBtn")}</button></div>`;
+  const view=deckSelect();
+  const wrap=$("#deckListWrap");
+  if(!view.length){
+    wrap.innerHTML=`<p class="sub">${t("deck.noMatch")}</p>`;
+  }else if(DECK.view==="grid"){
+    wrap.innerHTML=`<div class="cgrid">${view.map(o=>deckTile(o.c,o.i)).join("")}</div>`;
+  }else{
+    wrap.innerHTML=`<table class="setcards"><thead><tr>
+      <th>${t("missing.thCard")}</th><th>${t("deck.sortSection")}</th>
+      <th class="num">${t("setPage.thCopies")}</th><th>${t("cardPage.set")}</th>
+      <th class="num">${t("missing.thPrice")}</th><th></th></tr></thead><tbody>${
+      view.map(o=>deckRow(o.c,o.i)).join("")}</tbody></table>`;
+  }
+  $("#dback").onclick=()=>{DECK.cards=null;DECK.pick=null;drawDeck();};
+  $("#dallAny").onclick=()=>{cs.forEach(c=>{if(c.status!=="notFound"){c.mode="any";c.chosen=null;}});DECK.pick=null;drawDeck();};
+  $("#dallDeck").onclick=()=>{cs.forEach(c=>{if(c.deckPrinting){c.mode="deck";c.chosen=c.deckPrinting;}});DECK.pick=null;drawDeck();};
+  $("#dq").oninput=debounce(()=>{DECK.q=$("#dq").value;drawDeck();const q=$("#dq");if(q){q.focus();q.selectionStart=q.selectionEnd=q.value.length;}},200);
+  $("#dsort").onchange=()=>{DECK.sort=$("#dsort").value;drawDeck();};
+  $("#ddir").onclick=()=>{DECK.dir=-DECK.dir;drawDeck();};
+  $("#dfilt").onchange=()=>{DECK.filter=$("#dfilt").value;drawDeck();};
+  document.querySelectorAll("[data-dv]").forEach(b=>b.onclick=()=>{DECK.view=b.dataset.dv;drawDeck();});
+  $("#dgen").onclick=deckGenerate;$("#dgen2").onclick=deckGenerate;
   bindDeckRows();
+  if(DECK.pick!=null)deckOpenPick(DECK.pick);
+}
+// Apply the search box, the filter dropdown and the sort. Each entry keeps its
+// real index in DECK.cards so the row buttons stay correct after filtering.
+function deckSelect(){
+  let a=DECK.cards.map((c,i)=>({c,i}));
+  const q=DECK.q.trim().toLowerCase();
+  if(q)a=a.filter(o=>o.c.name.toLowerCase().includes(q));
+  const F=DECK.filter;
+  if(F==="buy")a=a.filter(o=>o.c.status!=="notFound");
+  else if(F==="needset")a=a.filter(o=>o.c.status==="deckSetMissing");
+  else if(F==="notfound")a=a.filter(o=>o.c.status==="notFound");
+  else if(F==="any")a=a.filter(o=>o.c.mode==="any"&&o.c.status!=="notFound");
+  else if(DSEC[F])a=a.filter(o=>o.c.section===F);
+  const S=DECK.sort;
+  if(S!=="orig")a.sort((x,y)=>{
+    let p,r;
+    if(S==="name"){p=x.c.name.toLowerCase();r=y.c.name.toLowerCase();}
+    else if(S==="section"){p=x.c.section||"";r=y.c.section||"";}
+    else if(S==="set"){p=(deckChosen(x.c)||{}).set||"";r=(deckChosen(y.c)||{}).set||"";}
+    else{p=(deckChosen(x.c)||{}).eur||0;r=(deckChosen(y.c)||{}).eur||0;}
+    return (typeof p==="string"?p.localeCompare(r):p-r)*DECK.dir;
+  });
+  return a;
+}
+function deckSeg(c,i){
+  return `<div class="seg" style="flex:0 0 auto">
+    ${c.deckPrinting?`<button data-dm="${i}|deck" class="${c.mode==="deck"?"on":""}">${
+      c.deckPrinting.set.toUpperCase()}${c.deckPrinting.number?" #"+c.deckPrinting.number:""}</button>`:""}
+    <button data-dm="${i}|any" class="${c.mode==="any"?"on":""}">${t("deck.anySet")}</button>
+    <button data-dm="${i}|pick" class="${c.mode==="set"?"on":""}">${
+      c.mode==="set"&&c.chosen?c.chosen.set.toUpperCase():t("deck.pickSet")}</button>
+  </div>`;
 }
 function deckRow(c,i){
   if(c.status==="notFound")
-    return `<div class="li" data-di="${i}" style="opacity:.6">
-      <span class="nm">${c.qty>1?c.qty+"× ":""}${esc(c.name)}</span>
-      <span class="badge" style="background:var(--bad-bg);color:var(--bad)">${t("deck.notFound")}</span>
-      <button data-drm="${i}" style="flex:0 0 auto">✕</button></div>`;
-  const p = c.mode==="deck" ? c.deckPrinting : c.mode==="set" ? c.chosen : null;
-  const note = c.status==="numMismatch"&&c.mode==="deck"
-      ? `<span class="mt" style="color:var(--gold)">${t("deck.numMismatch",{n:c.deckNum})}</span>` : "";
-  const SEC={commander:1,sideboard:1,maybeboard:1,companion:1};
-  const secLabel = SEC[c.section] ? ` <span class="mt" style="color:var(--dim)">${t("deck.section."+c.section)}</span>` : "";
-  return `<div class="li" data-di="${i}" style="flex-wrap:wrap;row-gap:6px">
-    ${p&&p.img?`<img src="${p.img}" width="30" height="42" loading="lazy"
-      data-pop="${p.img}" style="border-radius:3px;flex:0 0 auto">`:`<span style="flex:0 0 30px"></span>`}
-    <span class="nm">${c.qty>1?c.qty+"× ":""}${esc(c.name)}${secLabel}</span>
-    <div class="seg" style="flex:0 0 auto">
-      ${c.deckPrinting?`<button data-dm="${i}|deck" class="${c.mode==="deck"?"on":""}"
-        data-pop="${c.deckPrinting.img||""}">${c.deckPrinting.set.toUpperCase()}</button>`:""}
-      <button data-dm="${i}|any" class="${c.mode==="any"?"on":""}">${t("deck.anySet")}</button>
-      <button data-dm="${i}|pick" class="${c.mode==="set"?"on":""}">${
-        c.mode==="set"&&c.chosen?c.chosen.set.toUpperCase():t("deck.pickSet")}</button>
-    </div>${note}
-    <div class="dpick" data-dpick="${i}" style="display:none;flex:0 0 100%"></div>
-  </div>`;
+    return `<tr style="opacity:.6"><td colspan="5">${c.qty>1?c.qty+"× ":""}${esc(c.name)}
+      <span class="badge" style="background:var(--bad-bg);color:var(--bad)">${t("deck.notFound")}</span></td>
+      <td class="num"><button data-drm="${i}">✕</button></td></tr>`;
+  const ch=deckChosen(c);
+  return `<tr>
+    <td><span class="setlink" data-pop="${deckPop(c)}">${esc(c.name)}</span> ${deckMiss(c)}</td>
+    <td>${deckSecLbl(c)}</td>
+    <td class="num">${c.qty>1?c.qty:""}</td>
+    <td>${deckSeg(c,i)}</td>
+    <td class="num">${ch&&ch.eur?money(ch.eur):"—"}</td>
+    <td class="num"><button data-drm="${i}">✕</button></td></tr>`;
+}
+function deckTile(c,i){
+  if(c.status==="notFound")
+    return `<div class="cc" style="opacity:.55"><div class="meta">
+      <div class="cn">${esc(c.name)}</div>
+      <div class="cset" style="color:var(--bad)">${t("deck.notFound")}</div>
+      <div style="margin-top:6px"><button data-drm="${i}">✕</button></div></div></div>`;
+  const img=deckPop(c),ch=deckChosen(c);
+  return `<div class="cc">
+    <div class="imgwrap">${img?`<img class="face" src="${img}" alt="${esc(c.name)}" loading="lazy" data-pop="${img}">`
+      :`<div class="noimg">${esc(c.name)}</div>`}
+      ${c.qty>1?`<span class="miss">${c.qty}×</span>`:""}</div>
+    <div class="meta"><div class="cn" data-pop="${img}">${esc(c.name)}</div>
+      <div class="cset">${deckSecLbl(c)} ${deckMiss(c)}</div>
+      <div class="cp">${ch&&ch.eur?money(ch.eur):"—"}</div>
+      ${deckSeg(c,i)}
+      <div style="margin-top:6px"><button data-drm="${i}">✕</button></div>
+    </div></div>`;
 }
 function bindDeckRows(){
   bindTiles();
   document.querySelectorAll("[data-drm]").forEach(b=>b.onclick=()=>{
-    DECK.cards[+b.dataset.drm].removed=true;
-    DECK.cards.splice(+b.dataset.drm,1);drawDeck();});
+    const k=+b.dataset.drm;
+    DECK.cards.splice(k,1);
+    if(DECK.pick!=null){if(DECK.pick===k)DECK.pick=null;else if(DECK.pick>k)DECK.pick--;}
+    drawDeck();});
   document.querySelectorAll("[data-dm]").forEach(b=>b.onclick=()=>{
     const [i,mode]=b.dataset.dm.split("|"),c=DECK.cards[+i];
-    if(mode==="deck"){c.mode="deck";c.chosen=c.deckPrinting;drawDeck();}
-    else if(mode==="any"){c.mode="any";c.chosen=null;drawDeck();}
-    else{                                    // pick: toggle the set panel
-      const panel=document.querySelector(`[data-dpick="${i}"]`);
-      const open=panel.style.display!=="none";
-      document.querySelectorAll("[data-dpick]").forEach(p=>p.style.display="none");
-      if(open){return;}
-      panel.style.display="block";
-      panel.innerHTML=`<input type="search" class="dpq" placeholder="${t("missing.searchPlaceholder")}"
-          style="width:100%;margin:6px 0">
-        <div class="list dplist" style="max-height:280px;overflow:auto;border:1px solid var(--line);border-radius:5px">
-        ${c.printings.map((p,pi)=>`<div class="li dpr" data-dpr="${i}|${pi}" data-name="${p.setName.toLowerCase()} ${p.set}">
-          ${p.img?`<img src="${p.img}" width="26" height="36" loading="lazy" data-pop="${p.img}" style="border-radius:3px">`:"<span style='flex:0 0 26px'></span>"}
-          <span class="nm">${esc(p.setName)}</span>
-          <span class="mt">${p.set.toUpperCase()} · #${p.number}${p.released?" · "+p.released.slice(0,4):""}</span>
-          <span class="mt" style="flex:0 0 64px;text-align:right;color:var(--gold)">${p.eur?money(p.eur):"—"}</span>
-        </div>`).join("")}</div>`;
-      const q=panel.querySelector(".dpq");
-      q.oninput=()=>{const s=q.value.toLowerCase();
-        panel.querySelectorAll(".dpr").forEach(r=>r.style.display=r.dataset.name.includes(s)?"":"none");};
-      q.focus();
-      panel.querySelectorAll("[data-dpr]").forEach(r=>r.onclick=()=>{
-        const [ri,pi]=r.dataset.dpr.split("|");
-        const cc=DECK.cards[+ri];cc.mode="set";cc.chosen=cc.printings[+pi];drawDeck();});
-      bindTiles(panel);
-    }
+    if(mode==="deck"){c.mode="deck";c.chosen=c.deckPrinting;DECK.pick=null;drawDeck();}
+    else if(mode==="any"){c.mode="any";c.chosen=null;DECK.pick=null;drawDeck();}
+    else{DECK.pick=DECK.pick===+i?null:+i;drawDeck();}
   });
+}
+// The "pick a set" panel is a single shared strip below the list, so it works
+// the same in table and grid view.
+function deckOpenPick(i){
+  const panel=$("#deckPickPanel");if(!panel)return;
+  const c=DECK.cards[i];
+  if(!c||c.status==="notFound"||!(c.printings&&c.printings.length)){DECK.pick=null;panel.style.display="none";return;}
+  panel.style.display="block";
+  panel.innerHTML=`<div class="mt" style="margin-bottom:4px;color:var(--muted)">${esc(c.name)}</div>
+    <input type="search" class="dpq" placeholder="${t("missing.searchPlaceholder")}" style="width:100%;margin:0 0 6px">
+    <div class="list dplist" style="max-height:280px;overflow:auto;border:1px solid var(--line);border-radius:5px">
+    ${c.printings.map((p,pi)=>`<div class="li dpr" data-dpr="${i}|${pi}" data-name="${esc(p.setName.toLowerCase())} ${p.set}">
+      ${p.img?`<img src="${p.img}" width="26" height="36" loading="lazy" data-pop="${p.img}" style="border-radius:3px">`:"<span style='flex:0 0 26px'></span>"}
+      <span class="nm">${esc(p.setName)}</span>
+      <span class="mt">${p.set.toUpperCase()} · #${p.number}${p.released?" · "+p.released.slice(0,4):""}</span>
+      <span class="mt" style="flex:0 0 64px;text-align:right;color:var(--gold)">${p.eur?money(p.eur):"—"}</span>
+    </div>`).join("")}</div>`;
+  const q=panel.querySelector(".dpq");
+  q.oninput=()=>{const s=q.value.toLowerCase();
+    panel.querySelectorAll(".dpr").forEach(r=>r.style.display=r.dataset.name.includes(s)?"":"none");};
+  panel.querySelectorAll("[data-dpr]").forEach(r=>r.onclick=()=>{
+    const [ri,pi]=r.dataset.dpr.split("|");
+    const cc=DECK.cards[+ri];cc.mode="set";cc.chosen=cc.printings[+pi];DECK.pick=null;drawDeck();});
+  bindTiles(panel);
+  panel.scrollIntoView({behavior:"smooth",block:"nearest"});
+  q.focus();
 }
 function deckGenerate(){
   const lines=DECK.cards.filter(c=>c.status!=="notFound").map(c=>{
