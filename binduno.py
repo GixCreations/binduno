@@ -16,7 +16,7 @@ import urllib.request
 from datetime import datetime, timedelta
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-VERSION = "5.93"
+VERSION = "5.94"
 SCHEMA = 16
 
 
@@ -476,6 +476,23 @@ def fetch(url):
     return urllib.request.urlopen(urllib.request.Request(url, headers=UA), timeout=240)
 
 
+def _fetch_json(url, tries=5):
+    """fetch() + json.load with retries. The small Scryfall API calls
+    (/sets, /bulk-data) also hit immediate connection resets on some
+    networks (VPN / AV with HTTPS scanning), so one attempt isn't enough."""
+    import http.client
+    last = None
+    for i in range(tries):
+        try:
+            with fetch(url) as r:
+                return json.load(r)
+        except (urllib.error.URLError, ConnectionError, TimeoutError,
+                http.client.IncompleteRead, OSError, ValueError) as e:
+            last = e
+            time.sleep(min(2 * (i + 1), 8))
+    raise last
+
+
 def _resumable_download(url, dest, on_progress=None):
     """Stream url -> dest, resuming with an HTTP Range request after a dropped
     connection (WinError 10054 / connection reset mid-transfer is common on the
@@ -572,8 +589,7 @@ def refresh_cards():
         REFRESH.update(running=True, step="Loading set list", pct=3, error="")
         sets, url = {}, "https://api.scryfall.com/sets"
         while url:
-            with fetch(url) as r:
-                d = json.load(r)
+            d = _fetch_json(url)
             for s in d.get("data", []):
                 sets[s["code"]] = [
                     s["code"], s.get("name", ""), s.get("set_type", ""),
@@ -585,8 +601,7 @@ def refresh_cards():
             url = d.get("next_page") if d.get("has_more") else None
 
         REFRESH.update(step="Finding bulk data", pct=8)
-        with fetch("https://api.scryfall.com/bulk-data") as r:
-            cat = json.load(r)
+        cat = _fetch_json("https://api.scryfall.com/bulk-data")
         # "all_cards" (not "default_cards") is required for the German
         # card-name-language setting: Scryfall's own bulk-data description says
         # default_cards only includes a foreign-language object for a card when
@@ -843,7 +858,14 @@ def refresh_cards():
             log(c, "Price history", f"{n:,} price(s) changed and logged")
         REFRESH.update(running=False, step="Done", pct=100)
     except Exception as e:                                   # noqa: BLE001
-        REFRESH.update(running=False, step="Failed", error=str(e))
+        msg = str(e)
+        if isinstance(e, (urllib.error.URLError, ConnectionError, TimeoutError, OSError)) \
+                and not isinstance(e, urllib.error.HTTPError):
+            msg = ("Couldn't reach Scryfall — the connection kept being refused or "
+                   "reset. A VPN, company proxy, or antivirus that scans HTTPS "
+                   "traffic is the usual cause. Try again, or from a different "
+                   "network. (%s)" % e)
+        REFRESH.update(running=False, step="Failed", error=msg)
     finally:
         c.close()
 
