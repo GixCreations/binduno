@@ -4,11 +4,11 @@
 
 # Binduno
 
-**A local Magic: The Gathering collection tracker and Cardmarket want‑list builder.**
+**A local Magic: The Gathering collection tracker and Cardmarket Wants‑List builder.**
 
 One Python file, standard library only. No account, no cloud, nothing to sign up for — your collection never leaves your computer.
 
-![version](https://img.shields.io/badge/version-5.97-d4a629)
+![version](https://img.shields.io/badge/version-5.98-d4a629)
 ![python](https://img.shields.io/badge/python-3.9%2B-4a90c4)
 ![status](https://img.shields.io/badge/status-early%20beta-e0692c)
 ![platform](https://img.shields.io/badge/platform-macOS%20%C2%B7%20Windows%20%C2%B7%20Linux-8d98a7)
@@ -20,7 +20,7 @@ One Python file, standard library only. No account, no cloud, nothing to sign up
 
 ## What it is
 
-Binduno reads a CSV export of your collection (from **ManaBox**, **Moxfield** or **Archidekt**), pulls card and price data from **Scryfall**, and shows you exactly where your collection stands — per set, per rarity, by card name vs. by printing — and what it would take to fill the gaps. When you want to buy, it generates ready‑to‑paste **Cardmarket want lists** with the correct naming, bracket order and 150‑entry chunking.
+Binduno reads a CSV export of your collection (from **ManaBox**, **Moxfield** or **Archidekt**), pulls card and price data from **Scryfall**, and shows you exactly where your collection stands — per set, per rarity, by card name vs. by printing — and what it would take to fill the gaps. When you want to buy, it generates ready‑to‑paste **Cardmarket Wants‑Lists** with the correct naming, bracket order and 150‑entry chunking.
 
 It runs a tiny local web server and opens in your browser. That's the whole app.
 
@@ -48,15 +48,15 @@ It runs a tiny local web server and opens in your browser. That's the whole app.
 </tr>
 </table>
 
-**Cardmarket want lists**
+**Cardmarket Wants‑Lists**
 - Correct Cardmarket names, bracket order (`Card (Set) (V.1)` vs. `Card (V.1) (Set: Extras)`), quantity prefixes and 150‑entry blocks
-- "Buy missing" per set, or collect cards across sets in the Wantlist‑Cart
-- *Secret Lair cards can't go in the Wantlist‑Cart yet* — Cardmarket splits Secret Lair into hundreds of separate expansions with no reliable mapping, so a generated line wouldn't match. Buy those directly from the card's Cardmarket page.
+- "Buy missing" per set, or collect cards across sets in the Wants‑List Cart
+- *Secret Lair cards can't go in the Wants‑List Cart yet* — Cardmarket splits Secret Lair into hundreds of separate expansions with no reliable mapping, so a generated line wouldn't match. Buy those directly from the card's Cardmarket page.
 
 **Cardmarket browser helper** *(optional)*
 - A userscript that marks every single offer on cardmarket.com by whether you already own the card — green (this exact printing), yellow (you own it in another set/version/finish), red (missing), with the copy count
 - Handy for topping up a seller's order with cheap missing cards at no extra shipping
-- Marks every entry on your Cardmarket wantlists the same way — green/yellow/red — so you can spot wants you've since bought and clean them up
+- Marks every entry on your Cardmarket Wants‑Lists the same way — green/yellow/red — so you can spot wants you've since bought and clean them up
 - On a purchase's order page, one button adds every card from that order straight into your Binduno collection
 
 <p align="center"><img src="docs/cm-helper.jpg" width="880" alt="Cardmarket helper marking a seller's singles list"></p>

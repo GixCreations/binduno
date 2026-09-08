@@ -16,7 +16,7 @@ import urllib.request
 from datetime import datetime, timedelta
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-VERSION = "5.97"
+VERSION = "5.98"
 SCHEMA = 16
 
 
@@ -1467,6 +1467,19 @@ def resolve_deck(c, parsed):
                         "cmVer": r["cm_ver"] if r["cm_ver"] is not None else 1}
         printings = [pr(r) for r in sorted(by_set.values(),
                                            key=lambda r: r["released"] or "", reverse=True)]
+        prices = [p["eur"] for p in printings if p["eur"]]
+        min_eur = round(min(prices), 2) if prices else 0.0
+        # Which sets you already own this card name in (front-face tolerant),
+        # for the green/yellow/red collection badge like the Cardmarket helper.
+        owned_in = {r["set_code"]: r["q"] for r in c.execute(
+            """SELECT k.set_code, COALESCE(SUM(o.qty),0) q
+                 FROM cards k JOIN collection o
+                   ON o.set_code=k.set_code AND o.number=k.number
+                WHERE k.digital=0
+                  AND (k.name=? COLLATE NOCASE OR k.name_de=? COLLATE NOCASE
+                       OR k.name LIKE ? COLLATE NOCASE)
+                GROUP BY k.set_code HAVING q>0""",
+            (name, name, front + " // %")).fetchall()}
         pset = (it.get("set") or "").lower()
         pnum = str(it.get("num") or "").strip()
         if pset and pset not in real_sets:             # parser grabbed "(Foil)" etc.
@@ -1491,7 +1504,10 @@ def resolve_deck(c, parsed):
                     "deckPrinting": deck_pr,
                     "mode": "deck" if deck_pr else "any",
                     "chosen": deck_pr,
-                    "printings": printings, "status": status})
+                    "printings": printings, "status": status,
+                    "minEur": min_eur,
+                    "owned": sum(owned_in.values()),
+                    "ownedSets": list(owned_in.keys())})
     return {"cards": out}
 
 
@@ -3130,6 +3146,11 @@ table.setcards tr.miss{background:var(--row-miss-bg)}
 table.setcards td{border-bottom-color:var(--line)}
 table.setcards tr.notgoal td{opacity:.5}
 table.setcards tr.notgoal td .badge{opacity:1}
+.seg.deckseg button{min-width:60px;padding:5px 6px;text-align:center}
+tr.deckpickrow>td{padding:6px 0}
+.deckpick{border:1px solid var(--line);border-radius:6px;padding:10px;margin:2px 0 4px;background:var(--panel)}
+.deckpick .dpr{cursor:pointer;align-items:center}
+.deckpick .dpr:hover{background:var(--panel2)}
 .note{color:var(--r);font-size:12px}
 textarea{width:100%;height:130px;background:var(--panel2);color:var(--text);border:1px solid var(--line);
   font-family:var(--mono);font-size:12px;padding:9px;border-radius:4px;margin-top:10px}
@@ -3377,7 +3398,7 @@ tr.child2 td:first-child::before{left:36px}
   <div class="brand" id="brand" style="cursor:pointer" title="Home"><!--BRANDICON-->binduno</div>
   <a class="tab" data-p="home" id="navHome">Home</a>
   <a class="tab" data-p="collection" id="navCollection">Collection</a>
-  <a class="tab" data-p="cart"><span id="navCart">Wantlist-Cart</span> <span id="cartN" class="cartn"></span></a>
+  <a class="tab" data-p="cart"><span id="navCart">Wants-List Cart</span> <span id="cartN" class="cartn"></span></a>
   <a class="tab" data-p="manage" id="navManage">Manage</a>
   <span class="ver" id="ver"></span>
   <button id="navQuit" aria-label="Quit" style="margin-left:12px;padding:6px 9px;
@@ -3442,12 +3463,12 @@ const cardOracle=c=>(CARDLANG==="de"&&c.oracleDe)?c.oracleDe:(c.oracle||"");
 // pages are covered so far.
 const T={
 en:{
-  "nav.home":"Home","nav.collection":"Collection","nav.missing":"Missing Names",
-  "nav.cart":"Wantlist-Cart","nav.manage":"Settings","nav.quit":"Quit",
+  "nav.home":"Home","nav.collection":"Collection","nav.missing":"Missing names",
+  "nav.cart":"Wants-List Cart","nav.manage":"Settings","nav.quit":"Quit",
   "nav.quitTitle":"Stop the tracker","nav.homeTitle":"Home",
   "nav.confirmQuit":"Stop the tracker? The page stops working until you start it again.",
   "nav.stopped":"Tracker stopped","nav.stoppedDesc":"Open Binduno.app again to continue.",
-  "home.title":"Collection Statistics",
+  "home.title":"Collection statistics",
   "home.updated":"Cards updated {cards} · collection updated {collection}",
   "home.never":"never","home.cardNames":"Card names","home.printings":"Printings",
   "home.setsCompleted":"Sets completed","home.ofCountedSets":"of {n} counted sets",
@@ -3475,7 +3496,7 @@ en:{
   "wizard.finish":"Go to Binduno",
   "wizard.welcomeTitle":"Welcome to Binduno",
   "wizard.welcomeBody1":"Binduno is a local app for tracking your Magic: The Gathering "+
-    "collection and generating Cardmarket want lists. Everything runs on this computer — "+
+    "collection and generating Cardmarket Wants-Lists. Everything runs on this computer — "+
     "your collection data never leaves it, there's no account and no cloud.",
   "wizard.welcomeBody2":"This short setup picks a language, your country (for shipping cost "+
     "estimates), imports your collection if you already have a ManaBox export, and downloads "+
@@ -3498,7 +3519,7 @@ en:{
     "under Settings, and re-run this setup from there too.",
   "rarity.c":"Common","rarity.u":"Uncommon","rarity.r":"Rare","rarity.m":"Mythic",
   "rarity.s":"Special","rarity.b":"Basic land","rarity.land":"Basic lands",
-  "collection.title":"Collection","collection.viewSets":"View Sets","collection.viewCards":"View Cards",
+  "collection.title":"Collection","collection.viewSets":"View sets","collection.viewCards":"View cards",
   "collection.desc":"Every set with release date, progress and what it would cost to complete it. "+
     "“To finish” is the price of the cards you still need plus estimated shipping.",
   "collection.searchPlaceholder":"Search set name or code…",
@@ -3520,14 +3541,14 @@ en:{
   "setCard.currentValue":"Current value","setCard.complete":"complete",
   "setCard.cardsToBuy":"{n} cards to buy {v}","setCard.shipPrefix":"+ ship {v}",
   "setCard.sealedNoted":"Sealed noted","setCard.cheaper":" — cheaper",
-  "setCard.viewSet":"View Set","setCard.view":"View",
+  "setCard.viewSet":"View set","setCard.view":"View",
   "setCard.buyMissing":"Buy missing","setCard.buy":"Buy",
   "setCard.excludeFromTotals":"Exclude from totals","setCard.includeInTotals":"Include in totals",
   "setCard.neverPrintedEnglish":"Never printed in English","setCard.onlyBadge":"{lang} only",
   "setCard.excludedBadge":"excluded",
   "collection.thSet":"Set","collection.thCode":"Code","collection.thReleased":"Released",
   "collection.thKind":"Kind","collection.thOwned":"Owned","collection.thProgress":"Progress",
-  "collection.thCurrentValue":"Current Value",
+  "collection.thCurrentValue":"Current value",
   "collection.thCurrentValueTip":"Cardmarket value of the cards you already own",
   "collection.thCardsToBuy":"Cards to buy",
   "collection.thCardsToBuyTip":"Cards you still need, at Cardmarket trend",
@@ -3546,63 +3567,66 @@ en:{
   "missing.cheapestTotal":"Cheapest printings total",
   "missing.cardsOnlyNoShipping":"cards only, no shipping","missing.thisPage":"This page",
   "missing.pageOfN2":"page {p} of {n}","missing.cheapestFirstSuffix":" · cheapest first",
-  "missing.addPageToCart":"Add page to Wantlist-Cart","missing.addedCount":"{n} added",
+  "missing.addPageToCart":"Add page to Wants-List Cart","missing.addedCount":"{n} added",
   "missing.thCard":"Card","missing.thCheapestIn":"Cheapest in","missing.thNo":"No.",
   "missing.thRarity":"Rarity","missing.thPrice":"Price","missing.thCart":"Cart",
   "missing.loading":"Loading…","missing.pagerPageOfN":"Page {p} of {n}",
-  "cart.desc":"Cards you collected across sets, ready to turn into Cardmarket want lists. "+
+  "cart.desc":"Cards you collected across sets, ready to turn into Cardmarket Wants-Lists. "+
     "Prices are Cardmarket trend prices; shipping is an estimate.",
-  "cart.emptyTitle":"The Wantlist-Cart is empty",
+  "cart.emptyTitle":"The Wants-List Cart is empty",
   "cart.emptyDesc":"Add cards with the + button in any set, card list or missing-names view.",
   "cart.cards":"Cards","cart.fromNSets":"from {n} sets","cart.cardsTotal":"Cards total",
   "cart.shippingEst":"Shipping (est.)","cart.total":"Total",
   "cart.cardsPlusShipping":"cards + estimated shipping",
   "cart.filterPlaceholder":"Filter cards or sets…","cart.sortSet":"Set",
   "cart.sortCardName":"Card name","cart.sortPrice":"Price","cart.sortLineTotal":"Line total",
-  "cart.sortQuantity":"Quantity","cart.empty":"Empty Wantlist-Cart",
-  "cart.buildWantlist":"Build wantlist","cart.remove":"Remove",
+  "cart.sortQuantity":"Quantity","cart.empty":"Empty Wants-List Cart",
+  "cart.buildWantlist":"Build Wants-List","cart.remove":"Remove",
   "deck.fromDeckBtn":"Build from a deck list",
-  "deck.title":"Deck list → want list",
+  "deck.title":"Deck list → Wants-List",
   "deck.desc":"Paste a deck list from Moxfield, Archidekt, MTG Arena, MTGO… — pick which cards "+
     "to buy in the exact printing the list names and which ones any set will do for, then "+
-    "generate the Cardmarket want list.",
+    "generate the Cardmarket Wants-List.",
   "deck.fmtAuto":"Auto-detect","deck.fmtPlain":"Plain text",
   "deck.pastePlaceholder":"1 Sol Ring (LTC) 264\n1 Arcane Signet\n…",
   "deck.parseBtn":"Read deck list","deck.parsing":"Reading…",
   "deck.startOver":"New list","deck.allAny":"All: any set","deck.allDeck":"All: keep deck's set",
-  "deck.generateBtn":"Generate want list",
+  "deck.generateBtn":"Generate Wants-List",
   "deck.nToBuy":"{n} to buy","deck.nNotFound":"{n} not found",
-  "deck.anySet":"Any set","deck.pickSet":"Pick set…",
+  "deck.anySet":"Any set","deck.pickSet":"Pick set",
   "deck.notFound":"not in card data",
   "deck.deckSetMissing":"not printed in {s}",
   "deck.noMatch":"No cards match this filter.",
-  "deck.sortOrig":"Deck order","deck.sortSection":"Section",
-  "deck.filterAll":"All cards","deck.filterBuy":"To buy","deck.filterNeedSet":"Needs a set",
-  "deck.filterNotFound":"Not found",
+  "deck.priceFrom":"from","deck.thCollection":"Collection",
+  "deck.collIn":"in collection","deck.collOther":"other set","deck.collMissing":"missing",
+  "deck.sortOrig":"Deck order","deck.sortSection":"Section","deck.sortColl":"Collection status",
+  "deck.filterAll":"All cards","deck.filterBuy":"To buy","deck.filterOwned":"In collection",
+  "deck.filterMissing":"Missing","deck.filterOther":"Other set",
+  "deck.filterNeedSet":"Needs a set","deck.filterNotFound":"Not found",
   "deck.section.deck":"","deck.section.commander":"commander","deck.section.sideboard":"sideboard",
   "deck.section.maybeboard":"maybe","deck.section.companion":"companion",
-  "cart.secretLairWhy":"Secret Lair want lists aren't supported yet",
+  "cart.secretLairWhy":"Secret Lair Wants-Lists aren't supported yet",
   "cart.secretLairSkipped":"{n} Secret Lair card(s) were skipped — see the note on the set page.",
-  "cart.secretLairNote":"Secret Lair cards can't be added to the Wantlist-Cart yet. Cardmarket splits Secret Lair into hundreds of separate expansions with no reliable mapping, so a generated want list wouldn't match. Buy these directly from the card's Cardmarket page.",
+  "cart.secretLairNote":"Secret Lair cards can't be added to the Wants-List Cart yet. Cardmarket splits Secret Lair into hundreds of separate expansions with no reliable mapping, so a generated Wants-List wouldn't match. Buy these directly from the card's Cardmarket page.",
   "cart.addAllToCollection":"Add all to collection","cart.addAllToCollectionConfirm":
-    "Add all {n} cards in the Wantlist-Cart to your collection as nonfoil? "+
+    "Add all {n} cards in the Wants-List Cart to your collection as nonfoil? "+
     "The cart itself stays as it is.",
   "cart.addedAllToCollection":"Added to collection",
-  "cart.confirmClear":"Remove everything from the Wantlist-Cart?",
+  "cart.confirmClear":"Remove everything from the Wants-List Cart?",
   "wantlist.nothingToCopy":"Nothing to copy.",
   "wantlist.secretLairNote":"Secret Lair lines carry no expansion or version — Cardmarket splits Secret Lair into hundreds of separate expansions and there is no reliable mapping. On import, expect some of these not to match; add those by hand from the card's Cardmarket page.",
-  "wantlist.limitInfo":"Cardmarket allows {limit} entries per want list, so this is split "+
-    "into {n} {lists}. Paste each block into its own want list.",
+  "wantlist.limitInfo":"Cardmarket allows {limit} entries per Wants-List, so this is split "+
+    "into {n} {lists}. Paste each block into its own Wants-List.",
   "wantlist.list":"list","wantlist.listsPlural":"lists",
-  "wantlist.entryHeader":"Want list {i} of {n} — {count} entries",
+  "wantlist.entryHeader":"Wants-List {i} of {n} — {count} entries",
   "wantlist.copyList":"Copy list {i}","wantlist.copied":"Copied",
   "manage.title":"Settings",
   "manage.tabCollection":"Collection","manage.tabCompletion":"Completion","manage.tabCm":"Cardmarket",
   "manage.tabAppearance":"Appearance","manage.tabAbout":"Update & Help",
-  "manage.tabUpdate":"Update Collection",
-  "manage.tabSets":"Excluded Sets","manage.tabDesign":"Design","manage.tabShipping":"Shipping",
+  "manage.tabUpdate":"Update collection",
+  "manage.tabSets":"Excluded sets","manage.tabDesign":"Design","manage.tabShipping":"Shipping",
   "manage.tabLanguage":"Language","manage.tabGoals":"Set goals",
-  "manage.tabHistory":"History","manage.tabApp":"Update App","manage.tabHelp":"Help",
+  "manage.tabHistory":"History","manage.tabApp":"Update app","manage.tabHelp":"Help",
   "cm.title":"Cardmarket helper",
   "cm.desc":"A userscript that runs on cardmarket.com and marks each single offer by whether the card is already in your collection — handy for topping up a seller's order with cheap missing cards at no extra shipping.",
   "cm.step1":"Install a free, open-source userscript manager: <a href='https://violentmonkey.github.io/' target='_blank' rel='noopener'>Violentmonkey</a> (Chrome / Firefox / Edge) or <a href='https://apps.apple.com/app/userscripts/id1463298887' target='_blank' rel='noopener'>Userscripts</a> by Quoid (Safari, from the Mac App Store).",
@@ -3655,7 +3679,7 @@ en:{
     "country) shipping rates, pulled from Cardmarket's own shipping cost calculator.",
   "shipPref.countryRates":"Currently: {untracked} untracked, {tracked} tracked per order.",
   "shipPref.title":"Shipping option","shipPref.desc":"How shipping is estimated for cost "+
-    "previews (set list, Buy missing, Wantlist-Cart). This only changes the estimate shown "+
+    "previews (set list, Buy missing, Wants-List Cart). This only changes the estimate shown "+
     "in the app, not what you actually pick at Cardmarket checkout.",
   "shipPref.standard":"Standard","shipPref.standardDesc":"Cardmarket's cheapest option for "+
     "the order's value — untracked letter for orders up to 25 €, tracked once an order "+
@@ -3746,12 +3770,12 @@ en:{
   "history.title":"Change history","history.desc":"The last 100 changes to your stored data.",
   "history.none":"No changes recorded yet.",
   "tip.default":"How this is calculated",
-  "common.addToCart":"Add to Wantlist-Cart","common.addedCount":"{n} added",
+  "common.addToCart":"Add to Wants-List Cart","common.addedCount":"{n} added","common.close":"Close",
   "common.shipNote":"Shipping is estimated: about {cps} cards per seller, then Cardmarket "+
     "letter rates (up to 17 cards 1.40 €, up to 40 cards 2.10 €) or 5.00 € tracked once an "+
     "order passes 25 €. Hover any shipping figure for the full calculation.",
   "setPage.ownedOfTotal":"{owned} of {total} owned",
-  "setPage.addAllMissing":"Add all missing to Wantlist-Cart",
+  "setPage.addAllMissing":"Add all missing to Wants-List Cart",
   "setPage.buyMissingDots":"Buy missing…",
   "setPage.thType":"Type","setPage.thFoil":"Foil","setPage.thCopies":"Copies",
   "setPage.thOwned":"Owned","setPage.thNote":"Note","setPage.yes":"yes","setPage.no":"no",
@@ -3759,7 +3783,7 @@ en:{
   "buyPage.desc":"{setName} — {n} {cards} whose name you own in no printing of this set. "+
     "Prices are Cardmarket trend prices, not the cheapest offer.",
   "buyPage.cardSingular":"card","buyPage.cardPlural":"cards",
-  "buyPage.pickGroup":"Pick a group to add it straight to the Wantlist-Cart.",
+  "buyPage.pickGroup":"Pick a group to add it straight to the Wants-List Cart.",
   "buyPage.allMissing":"All missing cards",
   "buyPage.cardsCount":"{n} cards","buyPage.cardsOnlyTip":"Cardmarket trend prices, no shipping.",
   "buyPage.cardsOnlyTipTitle":"Cards only","buyPage.breadcrumbBuyMissing":"Buy missing",
@@ -3768,7 +3792,7 @@ en:{
   "cardPage.viewOnScryfall":"View on Scryfall","cardPage.regular":"Regular",
   "cardPage.copiesOwned":"Copies owned","cardPage.yourCollection":"Your collection",
   "cardPage.nonfoil":"Nonfoil","cardPage.setTo4":"Set to 4 copies",
-  "cardPage.wantListEntry":"Want list entry","cardPage.set":"Set",
+  "cardPage.wantListEntry":"Wants-List entry","cardPage.set":"Set",
   "cardPage.illustratedBy":"Illustrated by {artist}","cardPage.formatLegality":"Format legality",
   "cardPage.allPrintings":"All printings",
   "setPage.noteEndgame":"Endgame","setPage.noteOtherPrinting":"Other printing",
@@ -3851,7 +3875,7 @@ en:{
   "tip.cmVer":"Cardmarket lists this printing as version {v} of this card in this set.",
   "start.title":"Start here","start.dismiss":"Dismiss","start.hide":"Don't show this again",
   "start.body":"Three things Binduno is for — pick one, or read how it thinks.",
-  "start.a1":"See where my collection stands","start.a2":"Build a want list",
+  "start.a1":"See where my collection stands","start.a2":"Build a Wants-List",
   "start.a3":"Mark cards while shopping on Cardmarket","start.a4":"How Binduno thinks",
   "explain.link":"How Binduno thinks",
   "explain.title":"How Binduno thinks","explain.back":"Back to the home page",
@@ -3862,8 +3886,8 @@ en:{
   "explain.b2":"By default a set is complete when you own one plain printing of each card name. Under Settings → Completion you can instead require every collector number, and choose whether Showcase / borderless / serialized printings count. Promos, tokens and Un-sets are left out.",
   "explain.h3":"Prices are Cardmarket trend",
   "explain.b3":"Values and “cost to finish” use Cardmarket's trend price via Scryfall — not the cheapest current offer, and with no German-seller premium. Real cost is usually a bit lower. The Home page's totals are off by default (Settings → Completion); euro figures elsewhere are always shown.",
-  "explain.h4":"Want lists are built to Cardmarket's rules",
-  "explain.b4":"The Wantlist-Cart is the only place want-list text is made. It uses Cardmarket's exact names and bracket order, quantity prefixes, and splits into 150-entry blocks you paste one after another.",
+  "explain.h4":"Wants-Lists are built to Cardmarket's rules",
+  "explain.b4":"The Wants-List Cart is the only place Wants-List text is made. It uses Cardmarket's exact names and bracket order, quantity prefixes, and splits into 150-entry blocks you paste one after another.",
   "explain.h5":"Everything stays on your computer",
   "explain.b5":"Your collection lives in a local SQLite file. No account, no cloud. The only thing downloaded is Scryfall's card database; the optional Cardmarket helper only reads pages you already opened.",
   "cm.browserLabel":"Your browser",
@@ -3875,12 +3899,12 @@ en:{
   "cm.stepSafariEnable":"In Safari → Settings → Extensions, switch Userscripts on and allow it on cardmarket.com.",
   "cm.bmIntro":"No extension to install — the catch is you must click it once on every page.",
   "cm.bmDrag":"Drag this link onto your bookmarks bar:",
-  "cm.bmClick":"On a Cardmarket seller's singles page, a wantlist, or one of your purchases, click the bookmark. It marks the visible rows (or adds an import button on a purchase) and keeps working for about 90 seconds; click it again whenever you change page.",
+  "cm.bmClick":"On a Cardmarket seller's singles page, a Wants-List, or one of your purchases, click the bookmark. It marks the visible rows (or adds an import button on a purchase) and keeps working for about 90 seconds; click it again whenever you change page.",
   "cm.bmNote":"Does not work in Safari — Safari blocks the bookmarklet's connection to the local app. On Safari, use the extension method above instead.",
 },
 de:{
   "nav.home":"Start","nav.collection":"Sammlung","nav.missing":"Fehlende Namen",
-  "nav.cart":"Wantlist-Cart","nav.manage":"Einstellungen","nav.quit":"Beenden",
+  "nav.cart":"Wants-Liste-Cart","nav.manage":"Einstellungen","nav.quit":"Beenden",
   "nav.quitTitle":"Tracker beenden","nav.homeTitle":"Start",
   "nav.confirmQuit":"Tracker beenden? Die Seite funktioniert erst wieder nach einem Neustart.",
   "nav.stopped":"Tracker beendet","nav.stoppedDesc":"Öffne Binduno.app erneut, um weiterzumachen.",
@@ -3913,7 +3937,7 @@ de:{
   "wizard.skipStep":"Diesen Schritt überspringen",
   "wizard.welcomeTitle":"Willkommen bei Binduno",
   "wizard.welcomeBody1":"Binduno ist eine lokale App zum Tracken deiner Magic: The "+
-    "Gathering-Sammlung und zum Erzeugen von Cardmarket-Wantlisten. Alles läuft auf diesem "+
+    "Gathering-Sammlung und zum Erzeugen von Cardmarket-Wants-Listen. Alles läuft auf diesem "+
     "Rechner — deine Sammlungsdaten verlassen ihn nie, es gibt kein Konto und keine Cloud.",
   "wizard.welcomeBody2":"Diese kurze Einrichtung wählt eine Sprache, dein Land (für "+
     "Versandkosten-Schätzungen), importiert deine Sammlung falls du schon einen "+
@@ -3986,55 +4010,58 @@ de:{
   "missing.cheapestTotal":"Günstigste Drucke gesamt",
   "missing.cardsOnlyNoShipping":"nur Karten, kein Versand","missing.thisPage":"Diese Seite",
   "missing.pageOfN2":"Seite {p} von {n}","missing.cheapestFirstSuffix":" · günstigste zuerst",
-  "missing.addPageToCart":"Seite zum Wantlist-Cart hinzufügen","missing.addedCount":"{n} hinzugefügt",
+  "missing.addPageToCart":"Seite zum Wants-Liste-Cart hinzufügen","missing.addedCount":"{n} hinzugefügt",
   "missing.thCard":"Karte","missing.thCheapestIn":"Günstigste in","missing.thNo":"Nr.",
   "missing.thRarity":"Seltenheit","missing.thPrice":"Preis","missing.thCart":"Cart",
   "missing.loading":"Lädt…","missing.pagerPageOfN":"Seite {p} von {n}",
-  "cart.desc":"Karten aus allen Sets, bereit für Cardmarket-Wantlisten. "+
+  "cart.desc":"Karten aus allen Sets, bereit für Cardmarket-Wants-Listen. "+
     "Preise sind Cardmarket-Trendpreise; der Versand ist geschätzt.",
-  "cart.emptyTitle":"Der Wantlist-Cart ist leer",
+  "cart.emptyTitle":"Der Wants-Liste-Cart ist leer",
   "cart.emptyDesc":"Füge Karten über den +-Button in Set-, Karten- oder Fehlende-Namen-Ansicht hinzu.",
   "cart.cards":"Karten","cart.fromNSets":"aus {n} Sets","cart.cardsTotal":"Karten gesamt",
   "cart.shippingEst":"Versand (geschätzt)","cart.total":"Gesamt",
   "cart.cardsPlusShipping":"Karten plus geschätzter Versand",
   "cart.filterPlaceholder":"Karten oder Sets filtern…","cart.sortSet":"Set",
   "cart.sortCardName":"Kartenname","cart.sortPrice":"Preis","cart.sortLineTotal":"Zeilensumme",
-  "cart.sortQuantity":"Menge","cart.empty":"Wantlist-Cart leeren",
-  "cart.buildWantlist":"Wantlist erzeugen","cart.remove":"Entfernen",
+  "cart.sortQuantity":"Menge","cart.empty":"Wants-Liste-Cart leeren",
+  "cart.buildWantlist":"Wants-Liste erzeugen","cart.remove":"Entfernen",
   "deck.fromDeckBtn":"Aus Deckliste erstellen",
-  "deck.title":"Deckliste → Wantlist",
+  "deck.title":"Deckliste → Wants-Liste",
   "deck.desc":"Deckliste aus Moxfield, Archidekt, MTG Arena, MTGO … einfügen — pro Karte "+
     "wählen, ob genau der im Text genannte Druck gekauft werden soll oder irgendein Set "+
-    "reicht, dann die Cardmarket-Wantlist erzeugen.",
+    "reicht, dann die Cardmarket-Wants-Liste erzeugen.",
   "deck.fmtAuto":"Automatisch erkennen","deck.fmtPlain":"Klartext",
   "deck.pastePlaceholder":"1 Sol Ring (LTC) 264\n1 Arcane Signet\n…",
   "deck.parseBtn":"Deckliste einlesen","deck.parsing":"Wird gelesen…",
   "deck.startOver":"Neue Liste","deck.allAny":"Alle: irgendein Set","deck.allDeck":"Alle: Deck-Set behalten",
-  "deck.generateBtn":"Wantlist erzeugen",
+  "deck.generateBtn":"Wants-Liste erzeugen",
   "deck.nToBuy":"{n} zu kaufen","deck.nNotFound":"{n} nicht gefunden",
-  "deck.anySet":"Irgendein Set","deck.pickSet":"Set wählen…",
+  "deck.anySet":"Irgendein Set","deck.pickSet":"Set wählen",
   "deck.notFound":"nicht in den Kartendaten",
   "deck.deckSetMissing":"nicht in {s} gedruckt",
   "deck.noMatch":"Keine Karte passt zu diesem Filter.",
-  "deck.sortOrig":"Deck-Reihenfolge","deck.sortSection":"Bereich",
-  "deck.filterAll":"Alle Karten","deck.filterBuy":"Zu kaufen","deck.filterNeedSet":"Set nötig",
-  "deck.filterNotFound":"Nicht gefunden",
+  "deck.priceFrom":"ab","deck.thCollection":"Sammlung",
+  "deck.collIn":"in Sammlung","deck.collOther":"anderes Set","deck.collMissing":"fehlt",
+  "deck.sortOrig":"Deck-Reihenfolge","deck.sortSection":"Bereich","deck.sortColl":"Sammlungsstatus",
+  "deck.filterAll":"Alle Karten","deck.filterBuy":"Zu kaufen","deck.filterOwned":"In Sammlung",
+  "deck.filterMissing":"Fehlt","deck.filterOther":"Anderes Set",
+  "deck.filterNeedSet":"Set nötig","deck.filterNotFound":"Nicht gefunden",
   "deck.section.deck":"","deck.section.commander":"Commander","deck.section.sideboard":"Sideboard",
   "deck.section.maybeboard":"Maybe","deck.section.companion":"Companion",
-  "cart.secretLairWhy":"Wantlisten für Secret Lair werden noch nicht unterstützt",
+  "cart.secretLairWhy":"Wants-Listen für Secret Lair werden noch nicht unterstützt",
   "cart.secretLairSkipped":"{n} Secret-Lair-Karte(n) übersprungen — siehe Hinweis auf der Set-Seite.",
-  "cart.secretLairNote":"Secret-Lair-Karten können noch nicht in den Wantlist-Cart. Cardmarket teilt Secret Lair in hunderte einzelne Erweiterungen ohne verlässliche Zuordnung auf, eine erzeugte Wantlist würde also nicht treffen. Diese Karten direkt über die Cardmarket-Seite der Karte kaufen.",
+  "cart.secretLairNote":"Secret-Lair-Karten können noch nicht in den Wants-Liste-Cart. Cardmarket teilt Secret Lair in hunderte einzelne Erweiterungen ohne verlässliche Zuordnung auf, eine erzeugte Wants-Liste würde also nicht treffen. Diese Karten direkt über die Cardmarket-Seite der Karte kaufen.",
   "cart.addAllToCollection":"Alle zur Sammlung hinzufügen","cart.addAllToCollectionConfirm":
-    "Alle {n} Karten aus dem Wantlist-Cart als Nonfoil zur Sammlung hinzufügen? "+
+    "Alle {n} Karten aus dem Wants-Liste-Cart als Nonfoil zur Sammlung hinzufügen? "+
     "Der Cart selbst bleibt dabei unverändert.",
   "cart.addedAllToCollection":"Zur Sammlung hinzugefügt",
-  "cart.confirmClear":"Wirklich alles aus dem Wantlist-Cart entfernen?",
+  "cart.confirmClear":"Wirklich alles aus dem Wants-Liste-Cart entfernen?",
   "wantlist.nothingToCopy":"Nichts zu kopieren.",
   "wantlist.secretLairNote":"Secret-Lair-Zeilen haben keine Erweiterung und keine Version — Cardmarket teilt Secret Lair in hunderte einzelne Erweiterungen auf, eine verlässliche Zuordnung gibt es nicht. Beim Import treffen manche davon nicht; die dann von Hand über die Cardmarket-Seite der Karte hinzufügen.",
-  "wantlist.limitInfo":"Cardmarket erlaubt {limit} Einträge pro Wantlist, daher aufgeteilt "+
+  "wantlist.limitInfo":"Cardmarket erlaubt {limit} Einträge pro Wants-Liste, daher aufgeteilt "+
     "in {n} {lists}. Jeden Block einzeln einfügen.",
   "wantlist.list":"Liste","wantlist.listsPlural":"Listen",
-  "wantlist.entryHeader":"Wantlist {i} von {n} — {count} Einträge",
+  "wantlist.entryHeader":"Wants-Liste {i} von {n} — {count} Einträge",
   "wantlist.copyList":"Liste {i} kopieren","wantlist.copied":"Kopiert",
   "manage.title":"Einstellungen",
   "manage.tabCollection":"Sammlung","manage.tabCompletion":"Vervollständigung","manage.tabCm":"Cardmarket",
@@ -4095,7 +4122,7 @@ de:{
     "zu gleichem Land), direkt aus Cardmarkets eigenem Versandkostenrechner übernommen.",
   "shipPref.countryRates":"Aktuell: {untracked} ungetrackt, {tracked} getrackt pro Bestellung.",
   "shipPref.title":"Versandoption","shipPref.desc":"Wie der Versand für Preisschätzungen "+
-    "berechnet wird (Set-Liste, Fehlende kaufen, Wantlist-Cart). Ändert nur die in der App "+
+    "berechnet wird (Set-Liste, Fehlende kaufen, Wants-Liste-Cart). Ändert nur die in der App "+
     "angezeigte Schätzung, nicht was du beim Cardmarket-Checkout tatsächlich wählst.",
   "shipPref.standard":"Standard","shipPref.standardDesc":"Cardmarkets günstigste Option je "+
     "nach Bestellwert — ungetrackter Brief bis 25 € Bestellwert, getrackt darüber "+
@@ -4189,12 +4216,12 @@ de:{
   "history.title":"Änderungsverlauf","history.desc":"Die letzten 100 Änderungen an deinen gespeicherten Daten.",
   "history.none":"Noch keine Änderungen aufgezeichnet.",
   "tip.default":"So wird das berechnet",
-  "common.addToCart":"Zum Wantlist-Cart hinzufügen","common.addedCount":"{n} hinzugefügt",
+  "common.addToCart":"Zum Wants-Liste-Cart hinzufügen","common.addedCount":"{n} hinzugefügt","common.close":"Schließen",
   "common.shipNote":"Versand geschätzt: ca. {cps} Karten pro Verkäufer, dann Cardmarket-"+
     "Brieftarife (bis 17 Karten 1,40 €, bis 40 Karten 2,10 €) oder 5,00 € versichert ab "+
     "25 € Bestellwert. Für die genaue Rechnung über eine Versandangabe hovern.",
   "setPage.ownedOfTotal":"{owned} von {total} besessen",
-  "setPage.addAllMissing":"Alle fehlenden zum Wantlist-Cart hinzufügen",
+  "setPage.addAllMissing":"Alle fehlenden zum Wants-Liste-Cart hinzufügen",
   "setPage.buyMissingDots":"Fehlende kaufen…",
   "setPage.thType":"Typ","setPage.thFoil":"Foil","setPage.thCopies":"Kopien",
   "setPage.thOwned":"In Besitz","setPage.thNote":"Notiz","setPage.yes":"ja","setPage.no":"nein",
@@ -4202,7 +4229,7 @@ de:{
   "buyPage.desc":"{setName} — {n} {cards}, die du in keinem Druck dieses Sets besitzt. "+
     "Preise sind Cardmarket-Trendpreise, nicht das günstigste Angebot.",
   "buyPage.cardSingular":"Kartenname","buyPage.cardPlural":"Kartennamen",
-  "buyPage.pickGroup":"Gruppe wählen, um sie direkt in den Wantlist-Cart zu legen.",
+  "buyPage.pickGroup":"Gruppe wählen, um sie direkt in den Wants-Liste-Cart zu legen.",
   "buyPage.allMissing":"Alle fehlenden Karten",
   "buyPage.cardsCount":"{n} Karten","buyPage.cardsOnlyTip":"Cardmarket-Trendpreise, kein Versand.",
   "buyPage.cardsOnlyTipTitle":"Nur Karten","buyPage.breadcrumbBuyMissing":"Fehlende kaufen",
@@ -4211,7 +4238,7 @@ de:{
   "cardPage.viewOnScryfall":"Auf Scryfall ansehen","cardPage.regular":"Normal",
   "cardPage.copiesOwned":"Kopien in Besitz","cardPage.yourCollection":"Deine Sammlung",
   "cardPage.nonfoil":"Nonfoil","cardPage.setTo4":"Auf 4 Kopien setzen",
-  "cardPage.wantListEntry":"Wantlist-Eintrag","cardPage.set":"Set",
+  "cardPage.wantListEntry":"Wants-Liste-Eintrag","cardPage.set":"Set",
   "cardPage.illustratedBy":"Illustriert von {artist}","cardPage.formatLegality":"Format-Legalität",
   "cardPage.allPrintings":"Alle Drucke",
   "setPage.noteEndgame":"Endgame","setPage.noteOtherPrinting":"Anderer Druck",
@@ -4295,7 +4322,7 @@ de:{
   "tip.cmVer":"Cardmarket führt diesen Druck als Version {v} dieser Karte in diesem Set.",
   "start.title":"Hier starten","start.dismiss":"Ausblenden","start.hide":"Nicht mehr anzeigen",
   "start.body":"Drei Dinge, wofür Binduno da ist — such dir eins aus, oder lies, wie es denkt.",
-  "start.a1":"Sehen, wo meine Sammlung steht","start.a2":"Eine Wantlist bauen",
+  "start.a1":"Sehen, wo meine Sammlung steht","start.a2":"Eine Wants-Liste bauen",
   "start.a3":"Karten beim Kauf auf Cardmarket markieren","start.a4":"So denkt Binduno",
   "explain.link":"So denkt Binduno",
   "explain.title":"So denkt Binduno","explain.back":"Zurück zur Startseite",
@@ -4306,8 +4333,8 @@ de:{
   "explain.b2":"Standardmäßig ist ein Set vollständig, wenn du von jedem Kartennamen einen normalen Druck hast. Unter Einstellungen → Vervollständigung kannst du stattdessen jede Sammlernummer verlangen und wählen, ob Showcase / Borderless / serialisierte Drucke mitzählen. Promos, Token und Un-Sets bleiben außen vor.",
   "explain.h3":"Preise sind Cardmarket-Trend",
   "explain.b3":"Werte und „Restkosten“ nutzen Cardmarkets Trendpreis über Scryfall — nicht das günstigste aktuelle Angebot, und ohne Aufschlag für deutsche Verkäufer. Real zahlst du meist etwas weniger. Die Summen auf der Startseite sind standardmäßig aus (Einstellungen → Vervollständigung), Euro-Zahlen anderswo sind immer sichtbar.",
-  "explain.h4":"Wantlisten folgen Cardmarkets Regeln",
-  "explain.b4":"Der Wantlist-Cart ist der einzige Ort, an dem Wantlist-Text entsteht. Er nutzt Cardmarkets exakte Namen und Klammerreihenfolge, Mengen-Präfixe und teilt in 150er-Blöcke, die du nacheinander einfügst.",
+  "explain.h4":"Wants-Listen folgen Cardmarkets Regeln",
+  "explain.b4":"Der Wants-Liste-Cart ist der einzige Ort, an dem Wants-Liste-Text entsteht. Er nutzt Cardmarkets exakte Namen und Klammerreihenfolge, Mengen-Präfixe und teilt in 150er-Blöcke, die du nacheinander einfügst.",
   "explain.h5":"Alles bleibt auf deinem Rechner",
   "explain.b5":"Deine Sammlung liegt in einer lokalen SQLite-Datei. Kein Konto, keine Cloud. Heruntergeladen wird nur Scryfalls Kartendatenbank; der optionale Cardmarket-Helfer liest nur Seiten, die du ohnehin geöffnet hast.",
   "cm.browserLabel":"Dein Browser",
@@ -4319,7 +4346,7 @@ de:{
   "cm.stepSafariEnable":"In Safari → Einstellungen → Erweiterungen „Userscripts“ einschalten und für cardmarket.com erlauben.",
   "cm.bmIntro":"Nichts zu installieren — dafür musst du es auf jeder Seite einmal anklicken.",
   "cm.bmDrag":"Zieh diesen Link in deine Lesezeichenleiste:",
-  "cm.bmClick":"Auf der Singles-Seite eines Händlers, einer Wantliste oder einem deiner Käufe das Lesezeichen anklicken. Es markiert die sichtbaren Zeilen (bzw. blendet bei einem Kauf einen Import-Knopf ein) und arbeitet ~90 Sekunden lang; nach einem Seitenwechsel erneut klicken.",
+  "cm.bmClick":"Auf der Singles-Seite eines Händlers, einer Wants-Liste oder einem deiner Käufe das Lesezeichen anklicken. Es markiert die sichtbaren Zeilen (bzw. blendet bei einem Kauf einen Import-Knopf ein) und arbeitet ~90 Sekunden lang; nach einem Seitenwechsel erneut klicken.",
   "cm.bmNote":"Funktioniert nicht in Safari — Safari blockiert die Verbindung des Bookmarklets zur lokalen App. Unter Safari stattdessen die Erweiterungs-Methode oben nutzen.",
 },
 };
@@ -5590,7 +5617,7 @@ async function drawCart(){
     bindChunks();};
 }
 
-/* ---------------- deck list -> want list ---------------- */
+/* ---------------- deck list -> Wants-List ---------------- */
 let DECK={text:"",format:"auto",cards:null,view:"table",q:"",sort:"orig",dir:1,filter:"all",pick:null};
 const DECK_FORMATS=[["auto","deck.fmtAuto"],["moxfield","Moxfield"],["archidekt","Archidekt"],
   ["mtga","MTG Arena"],["mtgo","MTGO"],["tappedout","TappedOut"],["deckstats","Deckstats"],
@@ -5601,15 +5628,37 @@ function deckPage(){
     +`<h1>${t("deck.title")}</h1><p class="sub">${t("deck.desc")}</p><div id="deckBody"></div>`;
   bindCrumbs();drawDeck();
 }
-// The printing whose image/price/cm-tag a row currently stands for. In "any"
-// mode there is no committed set, so we borrow the newest printing just for the
-// hover image and the price column.
+// The printing a row currently stands for (its art + cm tag). "any" borrows the
+// newest printing just for the hover image.
 function deckChosen(c){
   return c.mode==="deck"?c.deckPrinting
        : c.mode==="set"?c.chosen
        : (c.printings&&c.printings[0])||null;
 }
 function deckPop(c){const p=deckChosen(c);return (p&&p.img)||"";}
+// Price cell: a committed set shows that printing's price; "any set" shows the
+// cheapest printing, flagged with "from".
+function deckPriceHtml(c){
+  if(c.mode==="any")
+    return c.minEur?`<span class="mt" style="color:var(--muted)">${t("deck.priceFrom")}</span> ${money(c.minEur)}`:"—";
+  const p=deckChosen(c);
+  return p&&p.eur?money(p.eur):"—";
+}
+// green = you own it in the set this row buys from (or anywhere, for "any");
+// yellow = you own a different printing; red = missing. Mirrors the CM helper.
+function deckColl(c){
+  if(c.status==="notFound")return "na";
+  const owned=c.owned||0;
+  const inTarget=c.mode==="any"?owned>0:(c.ownedSets||[]).includes((deckChosen(c)||{}).set);
+  if(inTarget)return "in";
+  return owned>0?"other":"missing";
+}
+function deckCollBadge(c){
+  const s=deckColl(c);
+  if(s==="na")return "";
+  const M={in:["l","deck.collIn"],other:["r","deck.collOther"],missing:["b","deck.collMissing"]};
+  return `<span class="tag ${M[s][0]}">${t(M[s][1])}</span>`;
+}
 function deckSecLbl(c){
   return DSEC[c.section]?`<span class="mt" style="color:var(--dim)">${t("deck.section."+c.section)}</span>`:"";
 }
@@ -5619,6 +5668,7 @@ function deckMiss(c){
 }
 function drawDeck(){
   const el=$("#deckBody");if(!el)return;
+  deckClosePick();
   if(!DECK.cards){
     el.innerHTML=`<div class="tools" style="margin:0 0 8px">
       <select id="dfmt">${DECK_FORMATS.map(([v,l])=>
@@ -5645,12 +5695,14 @@ function drawDeck(){
   const cs=DECK.cards;
   const nOut=cs.filter(c=>c.status!=="notFound").length;
   const nBad=cs.filter(c=>c.status==="notFound").length;
-  const SORTS=[["orig","deck.sortOrig"],["name","collection.sortName"],["section","deck.sortSection"],
-    ["set","cardPage.set"],["price","cart.sortPrice"]];
-  const FILTERS=[["all","deck.filterAll"],["buy","deck.filterBuy"],["needset","deck.filterNeedSet"],
-    ["notfound","deck.filterNotFound"],["any","deck.anySet"],
-    ["commander","deck.section.commander"],["sideboard","deck.section.sideboard"],
-    ["maybeboard","deck.section.maybeboard"]];
+  const hasSec=cs.some(c=>DSEC[c.section]);
+  DECK._hasSec=hasSec;
+  const SORTS=[["orig","deck.sortOrig"],["name","collection.sortName"],
+    ...(hasSec?[["section","deck.sortSection"]]:[]),
+    ["set","cardPage.set"],["price","cart.sortPrice"],["coll","deck.sortColl"]];
+  const FILTERS=[["all","deck.filterAll"],["buy","deck.filterBuy"],["missing","deck.filterMissing"],
+    ["owned","deck.filterOwned"],["other","deck.filterOther"],
+    ["needset","deck.filterNeedSet"],["notfound","deck.filterNotFound"]];
   el.innerHTML=`<div class="tools" style="margin:0 0 6px;flex-wrap:wrap">
       <button id="dback">${t("deck.startOver")}</button>
       <button id="dallAny">${t("deck.allAny")}</button>
@@ -5668,7 +5720,6 @@ function drawDeck(){
       <button id="dgen" class="pri" style="margin-left:auto">${t("deck.generateBtn")}</button></div>
     <div id="deckWL"></div>
     <div id="deckListWrap" style="margin-top:12px"></div>
-    <div id="deckPickPanel" style="display:none;margin-top:10px"></div>
     <div class="tools" style="margin-top:14px"><button id="dgen2" class="pri">${t("deck.generateBtn")}</button></div>`;
   const view=deckSelect();
   const wrap=$("#deckListWrap");
@@ -5678,7 +5729,8 @@ function drawDeck(){
     wrap.innerHTML=`<div class="cgrid">${view.map(o=>deckTile(o.c,o.i)).join("")}</div>`;
   }else{
     wrap.innerHTML=`<table class="setcards"><thead><tr>
-      <th>${t("missing.thCard")}</th><th>${t("deck.sortSection")}</th>
+      <th>${t("missing.thCard")}</th>${hasSec?`<th>${t("deck.sortSection")}</th>`:""}
+      <th>${t("deck.thCollection")}</th>
       <th class="num">${t("setPage.thCopies")}</th><th>${t("cardPage.set")}</th>
       <th class="num">${t("missing.thPrice")}</th><th></th></tr></thead><tbody>${
       view.map(o=>deckRow(o.c,o.i)).join("")}</tbody></table>`;
@@ -5693,7 +5745,6 @@ function drawDeck(){
   document.querySelectorAll("[data-dv]").forEach(b=>b.onclick=()=>{DECK.view=b.dataset.dv;drawDeck();});
   $("#dgen").onclick=deckGenerate;$("#dgen2").onclick=deckGenerate;
   bindDeckRows();
-  if(DECK.pick!=null)deckOpenPick(DECK.pick);
 }
 // Apply the search box, the filter dropdown and the sort. Each entry keeps its
 // real index in DECK.cards so the row buttons stay correct after filtering.
@@ -5702,100 +5753,150 @@ function deckSelect(){
   const q=DECK.q.trim().toLowerCase();
   if(q)a=a.filter(o=>o.c.name.toLowerCase().includes(q));
   const F=DECK.filter;
-  if(F==="buy")a=a.filter(o=>o.c.status!=="notFound");
+  if(F==="buy")a=a.filter(o=>o.c.status!=="notFound"&&deckColl(o.c)!=="in");
+  else if(F==="missing")a=a.filter(o=>deckColl(o.c)==="missing");
+  else if(F==="owned")a=a.filter(o=>deckColl(o.c)==="in");
+  else if(F==="other")a=a.filter(o=>deckColl(o.c)==="other");
   else if(F==="needset")a=a.filter(o=>o.c.status==="deckSetMissing");
   else if(F==="notfound")a=a.filter(o=>o.c.status==="notFound");
-  else if(F==="any")a=a.filter(o=>o.c.mode==="any"&&o.c.status!=="notFound");
-  else if(DSEC[F])a=a.filter(o=>o.c.section===F);
   const S=DECK.sort;
   if(S!=="orig")a.sort((x,y)=>{
     let p,r;
     if(S==="name"){p=x.c.name.toLowerCase();r=y.c.name.toLowerCase();}
     else if(S==="section"){p=x.c.section||"";r=y.c.section||"";}
     else if(S==="set"){p=(deckChosen(x.c)||{}).set||"";r=(deckChosen(y.c)||{}).set||"";}
-    else{p=(deckChosen(x.c)||{}).eur||0;r=(deckChosen(y.c)||{}).eur||0;}
+    else if(S==="coll"){const o={missing:0,other:1,in:2,na:3};p=o[deckColl(x.c)];r=o[deckColl(y.c)];}
+    else{p=x.c.mode==="any"?(x.c.minEur||0):(deckChosen(x.c)||{}).eur||0;
+         r=y.c.mode==="any"?(y.c.minEur||0):(deckChosen(y.c)||{}).eur||0;}
     return (typeof p==="string"?p.localeCompare(r):p-r)*DECK.dir;
   });
   return a;
 }
 function deckSeg(c,i){
-  return `<div class="seg" style="flex:0 0 auto">
+  return `<div class="seg deckseg">
     ${c.deckPrinting?`<button data-dm="${i}|deck" class="${c.mode==="deck"?"on":""}">${
-      c.deckPrinting.set.toUpperCase()}${c.deckPrinting.number?" #"+c.deckPrinting.number:""}</button>`:""}
+      c.deckPrinting.set.toUpperCase()}</button>`:""}
     <button data-dm="${i}|any" class="${c.mode==="any"?"on":""}">${t("deck.anySet")}</button>
-    <button data-dm="${i}|pick" class="${c.mode==="set"?"on":""}">${
+    <button data-dm="${i}|pick" class="${c.mode==="set"||DECK.pick===i?"on":""}">${
       c.mode==="set"&&c.chosen?c.chosen.set.toUpperCase():t("deck.pickSet")}</button>
   </div>`;
 }
 function deckRow(c,i){
+  const NC=6+(DECK._hasSec?1:0);
   if(c.status==="notFound")
-    return `<tr style="opacity:.6"><td colspan="5">${c.qty>1?c.qty+"× ":""}${esc(c.name)}
-      <span class="badge" style="background:var(--bad-bg);color:var(--bad)">${t("deck.notFound")}</span></td>
+    return `<tr data-di="${i}" style="opacity:.6"><td colspan="${NC-1}">${c.qty>1?c.qty+"× ":""}${esc(c.name)}
+      <span class="tag b">${t("deck.notFound")}</span></td>
       <td class="num"><button data-drm="${i}">✕</button></td></tr>`;
-  const ch=deckChosen(c);
-  return `<tr>
+  return `<tr data-di="${i}">
     <td><span class="setlink" data-pop="${deckPop(c)}">${esc(c.name)}</span> ${deckMiss(c)}</td>
-    <td>${deckSecLbl(c)}</td>
+    ${DECK._hasSec?`<td>${deckSecLbl(c)}</td>`:""}
+    <td>${deckCollBadge(c)}</td>
     <td class="num">${c.qty>1?c.qty:""}</td>
     <td>${deckSeg(c,i)}</td>
-    <td class="num">${ch&&ch.eur?money(ch.eur):"—"}</td>
+    <td class="num">${deckPriceHtml(c)}</td>
     <td class="num"><button data-drm="${i}">✕</button></td></tr>`;
 }
 function deckTile(c,i){
   if(c.status==="notFound")
-    return `<div class="cc" style="opacity:.55"><div class="meta">
+    return `<div class="cc" data-di="${i}" style="opacity:.55"><div class="meta">
       <div class="cn">${esc(c.name)}</div>
-      <div class="cset" style="color:var(--bad)">${t("deck.notFound")}</div>
+      <div class="cset"><span class="tag b">${t("deck.notFound")}</span></div>
       <div style="margin-top:6px"><button data-drm="${i}">✕</button></div></div></div>`;
-  const img=deckPop(c),ch=deckChosen(c);
-  return `<div class="cc">
-    <div class="imgwrap">${img?`<img class="face" src="${img}" alt="${esc(c.name)}" loading="lazy" data-pop="${img}">`
+  const img=deckPop(c);
+  return `<div class="cc" data-di="${i}">
+    <div class="imgwrap">${img?`<img class="face" src="${img}" alt="${esc(c.name)}" loading="lazy">`
       :`<div class="noimg">${esc(c.name)}</div>`}
       ${c.qty>1?`<span class="miss">${c.qty}×</span>`:""}</div>
-    <div class="meta"><div class="cn" data-pop="${img}">${esc(c.name)}</div>
-      <div class="cset">${deckSecLbl(c)} ${deckMiss(c)}</div>
-      <div class="cp">${ch&&ch.eur?money(ch.eur):"—"}</div>
+    <div class="meta"><div class="cn">${esc(c.name)}</div>
+      <div class="cset">${deckCollBadge(c)} ${deckSecLbl(c)} ${deckMiss(c)}</div>
+      <div class="cp">${deckPriceHtml(c)}</div>
       ${deckSeg(c,i)}
       <div style="margin-top:6px"><button data-drm="${i}">✕</button></div>
     </div></div>`;
 }
 function bindDeckRows(){
   bindTiles();
-  document.querySelectorAll("[data-drm]").forEach(b=>b.onclick=()=>{
-    const k=+b.dataset.drm;
-    DECK.cards.splice(k,1);
-    if(DECK.pick!=null){if(DECK.pick===k)DECK.pick=null;else if(DECK.pick>k)DECK.pick--;}
-    drawDeck();});
-  document.querySelectorAll("[data-dm]").forEach(b=>b.onclick=()=>{
-    const [i,mode]=b.dataset.dm.split("|"),c=DECK.cards[+i];
-    if(mode==="deck"){c.mode="deck";c.chosen=c.deckPrinting;DECK.pick=null;drawDeck();}
-    else if(mode==="any"){c.mode="any";c.chosen=null;DECK.pick=null;drawDeck();}
-    else{DECK.pick=DECK.pick===+i?null:+i;drawDeck();}
-  });
+  document.querySelectorAll("[data-drm]").forEach(b=>b.onclick=()=>deckRemove(+b.dataset.drm));
+  document.querySelectorAll("[data-dm]").forEach(b=>b.onclick=()=>deckMode(b.dataset.dm));
 }
-// The "pick a set" panel is a single shared strip below the list, so it works
-// the same in table and grid view.
+function bindDeckNode(node){
+  if(!node)return;
+  bindTiles(node);
+  node.querySelectorAll("[data-drm]").forEach(b=>b.onclick=()=>deckRemove(+b.dataset.drm));
+  node.querySelectorAll("[data-dm]").forEach(b=>b.onclick=()=>deckMode(b.dataset.dm));
+}
+function deckRemove(k){DECK.cards.splice(k,1);DECK.pick=null;drawDeck();}
+function deckMode(spec){
+  const [is,mode]=spec.split("|"),i=+is,c=DECK.cards[i];
+  if(mode==="pick"){DECK.pick===i?deckClosePick():deckOpenPick(i);return;}
+  deckClosePick();
+  if(mode==="deck"){c.mode="deck";c.chosen=c.deckPrinting;}
+  else{c.mode="any";c.chosen=null;}
+  deckUpdateOne(i);
+}
+// Redraw exactly one row/tile in place — changing a set must not reflow (and
+// re-request the images of) the whole list.
+function deckUpdateOne(i){
+  const node=document.querySelector(`[data-di="${i}"]`);
+  if(!node){drawDeck();return;}
+  node.outerHTML=DECK.view==="grid"?deckTile(DECK.cards[i],i):deckRow(DECK.cards[i],i);
+  bindDeckNode(document.querySelector(`[data-di="${i}"]`));
+  const wl=$("#deckWL");if(wl)wl.innerHTML="";
+}
+function deckClosePick(){
+  if(DECK._outside){document.removeEventListener("click",DECK._outside,true);DECK._outside=null;}
+  if(DECK._key){document.removeEventListener("keydown",DECK._key);DECK._key=null;}
+  const w=document.querySelector(".deckpickrow, .deckpickwrap");if(w)w.remove();
+  const i=DECK.pick;DECK.pick=null;
+  if(i!=null){
+    const btn=document.querySelector(`[data-dm="${i}|pick"]`);
+    if(btn)btn.classList.toggle("on",!!(DECK.cards[i]&&DECK.cards[i].mode==="set"));
+  }
+}
+// Inline "pick a set" panel, dropped right under its own row. Closes on the ✕,
+// on Escape, or on any click outside it.
 function deckOpenPick(i){
-  const panel=$("#deckPickPanel");if(!panel)return;
+  deckClosePick();
   const c=DECK.cards[i];
-  if(!c||c.status==="notFound"||!(c.printings&&c.printings.length)){DECK.pick=null;panel.style.display="none";return;}
-  panel.style.display="block";
-  panel.innerHTML=`<div class="mt" style="margin-bottom:4px;color:var(--muted)">${esc(c.name)}</div>
-    <input type="search" class="dpq" placeholder="${t("missing.searchPlaceholder")}" style="width:100%;margin:0 0 6px">
-    <div class="list dplist" style="max-height:280px;overflow:auto;border:1px solid var(--line);border-radius:5px">
-    ${c.printings.map((p,pi)=>`<div class="li dpr" data-dpr="${i}|${pi}" data-name="${esc(p.setName.toLowerCase())} ${p.set}">
-      ${p.img?`<img src="${p.img}" width="26" height="36" loading="lazy" data-pop="${p.img}" style="border-radius:3px">`:"<span style='flex:0 0 26px'></span>"}
-      <span class="nm">${esc(p.setName)}</span>
-      <span class="mt">${p.set.toUpperCase()} · #${p.number}${p.released?" · "+p.released.slice(0,4):""}</span>
+  const anchor=document.querySelector(`[data-di="${i}"]`);
+  if(!c||!anchor||c.status==="notFound"||!(c.printings&&c.printings.length))return;
+  DECK.pick=i;
+  const inner=`<div class="deckpick">
+    <div class="tools" style="margin:0 0 6px">
+      <b style="flex:1 1 auto">${esc(c.name)} — ${t("deck.pickSet")}</b>
+      <input type="search" class="dpq" placeholder="${t("missing.searchPlaceholder")}" style="flex:2 1 150px">
+      <button class="dpx" title="${t("common.close")}">✕</button></div>
+    <div class="list dplist" style="max-height:300px;overflow:auto;border:1px solid var(--line);border-radius:5px">
+    ${c.printings.map((p,pi)=>`<div class="li dpr" data-dpr="${i}|${pi}" data-pop="${p.img}"
+        data-name="${esc(p.setName.toLowerCase())} ${p.set}">
+      ${p.img?`<img src="${p.img}" width="34" height="47" loading="lazy" style="border-radius:3px">`:"<span style='flex:0 0 34px'></span>"}
+      <span class="nm">${esc(p.setName)} <span class="mt" style="color:var(--dim)">${p.set.toUpperCase()} · #${p.number}${p.released?" · "+p.released.slice(0,4):""}</span></span>
       <span class="mt" style="flex:0 0 64px;text-align:right;color:var(--gold)">${p.eur?money(p.eur):"—"}</span>
-    </div>`).join("")}</div>`;
+    </div>`).join("")}</div></div>`;
+  if(DECK.view==="grid")
+    anchor.insertAdjacentHTML("afterend",`<div class="deckpickwrap" style="grid-column:1/-1">${inner}</div>`);
+  else
+    anchor.insertAdjacentHTML("afterend",
+      `<tr class="deckpickrow"><td colspan="${6+(DECK._hasSec?1:0)}">${inner}</td></tr>`);
+  const panel=document.querySelector(".deckpick");
   const q=panel.querySelector(".dpq");
   q.oninput=()=>{const s=q.value.toLowerCase();
     panel.querySelectorAll(".dpr").forEach(r=>r.style.display=r.dataset.name.includes(s)?"":"none");};
+  panel.querySelector(".dpx").onclick=()=>deckClosePick();
   panel.querySelectorAll("[data-dpr]").forEach(r=>r.onclick=()=>{
     const [ri,pi]=r.dataset.dpr.split("|");
-    const cc=DECK.cards[+ri];cc.mode="set";cc.chosen=cc.printings[+pi];DECK.pick=null;drawDeck();});
-  bindTiles(panel);
+    const cc=DECK.cards[+ri];cc.mode="set";cc.chosen=cc.printings[+pi];
+    deckClosePick();deckUpdateOne(+ri);});
+  DECK._outside=e=>{
+    if(e.target.closest(".deckpick")||e.target.closest(`[data-dm="${i}|pick"]`))return;
+    deckClosePick();
+  };
+  DECK._key=e=>{if(e.key==="Escape")deckClosePick();};
+  setTimeout(()=>{
+    if(DECK._outside)document.addEventListener("click",DECK._outside,true);
+    if(DECK._key)document.addEventListener("keydown",DECK._key);
+  },0);
+  const btn=document.querySelector(`[data-dm="${i}|pick"]`);if(btn)btn.classList.add("on");
   panel.scrollIntoView({behavior:"smooth",block:"nearest"});
   q.focus();
 }
@@ -6505,11 +6606,17 @@ function helpPane(sel){
          and the price <b>Watchlist</b> (up to 100 cards with a 7-day trend).</li>
      <li><b>Collection</b> — three views via the toggle at the top: <b>Sets</b> (every set, or
          every printing, with filters — sets can be grouped so subsets sit under their
-         parent), <b>Cards</b> (search across every printing), and <b>Missing Names</b> (one
+         parent), <b>Cards</b> (search across every printing), and <b>Missing names</b> (one
          row per card name you own nowhere, priced at its cheapest printing — the shopping
          list for the name goal).</li>
-     <li><b>Wantlist-Cart</b> — collect cards across sets, then generate want lists. The only
-         place want-list text is generated.</li>
+     <li><b>Wants-List Cart</b> — collect cards across sets, then generate Wants-Lists. The only
+         place Wants-List text is generated. <b>Build from a deck list</b> (the button under the
+         heading) takes a deck export from Moxfield, Archidekt, MTG&nbsp;Arena, MTGO, TappedOut,
+         Deckstats or plain text and turns it into a Wants-List: it matches every line, shows a
+         green/yellow/red collection badge like the browser helper, and lets you decide per card
+         whether to buy the exact printing the list names or let any set do (any set → the line
+         is generated without a set, priced from the cheapest printing). It never touches the
+         cart itself.</li>
      <li><b>Settings</b> — imports, shipping, language, exclusions, history, updates, this
          page. The first-run setup can be re-run any time from
          <i>Settings → App → Setup-Assistent</i>.</li></ul>`,
@@ -6550,13 +6657,13 @@ function helpPane(sel){
         You can override any of this under <i>Settings → Excluded Sets</i>.</p>
      <h3>Notes on individual cards</h3>
      <ul><li><b>Other printing</b> — you already own this card name elsewhere in the set,
-         so it is not on the want list.</li>
+         so it is not on the Wants-List.</li>
      <li><b>Endgame</b> — the cheapest printing is at or above the price threshold (300 € by
          default; change or disable it under Settings → Completion). These are left out of
          “remaining cost” so the figure stays realistic; the Home tile shows them separately.</li>
      <li><b>Special printings</b> — borderless, showcase, surge foil and similar are labelled
          in orange next to the card name.</li></ul>
-     <h3>Want lists</h3>
+     <h3>Wants-Lists</h3>
      <p>A line reads <code>Card Name (V.n) (Set)</code> — the version first, the
         set always last (Cardmarket reads the trailing brackets as the expansion).
         A special treatment reads <code>Card Name (V.n) (Set: Extras)</code>. If a
@@ -6569,9 +6676,9 @@ function helpPane(sel){
      <p>Quantities are written as a prefix: <code>2x Sol Ring (V.1) (Commander: Kaldheim)</code>.
         Cardmarket accepts 150 entries per list, so longer lists are split into numbered
         blocks you copy one after another.</p>
-     <p><b>Secret Lair</b> cards can't be put in the Wantlist-Cart yet: Cardmarket
+     <p><b>Secret Lair</b> cards can't be put in the Wants-List Cart yet: Cardmarket
         splits Secret Lair into hundreds of separate expansions with no reliable
-        mapping, so a generated want-list line wouldn't match. Buy those directly
+        mapping, so a generated Wants-List line wouldn't match. Buy those directly
         from the card's Cardmarket page.</p>`,
    data:`<h3>Your data</h3>
      <p>Everything lives in a SQLite file on your Mac. Nothing is uploaded anywhere.</p>
@@ -6608,8 +6715,14 @@ function helpPane(sel){
          übergeordneten Set stehen), <b>Karten</b> (Suche über alle Drucke), und
          <b>Fehlende Namen</b> (eine Zeile pro Kartenname, den du nirgends besitzt, zum Preis
          des günstigsten Drucks — die Einkaufsliste fürs Namensziel).</li>
-     <li><b>Wantlist-Cart</b> — Karten über Sets hinweg sammeln, dann Wantlisten erzeugen. Der
-         einzige Ort, an dem Wantlist-Text erzeugt wird.</li>
+     <li><b>Wants-Liste-Cart</b> — Karten über Sets hinweg sammeln, dann Wants-Listen erzeugen. Der
+         einzige Ort, an dem Wants-Liste-Text erzeugt wird. <b>Aus Deckliste erstellen</b> (der
+         Knopf unter der Überschrift) nimmt einen Deck-Export aus Moxfield, Archidekt, MTG&nbsp;Arena,
+         MTGO, TappedOut, Deckstats oder Klartext und macht daraus eine Wants-Liste: jede Zeile
+         wird zugeordnet, ein grün/gelb/rotes Sammlungs-Abzeichen wie beim Browser-Helfer
+         angezeigt, und du entscheidest pro Karte, ob genau der genannte Druck gekauft werden
+         soll oder irgendein Set reicht (irgendein Set → die Zeile entsteht ohne Setangabe, Preis
+         ab dem günstigsten Druck). Der Cart selbst bleibt unberührt.</li>
      <li><b>Einstellungen</b> — Imports, Versand, Sprache, Ausschlüsse, Verlauf, Updates, diese
          Seite. Die Ersteinrichtung kann jederzeit erneut gestartet werden über
          <i>Einstellungen → App → Setup-Assistent</i>.</li></ul>`,
@@ -6654,14 +6767,14 @@ function helpPane(sel){
         Sets</i> übersteuern.</p>
      <h3>Hinweise zu einzelnen Karten</h3>
      <ul><li><b>Anderer Druck</b> — du besitzt diesen Kartennamen schon anderswo im Set, daher
-         steht er nicht auf der Wantlist.</li>
+         steht er nicht auf der Wants-Liste.</li>
      <li><b>Endgame</b> — der günstigste Druck erreicht den Preis-Schwellwert (standardmäßig
          300 €; unter Einstellungen → Vervollständigung änderbar oder abschaltbar). Diese werden
          aus den „Restkosten“ herausgelassen, damit die Zahl realistisch bleibt; die Home-Kachel
          zeigt sie separat.</li>
      <li><b>Sonderdrucke</b> — Borderless, Showcase, Surge-Foil und Ähnliches werden orange
          neben dem Kartennamen markiert.</li></ul>
-     <h3>Wantlisten</h3>
+     <h3>Wants-Listen</h3>
      <p>Eine Zeile liest sich <code>Card Name (V.n) (Set)</code> — Version zuerst,
         das Set immer als letzte Klammer (Cardmarket wertet die letzte Klammer als
         Erweiterung). Ein Sonderdruck liest sich <code>Card Name (V.n) (Set: Extras)</code>.
@@ -6674,9 +6787,9 @@ function helpPane(sel){
      <p>Mengen werden als Präfix geschrieben: <code>2x Sol Ring (V.1) (Commander: Kaldheim)</code>.
         Cardmarket akzeptiert 150 Einträge pro Liste, längere Listen werden daher in
         nummerierte Blöcke aufgeteilt, die du nacheinander kopierst.</p>
-     <p><b>Secret Lair</b>-Karten können noch nicht in den Wantlist-Cart: Cardmarket
+     <p><b>Secret Lair</b>-Karten können noch nicht in den Wants-Liste-Cart: Cardmarket
         teilt Secret Lair in hunderte einzelne Erweiterungen ohne verlässliche
-        Zuordnung auf, eine erzeugte Wantlist-Zeile würde also nicht treffen. Solche
+        Zuordnung auf, eine erzeugte Wants-Liste-Zeile würde also nicht treffen. Solche
         Karten direkt über die Cardmarket-Seite der Karte kaufen.</p>`,
    data:`<h3>Deine Daten</h3>
      <p>Alles liegt in einer SQLite-Datei auf deinem Mac. Nichts wird irgendwohin hochgeladen.</p>
