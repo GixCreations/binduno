@@ -16,7 +16,7 @@ import urllib.request
 from datetime import datetime, timedelta
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-VERSION = "6.00"
+VERSION = "6.01"
 SCHEMA = 16
 
 
@@ -3229,6 +3229,16 @@ table.setcards thead th[data-sk]:hover{color:var(--gold)}
 .phcur .phtbg{fill:var(--bg);stroke:var(--line)}
 .phcur .phtt{fill:var(--text);font-size:11px;font-family:var(--mono)}
 .seg.phrangeseg button{padding:5px 11px;font-size:12px}
+table.wltable{table-layout:fixed;width:100%}
+table.wltable th:nth-child(1){width:24%}
+table.wltable th:nth-child(2){width:15%}
+table.wltable th:nth-child(3){width:88px}
+table.wltable th:nth-child(5){width:168px}
+table.wltable th:nth-child(6){width:46px}
+table.wltable td:nth-child(1),table.wltable td:nth-child(2){white-space:normal;overflow-wrap:anywhere}
+table.wltable td.wlsparkcell{padding-right:18px}
+.wlspark{width:100%;height:38px;display:block}
+.wlbase{stroke:var(--muted);stroke-width:1;stroke-dasharray:2 3;opacity:.45}
 tr.deckpickrow>td{padding:6px 0}
 .deckpick{border:1px solid var(--line);border-radius:6px;padding:10px;margin:2px 0 4px;background:var(--panel)}
 .deckpick .dpr{cursor:pointer;align-items:center}
@@ -3568,7 +3578,7 @@ en:{
     "their Cardmarket price trend. Add cards from any card page.",
   "home.watchlistEmpty":"No cards on the watchlist yet — open a card and click "+
     "\"Add to Watchlist\".",
-  "home.watchlist7d":"Last 7 days","home.watchlistChange":"Change",
+  "home.watchlist7d":"Last 7 days","home.watchlistChange":"Change","home.watchlistTrend":"Trend",
   "range.d7":"7 D","range.d30":"30 D","range.y1":"1 Y","range.max":"Max",
   "ph.title":"Price history","ph.none":"No price history logged yet.",
   "ph.lohi":"low {lo} · high {hi}",
@@ -4012,7 +4022,7 @@ de:{
     "ihrem Cardmarket-Preisverlauf. Karten über eine beliebige Kartenseite hinzufügen.",
   "home.watchlistEmpty":"Noch keine Karten auf der Watchlist — auf einer Kartenseite auf "+
     "„Zur Watchlist hinzufügen“ klicken.",
-  "home.watchlist7d":"Letzte 7 Tage","home.watchlistChange":"Änderung",
+  "home.watchlist7d":"Letzte 7 Tage","home.watchlistChange":"Änderung","home.watchlistTrend":"Trend",
   "range.d7":"7 T","range.d30":"30 T","range.y1":"1 J","range.max":"Max",
   "ph.title":"Preisverlauf","ph.none":"Noch kein Preisverlauf aufgezeichnet.",
   "ph.lohi":"Tief {lo} · Hoch {hi}",
@@ -4658,6 +4668,29 @@ function sparkline(vals){
     <polyline points="${pts}" fill="none" stroke="${color}" stroke-width="1.6"
       stroke-linecap="round" stroke-linejoin="round"/></svg>`;
 }
+// richer watchlist sparkline: stretches to fill the cell, area fill, a dashed
+// baseline at the window's opening price and a dot on the latest point so the
+// move over the period reads at a glance.
+function wlSpark(vals){
+  const nums=(vals||[]).filter(v=>v!=null&&v>0);
+  if(nums.length<2)return `<span class="mt" style="color:var(--dim)">—</span>`;
+  const W=260,H=40,P=5,n=vals.length;
+  const min=Math.min(...nums),max=Math.max(...nums),rng=(max-min)||1;
+  const X=i=>P+i*(W-2*P)/(n-1);
+  const Y=v=>H-P-((v-min)/rng)*(H-2*P);
+  const first=nums[0],last=nums[nums.length-1];
+  const col=last>first?"var(--ok)":last<first?"var(--bad)":"var(--muted)";
+  const pathD=vals.map((v,i)=>(i?"L":"M")+X(i).toFixed(1)+" "+Y(v).toFixed(1)).join(" ");
+  const areaD=`M${X(0).toFixed(1)} ${H-P} `+
+    vals.map((v,i)=>"L"+X(i).toFixed(1)+" "+Y(v).toFixed(1)).join(" ")+
+    ` L${X(n-1).toFixed(1)} ${H-P} Z`;
+  return `<svg class="wlspark" viewBox="0 0 ${W} ${H}" preserveAspectRatio="none">
+    <line x1="${P}" y1="${Y(first).toFixed(1)}" x2="${W-P}" y2="${Y(first).toFixed(1)}" class="wlbase"/>
+    <path d="${areaD}" fill="${col}" opacity=".11"/>
+    <path d="${pathD}" fill="none" stroke="${col}" stroke-width="1.8" stroke-linejoin="round"/>
+    <circle cx="${X(n-1).toFixed(1)}" cy="${Y(last).toFixed(1)}" r="2.7" fill="${col}"/>
+  </svg>`;
+}
 // 7 / 30 days / 1 year / everything — shared by the Home watchlist and every
 // card page. Value is the `range` query param price_history_series() expects.
 const PH_RANGES=[["7","range.d7"],["30","range.d30"],["365","range.y1"],["max","range.max"]];
@@ -4754,16 +4787,15 @@ async function drawWatchlist(){
     $("#wlRange")&&bindPhRange("#wlRange",v=>{WL_RANGE=v;drawWatchlist();});
     return;
   }
-  const rl=PH_RANGES.find(x=>x[0]===WL_RANGE);
-  out.innerHTML=rangeUI+`<div class="tscroll"><table><thead><tr><th>${t("missing.thCard")}</th><th>${t("cardPage.set")}</th>
-      <th class="num">${t("missing.thPrice")}</th><th>${rl?t(rl[1]):""}</th>
-      <th class="num">${t("home.watchlistChange")}</th><th class="num"></th></tr></thead>
+  out.innerHTML=rangeUI+`<div class="tscroll"><table class="wltable"><thead><tr><th>${t("missing.thCard")}</th><th>${t("cardPage.set")}</th>
+      <th class="num">${t("missing.thPrice")}</th><th class="wlsparkcell">${t("home.watchlistTrend")}</th>
+      <th class="num">${t("home.watchlistChange")}</th><th></th></tr></thead>
     <tbody>${r.items.map(c=>`<tr>
       <td><span class="setlink" data-card="${c.set}|${c.number}" data-pop="${c.img||""}">${cardName(c)}</span></td>
       <td><span class="setlink" data-set="${c.set}">${c.setName}</span></td>
       <td class="num" style="color:var(--gold)">${c.eur?money(c.eur):"—"}</td>
-      <td>${sparkline(c.series)}</td>
-      <td class="num">${c.changePct==null?"—":
+      <td class="wlsparkcell">${wlSpark(c.series)}</td>
+      <td class="num" style="color:${c.changeEur>0?"var(--ok)":c.changeEur<0?"var(--bad)":"var(--muted)"}">${c.changePct==null?"—":
         `${c.changeEur>0?"+":""}${money(c.changeEur)} <span class="mt">(${
           c.changePct>0?"+":""}${c.changePct.toFixed(1)}%)</span>`}</td>
       <td class="num"><button data-unwatch="${c.set}|${c.number}"
@@ -6898,7 +6930,20 @@ function helpPane(sel){
      <li>Foil and non-foil are stored separately. A card owned as foil is valued with the
          foil price; some cards only ever have a foil price.</li>
      <li>Cards with no Cardmarket price at all count as zero. Filter for them under
-         Collection → View Cards.</li></ul>`,
+         Collection → View Cards.</li></ul>
+     <h3>How far the price history goes back</h3>
+     <p>The graph on every card page (and the watchlist sparklines) is built from two
+        sources:</p>
+     <ul><li>Binduno's <b>own daily log</b> — every time the card data is refreshed it stores
+         that day's Cardmarket price for anything that moved. This history only goes back to
+         when you first started running Binduno, and grows by one day every day it runs.</li>
+     <li>A <b>one‑off backfill from MTGJSON</b> when Binduno is first set up (or after a long
+         gap). MTGJSON's public price file only contains roughly the <b>last 90 days</b>, so
+         that is as far back as the backfill can reach — nothing older exists to download.</li></ul>
+     <p>So right after a fresh install, <i>1 Y</i> and <i>Max</i> show the same ~90 days as
+        <i>30 D</i>. Leave Binduno running (or open it regularly) and the history fills in on
+        its own — after a year, <i>1 Y</i> really is a year. Re‑running the backfill doesn't
+        help; it's always the same 90 days.</p>`,
    shipping:`<h3>How shipping is estimated</h3>
      <p>Cardmarket requires tracked shipping once an order exceeds 25 €; below that, sellers
         can use a cheaper untracked letter. Rates depend heavily on the seller's country —
@@ -7006,7 +7051,21 @@ function helpPane(sel){
      <li>Foil und Nonfoil werden getrennt gespeichert. Eine als Foil besessene Karte wird zum
          Foil-Preis bewertet; manche Karten haben ausschließlich einen Foil-Preis.</li>
      <li>Karten ganz ohne Cardmarket-Preis zählen als null. Filtere danach unter
-         Sammlung → Karten anzeigen.</li></ul>`,
+         Sammlung → Karten anzeigen.</li></ul>
+     <h3>Wie weit der Preisverlauf zurückreicht</h3>
+     <p>Der Graph auf jeder Kartenseite (und die Watchlist-Sparklines) speist sich aus zwei
+        Quellen:</p>
+     <ul><li>Bindunos <b>eigenes tägliches Log</b> — bei jeder Kartendaten-Aktualisierung wird
+         der Cardmarket-Preis des Tages für alles gespeichert, das sich bewegt hat. Diese
+         Historie reicht nur bis zu dem Tag zurück, an dem du Binduno das erste Mal gestartet
+         hast, und wächst pro Lauftag um einen Tag.</li>
+     <li>Ein <b>einmaliger Backfill von MTGJSON</b> beim ersten Einrichten (oder nach längerer
+         Pause). MTGJSONs öffentliche Preisdatei enthält nur etwa die <b>letzten 90 Tage</b> —
+         weiter zurück gibt es nichts zum Herunterladen.</li></ul>
+     <p>Direkt nach einer frischen Installation zeigen <i>1 J</i> und <i>Max</i> daher dieselben
+        ~90 Tage wie <i>30 T</i>. Lass Binduno laufen (oder öffne es regelmäßig), dann füllt
+        sich die Historie von selbst — nach einem Jahr ist <i>1 J</i> wirklich ein Jahr. Den
+        Backfill erneut auszuführen bringt nichts; es sind immer dieselben 90 Tage.</p>`,
    shipping:`<h3>Wie der Versand geschätzt wird</h3>
      <p>Cardmarket verlangt getrackten Versand, sobald eine Bestellung 25 € übersteigt; darunter
         können Verkäufer einen günstigeren ungetrackten Brief nutzen. Die Tarife hängen stark

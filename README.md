@@ -8,7 +8,7 @@
 
 One Python file, standard library only. No account, no cloud, nothing to sign up for — your collection never leaves your computer.
 
-![version](https://img.shields.io/badge/version-6.00-d4a629)
+![version](https://img.shields.io/badge/version-6.01-d4a629)
 ![python](https://img.shields.io/badge/python-3.9%2B-4a90c4)
 ![status](https://img.shields.io/badge/status-early%20beta-e0692c)
 ![platform](https://img.shields.io/badge/platform-macOS%20%C2%B7%20Windows%20%C2%B7%20Linux-8d98a7)
@@ -18,25 +18,51 @@ One Python file, standard library only. No account, no cloud, nothing to sign up
 
 ---
 
+## Contents
+
+- [What it is](#what-it-is)
+- [Features](#features)
+  - [The collection dashboard](#the-collection-dashboard)
+  - [Set completion, your rules](#set-completion-your-rules)
+  - [Wants-Lists for Cardmarket](#wants-lists-for-cardmarket)
+  - [From a deck list](#from-a-deck-list)
+  - [Price history and watchlist](#price-history-and-watchlist)
+  - [The Cardmarket browser helper](#the-cardmarket-browser-helper)
+  - [Everything else](#everything-else)
+- [Install](#install)
+  - [Windows: download, no Python needed](#windows-download-no-python-needed)
+  - [Run from source (any OS)](#run-from-source-any-os)
+  - [macOS: double-clickable app](#macos-double-clickable-app)
+  - [Build the Windows .exe yourself](#build-the-windows-exe-yourself)
+- [Updating](#updating)
+- [How it works](#how-it-works)
+- [Testers welcome](#testers-welcome)
+- [License](#license)
+- [Disclaimer](#disclaimer)
+
+---
+
 ## What it is
 
-Binduno reads a CSV export of your collection (from **ManaBox**, **Moxfield** or **Archidekt**), pulls card and price data from **Scryfall**, and shows you exactly where your collection stands — per set, per rarity, by card name vs. by printing — and what it would take to fill the gaps. When you want to buy, it generates ready‑to‑paste **Cardmarket Wants‑Lists** with the correct naming, bracket order and 150‑entry chunking.
+Binduno reads a CSV export of your collection (from **ManaBox**, **Moxfield** or **Archidekt**), pulls card and price data from **Scryfall**, and shows you exactly where your collection stands — per set, per rarity, by card name vs. by printing — and what it would take to fill the gaps. When you want to buy, it turns that into ready‑to‑paste **Cardmarket Wants‑Lists** with the correct naming, bracket order and 150‑entry chunking.
 
 It runs a tiny local web server and opens in your browser. That's the whole app.
 
-<p align="center"><img src="docs/home.jpg" width="880" alt="Home dashboard"></p>
+<p align="center"><img src="docs/home.jpg" width="880" alt="Binduno home dashboard"></p>
 
 ---
 
 ## Features
 
-**Collection overview**
-- Two goals side by side: **card names** ("one of everything") and **printings** (full set completion)
+### The collection dashboard
+
+- Two goals side by side: **card names** ("one of everything") and **printings** (full set completion) — the same collection reads very differently under the two rules
 - Per‑set progress, cost to finish, closest‑to‑done and cheapest‑to‑close lists
 - Breakdown by rarity, switchable between name‑count and printing‑count
 - Collection value at Cardmarket trend prices
 
-**Set completion, your rules**
+### Set completion, your rules
+
 - Choose what counts as 100 %: one printing per name, every collector number, or include Showcase / borderless / extended‑art / special foils
 - Serialized cards and whole sets (promos, tokens, Un‑sets…) toggleable
 - Optional price cap that sets very expensive cards aside so one Reserved‑List card doesn't make a set look unaffordable *(off by default)*
@@ -48,31 +74,53 @@ It runs a tiny local web server and opens in your browser. That's the whole app.
 </tr>
 </table>
 
-**Cardmarket Wants‑Lists**
+### Wants-Lists for Cardmarket
+
 - Correct Cardmarket names, bracket order (`Card (Set) (V.1)` vs. `Card (V.1) (Set: Extras)`), quantity prefixes and 150‑entry blocks
-- "Buy missing" per set, or collect cards across sets in the Wants‑List Cart
+- "Buy missing" per set, or collect cards across sets in the **Wants‑List Cart**
 - *Secret Lair cards can't go in the Wants‑List Cart yet* — Cardmarket splits Secret Lair into hundreds of separate expansions with no reliable mapping, so a generated line wouldn't match. Buy those directly from the card's Cardmarket page.
 
-**Cardmarket browser helper** *(optional)*
-- A userscript that marks every single offer on cardmarket.com by whether you already own the card — green (this exact printing), yellow (you own it in another set/version/finish), red (missing), with the copy count
-- Handy for topping up a seller's order with cheap missing cards at no extra shipping
-- Marks every entry on your Cardmarket Wants‑Lists the same way — green/yellow/red — so you can spot wants you've since bought and clean them up
+### From a deck list
+
+Paste a deck list from **Moxfield, Archidekt, MTG Arena, MTGO, TappedOut, Deckstats** or plain text and Binduno turns it into a Wants‑List:
+
+- Every line is matched against the card data; free‑form Archidekt category headers ("Ramp", "Burn", "Land"…) are recognised as sections, not treated as unknown cards
+- A green / yellow / red **collection badge** on every row, exactly like the browser helper — own it in the set you'd buy from, own another printing, or missing
+- Per card, decide whether to buy the **exact printing the list names** or let **any set** do (any‑set → the line is generated without a set, priced from the cheapest printing); a searchable set picker shows every printing with its image and price
+- A running **price + shipping estimate** for the whole list, sortable columns, table or grid view
+- The Wants‑List Cart is never touched — you just get the text blocks
+
+<p align="center"><img src="docs/deck.jpg" width="760" alt="Deck list turned into a reviewable Wants-List"></p>
+
+### Price history and watchlist
+
+- A **price history graph on every card page** — 7 days, 30 days, 1 year or Max, with a crosshair that reads off the exact date and price
+- A **watchlist** of up to 100 cards on the home page, with the same time‑range switch and a sparkline that shows how far each card has moved from where it started
+
+<p align="center"><img src="docs/pricehistory.jpg" width="880" alt="Price history graph on a card page"></p>
+<p align="center"><img src="docs/watchlist.jpg" width="880" alt="Price watchlist with a 7/30-day/1-year/Max range switch"></p>
+
+> Right after a fresh install the history reaches back about 90 days (the size of MTGJSON's public price file). Binduno then logs prices itself every day it runs, so the history fills in on its own — after a year, *1 Y* really is a year.
+
+### The Cardmarket browser helper
+
+*Optional userscript / bookmarklet.*
+
+- Marks every single offer on cardmarket.com by whether you already own the card — **green** (this exact printing), **yellow** (you own it in another set / version / finish), **red** (missing), with the copy count — handy for topping up a seller's order with cheap missing cards at no extra shipping
+- Marks every entry on your Cardmarket **Wants‑Lists** the same way, so you can spot wants you've since bought and clean them up
 - On a purchase's order page, one button adds every card from that order straight into your Binduno collection
 
 <p align="center"><img src="docs/cm-helper.jpg" width="880" alt="Cardmarket helper marking a seller's singles list"></p>
 
-*A seller's singles list on cardmarket.com with the helper running: every offer is tagged **in collection** (green — you already have this exact printing, with the copy count), **other set** (yellow — you own the card, just a different printing) or **missing** (red), and gets a matching colour bar down its left edge. Toggle it with the button in the bottom‑right.*
+*A seller's singles list on cardmarket.com with the helper running: every offer is tagged **in collection** (green — you already have this exact printing, with the copy count), **other set** (yellow — you own the card, just a different printing) or **missing** (red), and gets a matching colour bar down its left edge.*
 
-**Price watchlist**
-- Up to 100 cards with a 7‑day Cardmarket price trend on the home page
+### Everything else
 
-**Import**
-- ManaBox, Moxfield and Archidekt CSV exports, auto‑detected; replace or add
-
-**Built for real use**
+- **Import:** ManaBox, Moxfield and Archidekt CSV exports, auto‑detected; replace or add
 - Works offline apart from card images and set icons
 - Import format detection, plain‑language errors
-- Daily automatic card/price sync
+- Daily automatic card / price sync
+- Automatic backups of your hand‑built data before any destructive step (update, replace‑import, reset)
 - German and English UI; German card names supported
 - Dark, light and colour‑blind‑friendly themes
 - Menu‑bar / system‑tray icon on the packaged builds (Open · Quit)
@@ -84,7 +132,7 @@ It runs a tiny local web server and opens in your browser. That's the whole app.
 
 ## Install
 
-### Windows — download, no Python needed
+### Windows: download, no Python needed
 
 Download **`Binduno.exe`** from the [latest release](../../releases/latest) and double‑click it. One self‑contained file — no Python, no setup. Your collection is stored in `%LOCALAPPDATA%\Binduno` and kept between runs.
 
@@ -100,7 +148,7 @@ python3 binduno.py
 
 It opens `http://127.0.0.1:8770` in your browser. Data is kept in your user folder between runs.
 
-### macOS — double‑clickable app
+### macOS: double-clickable app
 
 ```bash
 python3 binduno.py --install-app
@@ -114,7 +162,7 @@ Builds `~/Applications/Binduno.app` with its own bundled Python runtime — afte
 >
 > It launches normally afterwards. Building the app on the same Mac usually skips the prompt entirely — it mainly shows up when the `.app` was copied from another machine.
 
-### Windows — build the .exe yourself
+### Build the Windows .exe yourself
 
 Only needed to build from modified source or for another architecture. On a Windows machine with Python:
 
@@ -137,14 +185,14 @@ Open **Settings → Update & Help → Update App → "Update from GitHub"** and 
 
 - **One file.** `binduno.py`, Python 3.9+, standard library only. The web UI lives in the same file.
 - **Local storage.** A SQLite database in your user application‑data folder.
-- **Card data.** Scryfall's public bulk export (`default_cards`) plus set metadata. Prices are Cardmarket's EUR trend figures, via Scryfall.
+- **Card data.** Scryfall's public bulk export (`all_cards`) plus set metadata. Prices are Cardmarket's EUR trend figures, via Scryfall; deeper price history is backfilled once from MTGJSON.
 - **Nothing leaves your machine** except the card‑data download from Scryfall and, if you use the browser helper, the pages you already opened on Cardmarket.
 
 ---
 
-## This is an early version — testers welcome
+## Testers welcome
 
-Binduno works and is used daily, but it's a first public release. If you try it:
+Binduno works and is used daily, but it's an early public release. If you try it:
 
 - **Bugs, rough edges, confusing wording** — please open an [issue](../../issues).
 - **Feature ideas that fit the concept** — issues too, or start a discussion.
