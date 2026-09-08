@@ -16,7 +16,7 @@ import urllib.request
 from datetime import datetime, timedelta
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-VERSION = "5.98"
+VERSION = "5.99"
 SCHEMA = 16
 
 
@@ -1376,11 +1376,29 @@ def parse_decklist(text, fmt="auto"):
     Deckstats, plain); `fmt` only decides whether a blank line starts the
     sideboard (Arena/MTGO do that, the others use explicit headers)."""
     blank_starts_sb = fmt in ("auto", "mtga", "mtgo", "plain")
+    raw_lines = (text or "").replace("\r", "").split("\n")
+    # Archidekt/Moxfield/Deckstats exports prefix every card with an explicit
+    # count ("1x Sol Ring"). When that holds for the list, a stray line WITHOUT a
+    # count and WITHOUT a "(set) 123" is a user-named category header ("Ramp",
+    # "Burn", "Land"…), not a card — so it isn't reported as "not found".
+    _cand = [l.strip() for l in raw_lines if l.strip()
+             and not l.strip().lower().startswith(("//", "about", "name ", "deck\t"))
+             and l.strip().lower() not in _DECK_SECTIONS]
+    _numbered = sum(1 for l in _cand if re.match(r"^\d+\s*[xX]?\s+\S", l))
+    # true when the list clearly prefixes every card with a count, so the few
+    # lines that lack one are category headers rather than cards
+    strict_counts = _numbered >= 5 and _numbered > len(_cand) - _numbered
+
+    def _looks_like_header(s):
+        return (strict_counts and not re.match(r"^\d", s) and not _DECK_SET.search(s)
+                and 1 <= len(s.split()) <= 5 and s[:1].isalpha()
+                and not re.search(r"[\d(){}\[\]/]", s))
+
     section = "deck"
     seen_card = seen_header = False
     agg = {}
     order = []
-    for raw in (text or "").replace("\r", "").split("\n"):
+    for raw in raw_lines:
         line = raw.strip()
         if not line:
             if blank_starts_sb and seen_card and not seen_header and section == "deck":
@@ -1390,8 +1408,12 @@ def parse_decklist(text, fmt="auto"):
         if low.startswith("//"):
             low = low[2:].strip()
             line = line[2:].strip()
-        if low in _DECK_SECTIONS:                       # a whole-line header
+        if low in _DECK_SECTIONS:                       # a known whole-line header
             section = _DECK_SECTIONS[low]
+            seen_header = True
+            continue
+        if _looks_like_header(line):                    # a user-named category header
+            section = re.sub(r"\s+", "-", line.lower())
             seen_header = True
             continue
         row_section = section
@@ -1455,18 +1477,29 @@ def resolve_deck(c, parsed):
                  AND (k.name=? COLLATE NOCASE OR k.name_de=? COLLATE NOCASE
                       OR k.name LIKE ? COLLATE NOCASE)""",
             (name, name, front + " // %")).fetchall()
-        base_rows = [r for r in rows if not r["extra"]] or rows
-        by_set = {}
-        for r in base_rows:
-            s = r["set_code"]
-            if s not in by_set or (r["num_int"] or 0) < (by_set[s]["num_int"] or 0):
-                by_set[s] = r
         pr = lambda r: {"set": r["set_code"], "setName": r["set_name"], "number": r["number"],
                         "released": r["released"] or "", "eur": round(r["eur"] or 0, 2),
                         "img": r["img"] or "", "cmSuffix": r["cm_suffix"] or "",
+                        "extras": (r["cm_suffix"] or "") == ": Extras",
                         "cmVer": r["cm_ver"] if r["cm_ver"] is not None else 1}
-        printings = [pr(r) for r in sorted(by_set.values(),
-                                           key=lambda r: r["released"] or "", reverse=True)]
+        # One pick-list entry per distinct want-line target: a (set, base-vs-Extras)
+        # pair. The lowest collector number in that group carries its cm_ver/suffix.
+        groups = {}
+        for r in rows:
+            k = (r["set_code"], r["cm_suffix"] or "")
+            if k not in groups or (r["num_int"] or 0) < (groups[k]["num_int"] or 0):
+                groups[k] = r
+        g = sorted(groups.values(), key=lambda r: (r["set_code"], r["cm_suffix"] or ""))
+        g.sort(key=lambda r: r["released"] or "", reverse=True)   # newest set first, base before Extras
+        printings = [pr(r) for r in g]
+        base_by_set = {}                                # for "deck named the set, wrong/no number"
+        for r in rows:
+            s = r["set_code"]
+            cur = base_by_set.get(s)
+            r_ex, cur_ex = bool(r["cm_suffix"] or ""), bool(cur["cm_suffix"] or "") if cur else True
+            if cur is None or (cur_ex and not r_ex) or \
+               (cur_ex == r_ex and (r["num_int"] or 0) < (cur["num_int"] or 0)):
+                base_by_set[s] = r
         prices = [p["eur"] for p in printings if p["eur"]]
         min_eur = round(min(prices), 2) if prices else 0.0
         # Which sets you already own this card name in (front-face tolerant),
@@ -1490,8 +1523,8 @@ def resolve_deck(c, parsed):
                 exact = next((r for r in rows if r["set_code"] == pset
                               and str(r["number"]) == pnum), None)
                 deck_pr = pr(exact) if exact else None
-            if not deck_pr and pset in by_set:           # set matched, number didn't — base of that set
-                deck_pr = pr(by_set[pset])
+            if not deck_pr and pset in base_by_set:      # set matched, number didn't — base of that set
+                deck_pr = pr(base_by_set[pset])
         if not printings:
             status = "notFound"
         elif pset and not deck_pr:
@@ -3597,14 +3630,14 @@ en:{
   "deck.notFound":"not in card data",
   "deck.deckSetMissing":"not printed in {s}",
   "deck.noMatch":"No cards match this filter.",
-  "deck.priceFrom":"from","deck.thCollection":"Collection",
+  "deck.priceFrom":"from","deck.thCollection":"Collection","deck.extras":"Extras",
   "deck.collIn":"in collection","deck.collOther":"other set","deck.collMissing":"missing",
   "deck.sortOrig":"Deck order","deck.sortSection":"Section","deck.sortColl":"Collection status",
   "deck.filterAll":"All cards","deck.filterBuy":"To buy","deck.filterOwned":"In collection",
   "deck.filterMissing":"Missing","deck.filterOther":"Other set",
   "deck.filterNeedSet":"Needs a set","deck.filterNotFound":"Not found",
-  "deck.section.deck":"","deck.section.commander":"commander","deck.section.sideboard":"sideboard",
-  "deck.section.maybeboard":"maybe","deck.section.companion":"companion",
+  "deck.section.deck":"","deck.section.commander":"Commander","deck.section.sideboard":"Sideboard",
+  "deck.section.maybeboard":"Maybe","deck.section.companion":"Companion",
   "cart.secretLairWhy":"Secret Lair Wants-Lists aren't supported yet",
   "cart.secretLairSkipped":"{n} Secret Lair card(s) were skipped — see the note on the set page.",
   "cart.secretLairNote":"Secret Lair cards can't be added to the Wants-List Cart yet. Cardmarket splits Secret Lair into hundreds of separate expansions with no reliable mapping, so a generated Wants-List wouldn't match. Buy these directly from the card's Cardmarket page.",
@@ -4040,7 +4073,7 @@ de:{
   "deck.notFound":"nicht in den Kartendaten",
   "deck.deckSetMissing":"nicht in {s} gedruckt",
   "deck.noMatch":"Keine Karte passt zu diesem Filter.",
-  "deck.priceFrom":"ab","deck.thCollection":"Sammlung",
+  "deck.priceFrom":"ab","deck.thCollection":"Sammlung","deck.extras":"Extras",
   "deck.collIn":"in Sammlung","deck.collOther":"anderes Set","deck.collMissing":"fehlt",
   "deck.sortOrig":"Deck-Reihenfolge","deck.sortSection":"Bereich","deck.sortColl":"Sammlungsstatus",
   "deck.filterAll":"Alle Karten","deck.filterBuy":"Zu kaufen","deck.filterOwned":"In Sammlung",
@@ -5623,6 +5656,14 @@ const DECK_FORMATS=[["auto","deck.fmtAuto"],["moxfield","Moxfield"],["archidekt"
   ["mtga","MTG Arena"],["mtgo","MTGO"],["tappedout","TappedOut"],["deckstats","Deckstats"],
   ["plain","deck.fmtPlain"]];
 const DSEC={commander:1,sideboard:1,maybeboard:1,companion:1};
+// a card is "in a section" if the deck list put it under any header other than
+// the main deck — the built-in ones plus any user-named Archidekt category.
+function deckHasSec(c){return !!(c.section&&c.section!=="deck");}
+function deckSecName(c){
+  if(!deckHasSec(c))return "";
+  if(DSEC[c.section])return t("deck.section."+c.section);
+  return c.section.replace(/(^|[\s-])([a-z])/g,(_,p,ch)=>p+ch.toUpperCase());
+}
 function deckPage(){
   $("#view").innerHTML=crumbs([{label:t("nav.cart"),hash:"cart"},{label:t("deck.title")}])
     +`<h1>${t("deck.title")}</h1><p class="sub">${t("deck.desc")}</p><div id="deckBody"></div>`;
@@ -5660,7 +5701,8 @@ function deckCollBadge(c){
   return `<span class="tag ${M[s][0]}">${t(M[s][1])}</span>`;
 }
 function deckSecLbl(c){
-  return DSEC[c.section]?`<span class="mt" style="color:var(--dim)">${t("deck.section."+c.section)}</span>`:"";
+  const n=deckSecName(c);
+  return n?`<span class="mt" style="color:var(--dim)">${esc(n)}</span>`:"";
 }
 function deckMiss(c){
   return c.status==="deckSetMissing"&&c.deckSet
@@ -5695,7 +5737,7 @@ function drawDeck(){
   const cs=DECK.cards;
   const nOut=cs.filter(c=>c.status!=="notFound").length;
   const nBad=cs.filter(c=>c.status==="notFound").length;
-  const hasSec=cs.some(c=>DSEC[c.section]);
+  const hasSec=cs.some(deckHasSec);
   DECK._hasSec=hasSec;
   const SORTS=[["orig","deck.sortOrig"],["name","collection.sortName"],
     ...(hasSec?[["section","deck.sortSection"]]:[]),
@@ -5772,14 +5814,17 @@ function deckSelect(){
   });
   return a;
 }
+const setTag=p=>p?p.set.toUpperCase()+(p.extras?" · E":""):"";
 function deckSeg(c,i){
-  return `<div class="seg deckseg">
-    ${c.deckPrinting?`<button data-dm="${i}|deck" class="${c.mode==="deck"?"on":""}">${
-      c.deckPrinting.set.toUpperCase()}</button>`:""}
-    <button data-dm="${i}|any" class="${c.mode==="any"?"on":""}">${t("deck.anySet")}</button>
-    <button data-dm="${i}|pick" class="${c.mode==="set"||DECK.pick===i?"on":""}">${
-      c.mode==="set"&&c.chosen?c.chosen.set.toUpperCase():t("deck.pickSet")}</button>
-  </div>`;
+  // buttons joined with no whitespace — the container is inline-flex and text
+  // nodes between items would otherwise leave a gap past the highlighted button
+  const b=[];
+  if(c.deckPrinting)
+    b.push(`<button data-dm="${i}|deck" class="${c.mode==="deck"?"on":""}">${setTag(c.deckPrinting)}</button>`);
+  b.push(`<button data-dm="${i}|any" class="${c.mode==="any"?"on":""}">${t("deck.anySet")}</button>`);
+  b.push(`<button data-dm="${i}|pick" class="${c.mode==="set"||DECK.pick===i?"on":""}">${
+    c.mode==="set"&&c.chosen?setTag(c.chosen):t("deck.pickSet")}</button>`);
+  return `<div class="seg deckseg">${b.join("")}</div>`;
 }
 function deckRow(c,i){
   const NC=6+(DECK._hasSec?1:0);
@@ -5868,9 +5913,10 @@ function deckOpenPick(i){
       <button class="dpx" title="${t("common.close")}">✕</button></div>
     <div class="list dplist" style="max-height:300px;overflow:auto;border:1px solid var(--line);border-radius:5px">
     ${c.printings.map((p,pi)=>`<div class="li dpr" data-dpr="${i}|${pi}" data-pop="${p.img}"
-        data-name="${esc(p.setName.toLowerCase())} ${p.set}">
+        data-name="${esc(p.setName.toLowerCase())} ${p.set}${p.extras?" extras":""}">
       ${p.img?`<img src="${p.img}" width="34" height="47" loading="lazy" style="border-radius:3px">`:"<span style='flex:0 0 34px'></span>"}
-      <span class="nm">${esc(p.setName)} <span class="mt" style="color:var(--dim)">${p.set.toUpperCase()} · #${p.number}${p.released?" · "+p.released.slice(0,4):""}</span></span>
+      <span class="nm">${esc(p.setName)}${p.extras?` <span class="tag r">${t("deck.extras")}</span>`:""}
+        <span class="mt" style="color:var(--dim)">${p.set.toUpperCase()} · #${p.number}${p.released?" · "+p.released.slice(0,4):""}</span></span>
       <span class="mt" style="flex:0 0 64px;text-align:right;color:var(--gold)">${p.eur?money(p.eur):"—"}</span>
     </div>`).join("")}</div></div>`;
   if(DECK.view==="grid")
