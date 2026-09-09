@@ -16,7 +16,7 @@ import urllib.request
 from datetime import datetime, timedelta
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-VERSION = "6.07"
+VERSION = "6.08"
 SCHEMA = 18
 
 
@@ -3425,6 +3425,16 @@ table.setcards tr.notgoal td{opacity:.5}
 table.setcards tr.notgoal td .badge{opacity:1}
 .seg.deckseg button{padding:5px 6px;text-align:center}
 table.setcards .seg.deckseg button{min-width:60px}
+/* deck review: freeze column widths so toggling "any set" <-> "keep deck set"
+   (2 vs 3 buttons, "from" price prefix) no longer reflows every row sideways */
+#deckListWrap table.setcards{table-layout:fixed;width:100%;min-width:620px}
+#deckListWrap table.setcards th.dcSec{width:104px}
+#deckListWrap table.setcards th.dcColl{width:104px}
+#deckListWrap table.setcards th.dcQty{width:54px}
+#deckListWrap table.setcards th.dcSet{width:266px}
+#deckListWrap table.setcards th.dcPrice{width:108px}
+#deckListWrap table.setcards th.dcRm{width:44px}
+#deckListWrap table.setcards td:first-child{white-space:normal;overflow-wrap:anywhere}
 .cc .seg.deckseg{display:flex;width:100%}
 .cc .seg.deckseg button{flex:1 1 0;min-width:0;padding:5px 4px;font-size:11px}
 .cc .dtrow{margin-top:7px;display:flex;justify-content:flex-end}
@@ -6226,10 +6236,10 @@ function drawDeck(){
     wrap.innerHTML=`<div class="cgrid">${view.map(o=>deckTile(o.c,o.i)).join("")}</div>`;
   }else{
     wrap.innerHTML=`<table class="setcards"><thead><tr>
-      ${th("name",t("missing.thCard"))}${hasSec?th("section",t("deck.sortSection")):""}
-      ${th("coll",t("deck.thCollection"))}
-      ${th("qty",t("setPage.thCopies"),"num")}${th("set",t("cardPage.set"))}
-      ${th("price",t("missing.thPrice"),"num")}<th></th></tr></thead><tbody>${
+      ${th("name",t("missing.thCard"))}${hasSec?th("section",t("deck.sortSection"),"dcSec"):""}
+      ${th("coll",t("deck.thCollection"),"dcColl")}
+      ${th("qty",t("setPage.thCopies"),"num dcQty")}${th("set",t("cardPage.set"),"dcSet")}
+      ${th("price",t("missing.thPrice"),"num dcPrice")}<th class="dcRm"></th></tr></thead><tbody>${
       view.map(o=>deckRow(o.c,o.i)).join("")}</tbody></table>`;
     wrap.querySelectorAll("th[data-sk]").forEach(h=>h.onclick=()=>{
       const k=h.dataset.sk;
