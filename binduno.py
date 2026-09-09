@@ -16,8 +16,8 @@ import urllib.request
 from datetime import datetime, timedelta
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-VERSION = "6.02"
-SCHEMA = 16
+VERSION = "6.03"
+SCHEMA = 17
 
 
 def _env(name, *legacy):
@@ -260,6 +260,8 @@ def init(c):
       colors TEXT, pt TEXT, img TEXT, cm_uri TEXT, scry_uri TEXT, legal TEXT,
       variant TEXT, finishes TEXT, ver INT DEFAULT 1, extras_idx INT DEFAULT 0,
       cm_suffix TEXT, cm_ver INT DEFAULT 1,
+      cm_product_id INT DEFAULT 0, cm_expansion TEXT,
+      name_de TEXT, type_de TEXT, oracle_de TEXT,
       PRIMARY KEY(set_code, number));
     CREATE TABLE IF NOT EXISTS set_pref(code TEXT PRIMARY KEY, mode TEXT,
       sealed_note TEXT, sealed_price REAL);
@@ -324,7 +326,9 @@ def init(c):
           extra INT DEFAULT 0, mana TEXT, cmc REAL, oracle TEXT, artist TEXT,
           colors TEXT, pt TEXT, img TEXT, cm_uri TEXT, scry_uri TEXT, legal TEXT,
           variant TEXT, finishes TEXT, ver INT DEFAULT 1, extras_idx INT DEFAULT 0,
-          cm_suffix TEXT, cm_ver INT DEFAULT 1, name_de TEXT, type_de TEXT, oracle_de TEXT,
+          cm_suffix TEXT, cm_ver INT DEFAULT 1,
+          cm_product_id INT DEFAULT 0, cm_expansion TEXT,
+          name_de TEXT, type_de TEXT, oracle_de TEXT,
           PRIMARY KEY(set_code, number));
         CREATE INDEX ix_cards_set ON cards(set_code);
         CREATE INDEX ix_cards_name ON cards(name);
@@ -674,6 +678,119 @@ def find_bulk_url(entry):
     return (pref or hits or [None])[0]
 
 
+# Cardmarket splits Secret Lair into one expansion per (super)drop. Its public
+# product list links a product id to an expansion id but never to a name; the
+# id -> name map comes from Cardmarket's expansion picker (not machine-readable
+# without a login), so it is captured here and refreshed on release. An id not
+# in the map falls back to the base "Secret Lair Drop Series".
+CM_SLD_EXPANSIONS = {
+    2901: "Secret Lair Drop Series",
+    3068: "Secret Lair: Ultimate Edition",
+    4334: "Secret Lair Drop Series: Dr. Lair's Secretorium Superdrop",
+    4335: "Secret Lair Drop Series: All-Natural, Totally Refreshing Superdrop",
+    4395: "Secret Lair Drop Series: Out of Time Superdrop",
+    4414: "Secret Lair Drop Series: October Superdrop 2021",
+    4965: "Secret Lair Drop Series: Extra Life",
+    4966: "Secret Lair Drop Series: MSCHF",
+    4980: "Secret Lair Drop Series: Secretversary 2021",
+    4981: "Secret Lair Drop Series: February Superdrop 2022",
+    4982: "Secret Lair Drop Series: The Astrology Lands",
+    5049: "Secret Lair Drop Series: April Superdrop 2022",
+    5057: "Secret Lair Drop Series: Pride Across the Multiverse",
+    5090: "Secret Lair Drop Series: Secret Lair x Beadle & Grimm's: Here Be Dragons",
+    5092: "Secret Lair Drop Series: June Superdrop 2022",
+    5110: "Secret Lair Drop Series: Fortnite",
+    5137: "Secret Lair Drop Series: Magic 30",
+    5146: "Secret Lair Drop Series: August Superdrop 2022",
+    5181: "Secret Lair Drop Series: LI’L’ER Walkers",
+    5183: "Secret Lair Drop Series: October Superdrop 2022",
+    5205: "Secret Lair Drop Series: 30th Anniversary Countdown Kit",
+    5215: "Secret Lair Drop Series: December Superdrop 2022",
+    5264: "Secret Lair Drop Series: Winter Superdrop 2023",
+    5301: "Secret Lair Drop: WPN Exclusive: More Borderless Planeswalkers",
+    5321: "Secret Lair Drop Series: Secret Lair x Dungeons & Dragons: Honor Among Thieves",
+    5352: "Secret Lair Drop Series: Spring Superdrop 2023",
+    5381: "Secret Lair Commander Deck: From Cute to Brute",
+    5414: "Secret Lair Drop Series: Summer Superdrop 2023",
+    5472: "Secret Lair Commander Deck: Angels: They're Just Like Us but Cooler",
+    5474: "Secret Lair Drop Series: Fall Superdrop 2023",
+    5493: "Secret Lair Drop Series: LI'L'EST WALKERS",
+    5548: "Secret Lair Drop Series: Spookydrop 2023",
+    5557: "Secret Lair Drop Series: Calling All Hydra Heads",
+    5559: "Secret Lair Drop Series: Secretversary 2023",
+    5597: "Secret Lair Drop Series: Secret Lair x Doctor Who: Regeneration",
+    5614: "Secret Lair Commander Deck: Raining Cats and Dogs",
+    5623: "Secret Lair Drop Series: Winter Superdrop 2024",
+    5635: "Secret Lair Drop Series: Sheldon's Spellbook",
+    5736: "Secret Lair Drop Series: Equinox Superdrop 2024",
+    5759: "Secret Lair Drop Series: Spring Superdrop 2024",
+    5799: "Secret Lair Drop Series: Summer Superdrop 2024",
+    5843: "Secret Lair Drop Series: Inside an Elevator Superdrop",
+    5884: "Secret Lair Drop Series: Secret Lair x Dungeons & Dragons: 50th Anniversary Superdrop",
+    5908: "Secret Lair Drop Series: Camp Totally Safe Superdrop",
+    5924: "Secret Lair Drop Series: Marvel Superdrop",
+    5976: "Secret Lair Commander Deck: 20 Ways to Win",
+    5993: "Secret Lair Drop Series: Chaos Vault",
+    6042: "Secret Lair Drop Series: Winter Superdrop 2025",
+    6095: "Secret Lair Drop Series: Our Boss Is on Vacation Superdrop",
+    6119: "Secret Lair Drop Series: The Ultimate Pencil Superdrop",
+    6120: "Secret Lair Commander Deck: Everyone's Invited!",
+    6141: "Secret Lair Drop Series: Summer Superdrop 2025",
+    6185: "Secret Lair Drop Series: Secret Lair x National Association of Latino Arts and Cultures",
+    6192: "Secret Lair Drop Series: The Sonic Superdrop",
+    6323: "Secret Lair Drop Series: Secret Lair x Marvel's Spider-Man Superdrop",
+    6327: "Secret Lair Drop Series: Secret Scare Superdrop",
+    6373: "Secret Lair Drop Series: Secret Lair x PlayStation",
+    6388: "Secret Lair Drop Series: Secret Lair x Avatar: The Last Airbender Superdrop",
+    6390: "Secret Lair Drop Series: Secret Lair Countdown Kit: An Encyclopedia of Magic",
+    6471: "Secret Lair Drop Series: Rad Superdrop",
+    6484: "Secret Lair Drop Series: Roll for Initiative Superdrop",
+    6520: "Secret Lair Drop Series: Totally TubuLair Superdrop",
+    6522: "Secret Lair Deck: Dandân",
+    6553: "Secret Lair Drop Series: Secret Lair x Marvel's Deadpool",
+    6563: "Secret Lair Drop Series: Back to School Superdrop",
+    6580: "Secret Lair Commander Deck: Goblin Storm",
+    6593: "Secret Lair Drop Series: Cats Are the Best Superdrop",
+    6663: "Secret Lair Drop Series: Secret Lair x Global Fund for Women",
+    6679: "Secret Lair Drop Series: Superdrop of the Moonlight Jellies",
+    6686: "Secret Lair Commander Deck: Hatsune Miku",
+    6692: "Secret Lair Drop Series: A Marvelous Mathom Superdrop",
+    6753: "Secret Lair Drop Series: A Perfectly Normal Superdrop",
+    6757: "Secret Lair Drop Series: Secret Lair x MSCHF: The Zeta Set",
+}
+CM_PRODUCTLIST_URL = _env("BINDUNO_CM_PRODUCTLIST", "MTG_TRACKER_CM_PRODUCTLIST") or \
+    "https://downloads.s3.cardmarket.com/productCatalog/productList/products_singles_1.json"
+_CM_PID_RE = re.compile(r"[?&]idProduct=(\d+)")
+
+
+def _cm_product_expansions(want_pids):
+    """{idProduct: idExpansion} for the wanted product ids, from Cardmarket's
+    public singles product list (~20 MB, no login). Best-effort: any failure
+    returns {} and the caller keeps the plain 'Secret Lair Drop Series'."""
+    if not want_pids:
+        return {}
+    tmp = os.path.join(BASE, "cm_products.tmp")
+    try:
+        REFRESH.update(step="Matching Secret Lair to Cardmarket expansions", pct=90)
+        _resumable_download(CM_PRODUCTLIST_URL, tmp)
+        with open(tmp, encoding="utf-8") as f:
+            data = json.load(f)
+        return {p["idProduct"]: p.get("idExpansion")
+                for p in data.get("products", ())
+                if p.get("idProduct") in want_pids}
+    except Exception as e:                                       # noqa: BLE001
+        try:
+            print("Secret Lair expansion map skipped:", e)
+        except Exception:
+            pass
+        return {}
+    finally:
+        try:
+            os.remove(tmp)
+        except OSError:
+            pass
+
+
 def _norm_name(n):
     """Scryfall gives reversible cards (Inverted/Borderless shocklands, Art
     Series, Secret Lair reversibles…) a doubled "X // X" name. Collapse those
@@ -935,7 +1052,34 @@ def refresh_cards():
                     cmvers[i] = extras[i] if n_extra > 1 else 0
                 else:
                     cmvers[i] = vers[i] if n_base > 1 else 0
+        # Secret Lair (and its sub-drops) live in dozens of separate Cardmarket
+        # expansions. Pull each SL printing's idProduct out of Scryfall's
+        # cardmarket link, look up its expansion via Cardmarket's product list,
+        # and store the expansion name so want lines resolve.
+        sl_codes = {code for code, s in sets.items()
+                    if (s[1] or "").lower().startswith("secret lair")}
+        cm_pids = [int(m.group(1)) if (m := _CM_PID_RE.search(r[18] or "")) else 0
+                   for r in rows]
+        want = {cm_pids[i] for i, r in enumerate(rows)
+                if r[0] in sl_codes and cm_pids[i]}
+        pid2exp = _cm_product_expansions(want)
+        cm_exps = [CM_SLD_EXPANSIONS.get(pid2exp.get(cm_pids[i]), "Secret Lair Drop Series")
+                   if r[0] in sl_codes else None
+                   for i, r in enumerate(rows)]
+        # For Secret Lair the drop expansion IS the whole target — Cardmarket
+        # has no separate ": Extras" page — and "Version 1/2/3" is numbered
+        # within that one drop, not across the entire "sld" set.
+        sl_groups = {}
+        for i in range(len(rows)):
+            if cm_exps[i]:
+                sl_groups.setdefault((rows[i][3], cm_exps[i]), []).append(i)
+        for idxs in sl_groups.values():
+            idxs.sort(key=lambda i: rows[i][2])
+            for pos, i in enumerate(idxs, start=1):
+                suffixes[i] = ""
+                cmvers[i] = pos if len(idxs) > 1 else 0
         rows = [r + (vers[i], extras[i], suffixes[i], cmvers[i],
+                     cm_pids[i], cm_exps[i],
                      _norm_name(de_names.get((r[0], r[1]), "")),
                      de_types.get((r[0], r[1]), ""), de_oracle.get((r[0], r[1]), ""))
                 for i, r in enumerate(rows)]
@@ -947,7 +1091,7 @@ def refresh_cards():
         c.execute("DELETE FROM sets"); c.execute("DELETE FROM cards")
         c.executemany("INSERT INTO sets VALUES(?,?,?,?,?,?,?,?,?)",
                       [tuple(v) for v in sets.values()])
-        c.executemany("INSERT OR REPLACE INTO cards VALUES(" + ",".join("?"*30) + ")", rows)
+        c.executemany("INSERT OR REPLACE INTO cards VALUES(" + ",".join("?"*32) + ")", rows)
         c.commit()
         meta_set(c, "cards_updated", datetime.now().isoformat(timespec="seconds"))
         log(c, "Card data", f"{len(rows):,} printings from {len(sets):,} sets downloaded")
@@ -1495,7 +1639,7 @@ def resolve_deck(c, parsed):
         qty = max(1, int(it.get("qty") or 1))
         rows = c.execute(
             """SELECT k.set_code, s.name set_name, k.number, k.num_int, s.released,
-                      k.eur, k.img, k.cm_suffix, k.cm_ver, k.extra
+                      k.eur, k.img, k.cm_suffix, k.cm_ver, k.cm_expansion, k.extra
                FROM cards k JOIN sets s ON s.code=k.set_code
                WHERE k.digital=0
                  AND (k.name=? COLLATE NOCASE OR k.name_de=? COLLATE NOCASE
@@ -1504,6 +1648,7 @@ def resolve_deck(c, parsed):
         pr = lambda r: {"set": r["set_code"], "setName": r["set_name"], "number": r["number"],
                         "released": r["released"] or "", "eur": round(r["eur"] or 0, 2),
                         "img": r["img"] or "", "cmSuffix": r["cm_suffix"] or "",
+                        "cmExpansion": r["cm_expansion"] or "",
                         "extras": (r["cm_suffix"] or "") == ": Extras",
                         "cmVer": r["cm_ver"] if r["cm_ver"] is not None else 1}
         # One pick-list entry per distinct want-line target: a (set, base-vs-Extras)
@@ -1844,7 +1989,7 @@ def set_detail(c, code):
     ps = s["printed_size"] or 0
     q = """SELECT k.number, k.num_int, k.name, k.name_de, k.type_line, k.rarity, k.eur,
                   k.eur_foil, k.img, k.mana, k.artist, k.colors, k.variant, k.finishes, k.ver,
-                  k.extras_idx, k.cm_suffix, k.cm_ver, k.extra,
+                  k.extras_idx, k.cm_suffix, k.cm_ver, k.cm_expansion, k.extra,
                   COALESCE(o.qty,0) qty
            FROM cards k
            LEFT JOIN (SELECT set_code,number,SUM(qty) qty FROM collection
@@ -1871,7 +2016,7 @@ def set_detail(c, code):
                       "foil": round(r["eur_foil"], 2) if r["eur_foil"] else 0,
                       "img": r["img"], "mana": r["mana"], "artist": r["artist"],
                       "variant": r["variant"] or "", "finishes": r["finishes"] or "",
-                      "ver": r["ver"] or 1, "extras": r["extras_idx"] or 0, "cmSuffix": r["cm_suffix"] or "", "cmVer": r["cm_ver"] if r["cm_ver"] is not None else 1,
+                      "ver": r["ver"] or 1, "extras": r["extras_idx"] or 0, "cmSuffix": r["cm_suffix"] or "", "cmVer": r["cm_ver"] if r["cm_ver"] is not None else 1, "cmExpansion": r["cm_expansion"] or "",
                       "qty": r["qty"], "have": have, "note": "", "want": False})
     # Decide want / note per card. "names" scope: one owned printing of a name
     # settles it, and a still-missing name flags exactly one printing to buy —
@@ -2268,7 +2413,7 @@ def card_search(c, p):
     rows = c.execute(
         f"""SELECT k.set_code, s.name set_name, s.released, k.number, k.name, k.name_de, k.type_line,
                    k.rarity, {eur_expr} eur, k.eur_foil, k.img, k.mana, k.artist, k.colors,
-                   k.variant, k.finishes, k.ver, k.extras_idx, k.cm_suffix, k.cm_ver, COALESCE(o.qty,0) qty {base} {grp}
+                   k.variant, k.finishes, k.ver, k.extras_idx, k.cm_suffix, k.cm_ver, k.cm_expansion, COALESCE(o.qty,0) qty {base} {grp}
             ORDER BY {sort} {d}, k.name LIMIT ? OFFSET ?""",
         args + [per, (page - 1) * per]).fetchall()
     return {"total": total, "page": page, "per": per,
@@ -2279,7 +2424,7 @@ def card_search(c, p):
                        "eur": round(r["eur"] or 0, 2), "foil": round(r["eur_foil"] or 0, 2),
                        "img": r["img"], "mana": r["mana"], "artist": r["artist"],
                        "colors": r["colors"], "variant": r["variant"] or "",
-                       "finishes": r["finishes"] or "", "ver": r["ver"] or 1, "extras": r["extras_idx"] or 0, "cmSuffix": r["cm_suffix"] or "", "cmVer": r["cm_ver"] if r["cm_ver"] is not None else 1,
+                       "finishes": r["finishes"] or "", "ver": r["ver"] or 1, "extras": r["extras_idx"] or 0, "cmSuffix": r["cm_suffix"] or "", "cmVer": r["cm_ver"] if r["cm_ver"] is not None else 1, "cmExpansion": r["cm_expansion"] or "",
                        "qty": r["qty"]} for r in rows]}
 
 
@@ -2327,7 +2472,7 @@ def card_detail(c, code, number):
             "pt": r["pt"], "img": r["img"], "colors": r["colors"],
             "eur": round(r["eur"] or 0, 2), "foil": round(r["eur_foil"] or 0, 2),
             "variant": r["variant"] or "", "finishes": r["finishes"] or "",
-            "ver": r["ver"] or 1, "extras": r["extras_idx"] or 0, "cmSuffix": r["cm_suffix"] or "", "cmVer": r["cm_ver"] if r["cm_ver"] is not None else 1, "cardmarket": r["cm_uri"], "scryfall": r["scry_uri"],
+            "ver": r["ver"] or 1, "extras": r["extras_idx"] or 0, "cmSuffix": r["cm_suffix"] or "", "cmVer": r["cm_ver"] if r["cm_ver"] is not None else 1, "cmExpansion": r["cm_expansion"] or "", "cardmarket": r["cm_uri"], "scryfall": r["scry_uri"],
             "qty": qty, "qtyNormal": qty_normal, "qtyFoil": qty_foil,
             "legal": legal, "printings": prints,
             "hist": price_history_series(c, code, number, 30)}
@@ -2374,7 +2519,7 @@ def missing_names(c, p):
     page = max(1, int(p.get("page", 1)))
     rows = c.execute(
         f"""SELECT k.name, MIN(k.name_de) name_de, k.set_code, s.name set_name, k.number, k.rarity,
-                   MIN(k.eur) eur, k.img, k.type_line, k.variant, k.ver, k.extras_idx, k.cm_suffix, k.cm_ver {base}
+                   MIN(k.eur) eur, k.img, k.type_line, k.variant, k.ver, k.extras_idx, k.cm_suffix, k.cm_ver, k.cm_expansion {base}
             ORDER BY {sort} {d}, k.name LIMIT ? OFFSET ?""",
         args + [per, (page - 1) * per]).fetchall()
     return {"total": total["n"], "value": round(total["v"], 2), "page": page, "per": per,
@@ -2383,20 +2528,22 @@ def missing_names(c, p):
                        "number": r["number"], "rarity": r["rarity"],
                        "eur": round(r["eur"], 2), "img": r["img"],
                        "type": r["type_line"], "variant": r["variant"] or "",
-                       "ver": r["ver"] or 1, "extras": r["extras_idx"] or 0, "cmSuffix": r["cm_suffix"] or "", "cmVer": r["cm_ver"] if r["cm_ver"] is not None else 1} for r in rows]}
+                       "ver": r["ver"] or 1, "extras": r["extras_idx"] or 0, "cmSuffix": r["cm_suffix"] or "", "cmVer": r["cm_ver"] if r["cm_ver"] is not None else 1, "cmExpansion": r["cm_expansion"] or ""} for r in rows]}
 
 
 def secret_lair_codes(c):
-    """Set codes whose name is a Secret Lair drop. Generating a working
-    Cardmarket want list for these isn't solved yet (CM splits Secret Lair
-    into hundreds of separate expansions), so they're kept out of the cart."""
+    """Set codes whose name is a Secret Lair drop — folded into the "names"
+    shopping list even though Secret Lair itself doesn't count toward set
+    completion. Their want lines carry the exact Cardmarket drop expansion
+    resolved at card-import time (see CM_SLD_EXPANSIONS)."""
     return {r["code"] for r in c.execute(
         "SELECT code FROM sets WHERE lower(name) LIKE 'secret lair%'")}
 
 
 def cart_rows(c):
     rows = c.execute("""SELECT t.set_code, t.number, t.qty, k.name, k.name_de, k.eur, k.eur_foil,
-                               k.img, k.rarity, k.variant, k.ver, k.extras_idx, k.cm_suffix, k.cm_ver, s.name set_name
+                               k.img, k.rarity, k.variant, k.ver, k.extras_idx, k.cm_suffix, k.cm_ver,
+                               k.cm_expansion, s.name set_name
                         FROM cart t
                         JOIN cards k ON k.set_code=t.set_code AND k.number=t.number
                         JOIN sets s ON s.code=t.set_code
@@ -2405,7 +2552,7 @@ def cart_rows(c):
               "name": r["name"], "nameDe": r["name_de"] or "", "qty": r["qty"], "rarity": r["rarity"],
               "eur": round(r["eur"] or 0, 2), "foil": round(r["eur_foil"] or 0, 2),
               "img": r["img"], "variant": r["variant"] or "",
-              "ver": r["ver"] or 1, "extras": r["extras_idx"] or 0, "cmSuffix": r["cm_suffix"] or "", "cmVer": r["cm_ver"] if r["cm_ver"] is not None else 1} for r in rows]
+              "ver": r["ver"] or 1, "extras": r["extras_idx"] or 0, "cmSuffix": r["cm_suffix"] or "", "cmVer": r["cm_ver"] if r["cm_ver"] is not None else 1, "cmExpansion": r["cm_expansion"] or ""} for r in rows]
     goods = sum(i["eur"] * i["qty"] for i in items)
     n = sum(i["qty"] for i in items)
     ship = shipping(n, goods, tracked_shipping_only(c), shipping_country(c))
@@ -2844,17 +2991,12 @@ class Handler(BaseHTTPRequestHandler):
         elif self.path == "/api/cart":
             d = json.loads(raw)
             act = d.get("action")
-            sl = secret_lair_codes(c) if act in ("add", "addmany") else set()
-            sl_skipped = 0
             if act == "add":
-                if d["set"] in sl:
-                    sl_skipped = 1
-                else:
-                    c.execute("""INSERT INTO cart(set_code,number,qty,added) VALUES(?,?,?,?)
-                                 ON CONFLICT(set_code,number)
-                                 DO UPDATE SET qty=qty+excluded.qty""",
-                              (d["set"], d["number"], int(d.get("qty", 1)),
-                               datetime.now().isoformat(timespec="seconds")))
+                c.execute("""INSERT INTO cart(set_code,number,qty,added) VALUES(?,?,?,?)
+                             ON CONFLICT(set_code,number)
+                             DO UPDATE SET qty=qty+excluded.qty""",
+                          (d["set"], d["number"], int(d.get("qty", 1)),
+                           datetime.now().isoformat(timespec="seconds")))
             elif act == "set":
                 q = int(d.get("qty", 0))
                 if q <= 0:
@@ -2866,9 +3008,6 @@ class Handler(BaseHTTPRequestHandler):
             elif act == "addmany":
                 now = datetime.now().isoformat(timespec="seconds")
                 for it in d.get("items", []):
-                    if it["set"] in sl:
-                        sl_skipped += 1
-                        continue
                     c.execute("""INSERT INTO cart(set_code,number,qty,added) VALUES(?,?,1,?)
                                  ON CONFLICT(set_code,number) DO NOTHING""",
                               (it["set"], it["number"], now))
@@ -2890,10 +3029,7 @@ class Handler(BaseHTTPRequestHandler):
                     log(c, "Collection", f"Added {len(items)} cart line(s) to collection")
                     bust()
             c.commit()
-            res = cart_rows(c)
-            if sl_skipped:
-                res["secretLairSkipped"] = sl_skipped
-            self.send_json(res)
+            self.send_json(cart_rows(c))
         elif self.path == "/api/shipping-pref":
             d = json.loads(raw)
             if "trackedOnly" in d:
@@ -3709,7 +3845,7 @@ en:{
   "cart.addedAllToCollection":"Added to collection",
   "cart.confirmClear":"Remove everything from the Wants-List Cart?",
   "wantlist.nothingToCopy":"Nothing to copy.",
-  "wantlist.secretLairNote":"Secret Lair lines carry no expansion or version — Cardmarket splits Secret Lair into hundreds of separate expansions and there is no reliable mapping. On import, expect some of these not to match; add those by hand from the card's Cardmarket page.",
+  "wantlist.secretLairNote":"A few Secret Lair lines fell back to the base “Secret Lair Drop Series” expansion because Binduno couldn't pin the exact drop — those may not resolve on Cardmarket. Check them against the card's Cardmarket page.",
   "wantlist.limitInfo":"Cardmarket allows {limit} entries per Wants-List, so this is split "+
     "into {n} {lists}. Paste each block into its own Wants-List.",
   "wantlist.list":"list","wantlist.listsPlural":"lists",
@@ -4155,7 +4291,7 @@ de:{
   "cart.addedAllToCollection":"Zur Sammlung hinzugefügt",
   "cart.confirmClear":"Wirklich alles aus dem Wants-Liste-Cart entfernen?",
   "wantlist.nothingToCopy":"Nichts zu kopieren.",
-  "wantlist.secretLairNote":"Secret-Lair-Zeilen haben keine Erweiterung und keine Version — Cardmarket teilt Secret Lair in hunderte einzelne Erweiterungen auf, eine verlässliche Zuordnung gibt es nicht. Beim Import treffen manche davon nicht; die dann von Hand über die Cardmarket-Seite der Karte hinzufügen.",
+  "wantlist.secretLairNote":"Ein paar Secret-Lair-Zeilen sind auf die Basis-Erweiterung „Secret Lair Drop Series“ zurückgefallen, weil sich der genaue Drop nicht bestimmen ließ — die treffen auf Cardmarket eventuell nicht. Über die Cardmarket-Seite der Karte prüfen.",
   "wantlist.limitInfo":"Cardmarket erlaubt {limit} Einträge pro Wants-Liste, daher aufgeteilt "+
     "in {n} {lists}. Jeden Block einzeln einfügen.",
   "wantlist.list":"Liste","wantlist.listsPlural":"Listen",
@@ -5376,16 +5512,14 @@ function drawCards(){
     .filter(c=>{if(!SETQ)return true;const q=SETQ.toLowerCase();
       return cardName(c).toLowerCase().includes(q)||(c.name||"").toLowerCase().includes(q)
         ||String(c.number).toLowerCase()===q;});
-  const sl=isSecretLair(DETAIL.code);
-  const head=`${sl?`<div class="msg" style="max-width:720px">${t("cart.secretLairNote")}</div>`:""}
-    <div class="tools" style="margin:14px 0 10px">
+  const head=`<div class="tools" style="margin:14px 0 10px">
     <input type="search" id="gq" placeholder="${t("missing.searchPlaceholder")}" value="${SETQ}" style="flex:1 1 180px;min-width:120px">
     <div class="seg"><button data-dv="table" class="${DV==="table"?"on":""}">${t("collection.table")}</button>
     <button data-dv="grid" class="${DV==="grid"?"on":""}">${t("collection.grid")}</button></div>
     <select id="gsort">${SORTCOLS.map(([k,l])=>
       `<option value="${k}" ${CS===k?"selected":""}>${l}</option>`).join("")}</select>
     <button id="gdir">${CD<0?"▼":"▲"}</button>
-    <button id="cartAllMissing" ${sl?"disabled title=\""+t("cart.secretLairWhy")+"\"":""}>${t("setPage.addAllMissing")}</button>
+    <button id="cartAllMissing">${t("setPage.addAllMissing")}</button>
     <button id="buyFromSet">${t("setPage.buyMissingDots")}</button>
     <label class="chk" style="margin:0"><input type="checkbox" id="hideOffGoal" ${
       HIDE_OFFGOAL?"checked":""}> ${t("setPage.hideOffGoal")}</label></div>`;
@@ -5753,7 +5887,6 @@ let CART={items:[],count:0};
 let CQ="",CSORT="set",CDIR=1;
 async function cartPost(body){
   CART=await fetch("/api/cart",{method:"POST",body:JSON.stringify(body)}).then(r=>r.json());
-  if(CART.secretLairSkipped)toast(t("cart.secretLairSkipped",{n:CART.secretLairSkipped}));
   paintCartBadge();return CART;
 }
 async function cartLoad(){
@@ -5766,8 +5899,6 @@ function paintCartBadge(){
 }
 function bindCartButtons(){
   document.querySelectorAll("[data-cart]").forEach(b=>{
-    const [sc]=b.dataset.cart.split("|");
-    if(isSecretLair(sc)){b.disabled=true;b.title=t("cart.secretLairWhy");return;}
     b.onclick=async ev=>{
       ev.stopPropagation();
       const [s,nr]=b.dataset.cart.split("|");
@@ -6203,7 +6334,7 @@ function deckGenerate(){
     if(c.mode==="any"||(!c.deckPrinting&&c.mode!=="set"))
       return (c.qty>1?c.qty+"x ":"")+c.name;
     const p=c.mode==="set"?c.chosen:c.deckPrinting;
-    return wantLine({name:c.name,cmVer:p.cmVer,cmSuffix:p.cmSuffix},p.setName,c.qty);
+    return wantLine({name:c.name,cmVer:p.cmVer,cmSuffix:p.cmSuffix,cmExpansion:p.cmExpansion},p.setName,c.qty);
   });
   $("#deckWL").innerHTML=wantChunks(lines);
   bindChunks();
@@ -6223,13 +6354,11 @@ const CM_LIMIT=150;
 //   Smaug the Magnificent (V.1) (The Hobbit: Extras)
 function wantLine(c, setName, qty){
   const n = qty && qty > 1 ? `${qty}x ` : "";
-  // Cardmarket splits Secret Lair into hundreds of separate expansions and
-  // Scryfall/Binduno keeps one "Secret Lair Drop" set, so there is no reliable
-  // expansion or V.n to emit — fall back to the generic Cardmarket catch-all
-  // and no version.
-  if((setName || "").trim() === "Secret Lair Drop")
-    return `${n}${c.name} (Secret Lair Drop Series)`;
-  const base = cmName(setName);
+  // Secret Lair lives in dozens of Cardmarket expansions (one per drop). The
+  // exact one is resolved at card-import time and carried on the card as
+  // cmExpansion; use it verbatim as the trailing expansion.
+  const base = c.cmExpansion
+    || ((setName || "").trim() === "Secret Lair Drop" ? "Secret Lair Drop Series" : cmName(setName));
   const v = c.cmVer;                 // 0 / null => only one printing of this name here, no (V.n)
   return v ? `${n}${c.name} (V.${v}) (${base}${c.cmSuffix || ""})`
            : `${n}${c.name} (${base}${c.cmSuffix || ""})`;
@@ -6987,10 +7116,12 @@ function helpPane(sel){
      <p>Quantities are written as a prefix: <code>2x Sol Ring (V.1) (Commander: Kaldheim)</code>.
         Cardmarket accepts 150 entries per list, so longer lists are split into numbered
         blocks you copy one after another.</p>
-     <p><b>Secret Lair</b> cards can't be put in the Wants-List Cart yet: Cardmarket
-        splits Secret Lair into hundreds of separate expansions with no reliable
-        mapping, so a generated Wants-List line wouldn't match. Buy those directly
-        from the card's Cardmarket page.</p>`,
+     <p><b>Secret Lair</b> is split by Cardmarket into dozens of per-drop expansions
+        ("Secret Lair Drop Series: Marvel Superdrop", …). Binduno matches each Secret
+        Lair card to its drop using Cardmarket's public product list (pulled once
+        during card refresh) and emits <code>Card Name (Secret Lair Drop Series: &lt;drop&gt;)</code>.
+        A card added between releases can fall back to the plain
+        <code>(Secret Lair Drop Series)</code> — those are flagged under the generated list.</p>`,
    data:`<h3>Your data</h3>
      <p>Everything lives in a SQLite file on your Mac. Nothing is uploaded anywhere.</p>
      <ul><li><b>Replace</b> import wipes the stored collection and uses the file as the new truth.</li>
@@ -7112,10 +7243,13 @@ function helpPane(sel){
      <p>Mengen werden als Präfix geschrieben: <code>2x Sol Ring (V.1) (Commander: Kaldheim)</code>.
         Cardmarket akzeptiert 150 Einträge pro Liste, längere Listen werden daher in
         nummerierte Blöcke aufgeteilt, die du nacheinander kopierst.</p>
-     <p><b>Secret Lair</b>-Karten können noch nicht in den Wants-Liste-Cart: Cardmarket
-        teilt Secret Lair in hunderte einzelne Erweiterungen ohne verlässliche
-        Zuordnung auf, eine erzeugte Wants-Liste-Zeile würde also nicht treffen. Solche
-        Karten direkt über die Cardmarket-Seite der Karte kaufen.</p>`,
+     <p><b>Secret Lair</b> teilt Cardmarket in Dutzende Erweiterungen pro Drop auf
+        („Secret Lair Drop Series: Marvel Superdrop“ …). Binduno ordnet jede Secret-Lair-
+        Karte über Cardmarkets öffentliche Produktliste (einmal beim Kartendaten-Update
+        geladen) ihrem Drop zu und erzeugt <code>Kartenname (Secret Lair Drop Series: &lt;Drop&gt;)</code>.
+        Eine zwischen zwei Releases hinzugekommene Karte kann auf das schlichte
+        <code>(Secret Lair Drop Series)</code> zurückfallen — solche Zeilen werden unter der
+        erzeugten Liste markiert.</p>`,
    data:`<h3>Deine Daten</h3>
      <p>Alles liegt in einer SQLite-Datei auf deinem Mac. Nichts wird irgendwohin hochgeladen.</p>
      <ul><li><b>Ersetzen</b>-Import löscht die gespeicherte Sammlung und nutzt die Datei als

@@ -8,7 +8,7 @@
 
 One Python file, standard library only. No account, no cloud, nothing to sign up for — your collection never leaves your computer.
 
-![version](https://img.shields.io/badge/version-6.02-d4a629)
+![version](https://img.shields.io/badge/version-6.03-d4a629)
 ![python](https://img.shields.io/badge/python-3.9%2B-4a90c4)
 ![status](https://img.shields.io/badge/status-early%20beta-e0692c)
 ![platform](https://img.shields.io/badge/platform-macOS%20%C2%B7%20Windows%20%C2%B7%20Linux-8d98a7)
@@ -78,7 +78,7 @@ It runs a tiny local web server and opens in your browser. That's the whole app.
 
 - Correct Cardmarket names, bracket order (`Card (Set) (V.1)` vs. `Card (V.1) (Set: Extras)`), quantity prefixes and 150‑entry blocks
 - "Buy missing" per set, or collect cards across sets in the **Wants‑List Cart**
-- *Secret Lair cards can't go in the Wants‑List Cart yet* — Cardmarket splits Secret Lair into hundreds of separate expansions with no reliable mapping, so a generated line wouldn't match. Buy those directly from the card's Cardmarket page.
+- **Secret Lair** works too — Cardmarket splits it into dozens of per‑drop expansions, so Binduno resolves each Secret Lair card to its exact drop ("Secret Lair Drop Series: Marvel Superdrop", …) via Cardmarket's public product list and emits the matching want‑list line.
 
 ### From a deck list
 
@@ -185,7 +185,7 @@ Open **Settings → Update & Help → Update App → "Update from GitHub"** and 
 
 - **One file.** `binduno.py`, Python 3.9+, standard library only. The web UI lives in the same file.
 - **Local storage.** A SQLite database in your user application‑data folder.
-- **Card data.** Scryfall's public bulk export (`all_cards`) plus set metadata. Prices are Cardmarket's EUR trend figures, via Scryfall; deeper price history is backfilled once from MTGJSON.
+- **Card data.** Scryfall's public bulk export (`all_cards`) plus set metadata. Prices are Cardmarket's EUR trend figures, via Scryfall; deeper price history is backfilled once from MTGJSON. Card refresh also pulls Cardmarket's public product list once to map Secret Lair cards to their exact drop.
 - **Nothing leaves your machine** except the card‑data download from Scryfall and, if you use the browser helper, the pages you already opened on Cardmarket.
 
 ---
