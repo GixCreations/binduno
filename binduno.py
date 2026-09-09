@@ -16,7 +16,7 @@ import urllib.request
 from datetime import datetime, timedelta
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-VERSION = "6.05"
+VERSION = "6.06"
 SCHEMA = 17
 
 
@@ -1062,11 +1062,17 @@ def refresh_cards():
         want = {cm_pids[i] for i, r in enumerate(rows)
                 if r[0] in sl_codes and cm_pids[i]}
         pid2exp = _cm_product_expansions(want, c)
-        cm_exps = [CM_SLD_EXPANSIONS.get(pid2exp.get(cm_pids[i]), "Secret Lair Drop Series")
+        exp_map = dict(CM_SLD_EXPANSIONS)                        # baked
+        try:                                                     # + anything the helper has scraped
+            for k, v in json.loads(meta_get(c, "cm_expansions", "{}")).items():
+                exp_map[int(k)] = v
+        except (ValueError, TypeError):
+            pass
+        cm_exps = [exp_map.get(pid2exp.get(cm_pids[i]), "Secret Lair Drop Series")
                    if r[0] in sl_codes else None
                    for i, r in enumerate(rows)]
         _sl_unresolved = sum(1 for i, r in enumerate(rows) if r[0] in sl_codes
-                             and pid2exp.get(cm_pids[i]) not in CM_SLD_EXPANSIONS)
+                             and pid2exp.get(cm_pids[i]) not in exp_map)
         if want and _sl_unresolved:
             log(c, "Card data", "%d Secret Lair printing(s) fell back to the base "
                 "expansion (unknown Cardmarket drop)" % _sl_unresolved)
@@ -2912,6 +2918,25 @@ class Handler(BaseHTTPRequestHandler):
             d = json.loads(raw)
             meta_set(c, "cm_helper_on", "1" if d.get("on") else "0")
             self.send_json({"ok": True, "on": meta_get(c, "cm_helper_on", "1") == "1"}, cors=True)
+        elif self.path == "/api/cm-expansions":
+            # the helper scrapes Cardmarket's expansion picker (id -> name) and
+            # sends it here so the Secret Lair drop map stays current between
+            # releases without a login-only API. Keep only Secret Lair rows.
+            try:
+                cur = json.loads(meta_get(c, "cm_expansions", "{}"))
+            except ValueError:
+                cur = {}
+            added = 0
+            for pair in json.loads(raw).get("expansions", []):
+                try:
+                    eid, ename = str(int(pair[0])), str(pair[1]).strip()
+                except (TypeError, ValueError, IndexError):
+                    continue
+                if "secret lair" in ename.lower() and cur.get(eid) != ename:
+                    cur[eid] = ename
+                    added += 1
+            meta_set(c, "cm_expansions", json.dumps(cur))
+            self.send_json({"ok": True, "known": len(cur), "added": added}, cors=True)
         elif self.path == "/api/cm-purchase-import":
             try:
                 payload = json.loads(raw)
@@ -4872,7 +4897,8 @@ function wlSpark(vals){
   return `<svg class="wlspark" viewBox="0 0 ${W} ${H}" preserveAspectRatio="none">
     <line x1="${P}" y1="${Y(first).toFixed(1)}" x2="${W-P}" y2="${Y(first).toFixed(1)}" class="wlbase"/>
     <path d="${areaD}" fill="${col}" opacity=".11"/>
-    <path d="${pathD}" fill="none" stroke="${col}" stroke-width="1.8" stroke-linejoin="round"/>
+    <path d="${pathD}" fill="none" stroke="${col}" stroke-width="1.8"
+      vector-effect="non-scaling-stroke" stroke-linejoin="round"/>
     <circle cx="${X(n-1).toFixed(1)}" cy="${Y(last).toFixed(1)}" r="2.7" fill="${col}"/>
   </svg>`;
 }
@@ -4929,8 +4955,9 @@ function priceGraph(h,opt){
   return `<svg class="phsvg" viewBox="0 0 ${W} ${H}" preserveAspectRatio="none"
       data-ph='${esc(meta)}'>
     ${grid}
-    <path d="${area}" fill="${col}" opacity=".09"/>
-    <path d="${line}" fill="none" stroke="${col}" stroke-width="2" stroke-linejoin="round"/>
+    <path d="${area}" fill="${col}" opacity=".13"/>
+    <path d="${line}" fill="none" stroke="${col}" stroke-width="2.4"
+      vector-effect="non-scaling-stroke" stroke-linejoin="round"/>
     ${dot(iMin)}${dot(iMax)}${xl}
     <g class="phcur" style="display:none">
       <line class="phvl" y1="${PT}" y2="${H-PB}"/><circle r="4"/>
@@ -8241,6 +8268,27 @@ CM_USERSCRIPT = r'''// ==UserScript==
     setInterval(ensure, 2000);
     initPurchaseImport();
     setInterval(initPurchaseImport, 2000);
+    reportExpansions();
+  }
+  // Cardmarket's expansion picker (id -> name) isn't machine-readable without a
+  // login, so whenever the helper sees it, send it to Binduno to keep the
+  // Secret Lair drop map current. Throttled to once a day.
+  function reportExpansions(){
+    var sel = document.querySelector('select[name="idExpansion"]');
+    if(!sel) return;
+    var last = 0; try{ last = +localStorage.getItem("bnd_cmexp_ts") || 0; }catch(e){}
+    if(Date.now() - last < 864e5) return;
+    var opts = [];
+    for(var i=0;i<sel.options.length;i++){
+      var o = sel.options[i];
+      if(/^\d+$/.test(o.value) && /secret lair/i.test(o.textContent))
+        opts.push([o.value, o.textContent.trim()]);
+    }
+    if(!opts.length) return;
+    post("/api/cm-expansions", {expansions:opts}, function(r){
+      try{ localStorage.setItem("bnd_cmexp_ts", String(Date.now())); }catch(e){}
+      if(DBG) console.log("[Binduno] sent " + opts.length + " Secret Lair expansions", r);
+    });
   }
 
   // Purchase pages ("My Purchases" order detail): every article row carries
@@ -8427,7 +8475,11 @@ alert("Binduno: could not reach the app on "+A+".\nChrome/Firefox: make sure Bin
 S.stop();}
 if(window.__bndS)window.__bndS.stop();
 var S=window.__bndS={err:false,n:0,stop:function(){clearInterval(S.iv);try{S.mo.disconnect();}catch(e){}}};
-run();purch();
+function rexp(){var sel=document.querySelector('select[name="idExpansion"]');if(!sel)return;
+var last=0;try{last=+localStorage.getItem("bnd_cmexp_ts")||0;}catch(e){}if(Date.now()-last<864e5)return;
+var o=[],i;for(i=0;i<sel.options.length;i++){var x=sel.options[i];if(/^\d+$/.test(x.value)&&/secret lair/i.test(x.textContent))o.push([x.value,x.textContent.trim()]);}
+if(!o.length)return;fetch(A+"/api/cm-expansions",{method:"POST",mode:"cors",headers:{"Content-Type":"application/json"},body:JSON.stringify({expansions:o})}).then(function(){try{localStorage.setItem("bnd_cmexp_ts",String(Date.now()));}catch(e){}}).catch(function(){});}
+run();purch();rexp();
 S.iv=setInterval(function(){if(S.err)return;run();purch();if(++S.n>28)S.stop();},3000);
 S.mo=new MutationObserver(function(){if(S.err)return;clearTimeout(S.t);S.t=setTimeout(function(){run();purch();},300);});
 S.mo.observe(document.body,{childList:true,subtree:true});
