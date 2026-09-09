@@ -16,7 +16,7 @@ import urllib.request
 from datetime import datetime, timedelta
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-VERSION = "6.03"
+VERSION = "6.05"
 SCHEMA = 17
 
 
@@ -763,7 +763,7 @@ CM_PRODUCTLIST_URL = _env("BINDUNO_CM_PRODUCTLIST", "MTG_TRACKER_CM_PRODUCTLIST"
 _CM_PID_RE = re.compile(r"[?&]idProduct=(\d+)")
 
 
-def _cm_product_expansions(want_pids):
+def _cm_product_expansions(want_pids, c=None):
     """{idProduct: idExpansion} for the wanted product ids, from Cardmarket's
     public singles product list (~20 MB, no login). Best-effort: any failure
     returns {} and the caller keeps the plain 'Secret Lair Drop Series'."""
@@ -779,10 +779,9 @@ def _cm_product_expansions(want_pids):
                 for p in data.get("products", ())
                 if p.get("idProduct") in want_pids}
     except Exception as e:                                       # noqa: BLE001
-        try:
-            print("Secret Lair expansion map skipped:", e)
-        except Exception:
-            pass
+        if c is not None:
+            log(c, "Card data", "Cardmarket product list unavailable (%s) — Secret Lair "
+                "want lines use the base expansion this run" % e)
         return {}
     finally:
         try:
@@ -1062,10 +1061,15 @@ def refresh_cards():
                    for r in rows]
         want = {cm_pids[i] for i, r in enumerate(rows)
                 if r[0] in sl_codes and cm_pids[i]}
-        pid2exp = _cm_product_expansions(want)
+        pid2exp = _cm_product_expansions(want, c)
         cm_exps = [CM_SLD_EXPANSIONS.get(pid2exp.get(cm_pids[i]), "Secret Lair Drop Series")
                    if r[0] in sl_codes else None
                    for i, r in enumerate(rows)]
+        _sl_unresolved = sum(1 for i, r in enumerate(rows) if r[0] in sl_codes
+                             and pid2exp.get(cm_pids[i]) not in CM_SLD_EXPANSIONS)
+        if want and _sl_unresolved:
+            log(c, "Card data", "%d Secret Lair printing(s) fell back to the base "
+                "expansion (unknown Cardmarket drop)" % _sl_unresolved)
         # For Secret Lair the drop expansion IS the whole target — Cardmarket
         # has no separate ": Extras" page — and "Version 1/2/3" is numbered
         # within that one drop, not across the entire "sld" set.
@@ -2246,6 +2250,43 @@ def _owns_name(c, codes, marks, name):
         codes + [name, name, front + " // %"]).fetchone()["q"]
 
 
+def _cm_by_product(c, pid, counted, marks, want_foil):
+    """Exact match by Cardmarket product id (stored as cards.cm_product_id from
+    Scryfall's cardmarket link). Only single-product pages expose it, but there
+    it removes all the set-slug guessing — the win for Secret Lair, promos and
+    sets Binduno maps loosely."""
+    row = c.execute(
+        """SELECT k.set_code, k.number, k.name,
+                  COALESCE(SUM(CASE WHEN o.foil='normal' THEN o.qty ELSE 0 END),0) nf,
+                  COALESCE(SUM(CASE WHEN o.foil<>'normal' THEN o.qty ELSE 0 END),0) fo
+           FROM cards k LEFT JOIN collection o
+             ON o.set_code=k.set_code AND o.number=k.number
+           WHERE k.cm_product_id=? AND k.digital=0
+           GROUP BY k.set_code, k.number LIMIT 1""", (pid,)).fetchone()
+    if not row:
+        return None
+    r = {"set": row["set_code"]}
+    total = _owns_name(c, counted, marks, row["name"])
+    here = row["nf"] + row["fo"]
+    r["qty"] = total
+    r["exactQty"] = row["fo"] if want_foil else row["nf"]
+    if (row["fo"] if want_foil else row["nf"]):
+        r["status"] = "exact"
+    elif here:
+        r["status"] = "otherFinish"
+    elif total > here:
+        same_set = c.execute(
+            """SELECT COALESCE(SUM(o.qty),0) q FROM cards k JOIN collection o
+                 ON o.set_code=k.set_code AND o.number=k.number
+               WHERE k.set_code=? AND k.digital=0
+                 AND (k.name=? COLLATE NOCASE OR k.name_de=? COLLATE NOCASE)""",
+            (row["set_code"], row["name"], row["name"])).fetchone()["q"]
+        r["status"] = "otherVersion" if same_set else "otherSet"
+    else:
+        r["status"] = "missing"
+    return r
+
+
 def cm_match(c, items):
     """For each Cardmarket offer row decide whether it is already owned.
     status: exact | otherFinish | otherVersion | otherSet | missing
@@ -2263,6 +2304,15 @@ def cm_match(c, items):
         if m:
             name = m.group(1).strip()
         want_foil = bool(it.get("foil"))
+        try:
+            pid = int(it.get("productId") or 0)
+        except (TypeError, ValueError):
+            pid = 0
+        if pid:
+            hit = _cm_by_product(c, pid, counted, marks, want_foil)
+            if hit:
+                r.update(hit)
+                out.append(r); continue
         code, is_extras = resolve_cm_set(c, it.get("setSlug", ""), it.get("setTitle", ""))
         if not name:
             r["status"] = "unknownCard"; out.append(r); continue
@@ -3619,6 +3669,15 @@ tr.child2 td:first-child::before{left:36px}
   .psep{margin:22px 0}
   dialog{width:100vw;height:100vh;max-height:100vh;border-radius:0;border:0}
   .dh{padding:14px 15px}.dbody{padding:0 15px 18px}
+  /* deck review + price graph: scroll wide content in its own box, shrink chrome */
+  #deckListWrap{overflow-x:auto;-webkit-overflow-scrolling:touch}
+  #deckListWrap table.setcards{min-width:560px}
+  .seg.deckseg{flex-wrap:nowrap}
+  .seg.deckseg button{padding:5px 5px;font-size:10.5px}
+  .phsvg{height:200px}
+  .phrangeseg button{padding:5px 9px}
+  #cardPhChg{font-size:11px}
+  .deckpick .dpr{flex-wrap:wrap;row-gap:4px}
 }
 </style></head><body>
 <nav><div class="navin">
@@ -3716,7 +3775,7 @@ en:{
   "home.watchlist7d":"Last 7 days","home.watchlistChange":"Change","home.watchlistTrend":"Trend",
   "range.d7":"7 D","range.d30":"30 D","range.y1":"1 Y","range.max":"Max",
   "ph.title":"Price history","ph.none":"No price history logged yet.",
-  "ph.lohi":"low {lo} · high {hi}",
+  "ph.lohi":"low {lo} · high {hi}","ph.since":"history since {d}",
   "home.watchlistRemove":"Remove from watchlist",
   "home.watchlistCount":"{n} of {max} cards",
   "home.nothingLoadedDesc":"Download the card data and import your ManaBox export to get started.",
@@ -3836,16 +3895,12 @@ en:{
   "deck.filterNeedSet":"Needs a set","deck.filterNotFound":"Not found",
   "deck.section.deck":"","deck.section.commander":"Commander","deck.section.sideboard":"Sideboard",
   "deck.section.maybeboard":"Maybe","deck.section.companion":"Companion",
-  "cart.secretLairWhy":"Secret Lair Wants-Lists aren't supported yet",
-  "cart.secretLairSkipped":"{n} Secret Lair card(s) were skipped — see the note on the set page.",
-  "cart.secretLairNote":"Secret Lair cards can't be added to the Wants-List Cart yet. Cardmarket splits Secret Lair into hundreds of separate expansions with no reliable mapping, so a generated Wants-List wouldn't match. Buy these directly from the card's Cardmarket page.",
   "cart.addAllToCollection":"Add all to collection","cart.addAllToCollectionConfirm":
     "Add all {n} cards in the Wants-List Cart to your collection as nonfoil? "+
     "The cart itself stays as it is.",
   "cart.addedAllToCollection":"Added to collection",
   "cart.confirmClear":"Remove everything from the Wants-List Cart?",
   "wantlist.nothingToCopy":"Nothing to copy.",
-  "wantlist.secretLairNote":"A few Secret Lair lines fell back to the base “Secret Lair Drop Series” expansion because Binduno couldn't pin the exact drop — those may not resolve on Cardmarket. Check them against the card's Cardmarket page.",
   "wantlist.limitInfo":"Cardmarket allows {limit} entries per Wants-List, so this is split "+
     "into {n} {lists}. Paste each block into its own Wants-List.",
   "wantlist.list":"list","wantlist.listsPlural":"lists",
@@ -4160,7 +4215,7 @@ de:{
   "home.watchlist7d":"Letzte 7 Tage","home.watchlistChange":"Änderung","home.watchlistTrend":"Trend",
   "range.d7":"7 T","range.d30":"30 T","range.y1":"1 J","range.max":"Max",
   "ph.title":"Preisverlauf","ph.none":"Noch kein Preisverlauf aufgezeichnet.",
-  "ph.lohi":"Tief {lo} · Hoch {hi}",
+  "ph.lohi":"Tief {lo} · Hoch {hi}","ph.since":"Verlauf ab {d}",
   "home.watchlistRemove":"Von Watchlist entfernen",
   "home.watchlistCount":"{n} von {max} Karten",
   "home.nothingLoadedDesc":"Lade zuerst die Kartendaten herunter und importiere deinen ManaBox-Export.",
@@ -4282,16 +4337,12 @@ de:{
   "deck.filterNeedSet":"Set nötig","deck.filterNotFound":"Nicht gefunden",
   "deck.section.deck":"","deck.section.commander":"Commander","deck.section.sideboard":"Sideboard",
   "deck.section.maybeboard":"Maybe","deck.section.companion":"Companion",
-  "cart.secretLairWhy":"Wants-Listen für Secret Lair werden noch nicht unterstützt",
-  "cart.secretLairSkipped":"{n} Secret-Lair-Karte(n) übersprungen — siehe Hinweis auf der Set-Seite.",
-  "cart.secretLairNote":"Secret-Lair-Karten können noch nicht in den Wants-Liste-Cart. Cardmarket teilt Secret Lair in hunderte einzelne Erweiterungen ohne verlässliche Zuordnung auf, eine erzeugte Wants-Liste würde also nicht treffen. Diese Karten direkt über die Cardmarket-Seite der Karte kaufen.",
   "cart.addAllToCollection":"Alle zur Sammlung hinzufügen","cart.addAllToCollectionConfirm":
     "Alle {n} Karten aus dem Wants-Liste-Cart als Nonfoil zur Sammlung hinzufügen? "+
     "Der Cart selbst bleibt dabei unverändert.",
   "cart.addedAllToCollection":"Zur Sammlung hinzugefügt",
   "cart.confirmClear":"Wirklich alles aus dem Wants-Liste-Cart entfernen?",
   "wantlist.nothingToCopy":"Nichts zu kopieren.",
-  "wantlist.secretLairNote":"Ein paar Secret-Lair-Zeilen sind auf die Basis-Erweiterung „Secret Lair Drop Series“ zurückgefallen, weil sich der genaue Drop nicht bestimmen ließ — die treffen auf Cardmarket eventuell nicht. Über die Cardmarket-Seite der Karte prüfen.",
   "wantlist.limitInfo":"Cardmarket erlaubt {limit} Einträge pro Wants-Liste, daher aufgeteilt "+
     "in {n} {lists}. Jeden Block einzeln einfügen.",
   "wantlist.list":"Liste","wantlist.listsPlural":"Listen",
@@ -4591,7 +4642,6 @@ const pct=n=>(n*100).toFixed(1)+" %";
 const RAR={c:["Common","#7d8896"],u:["Uncommon","#a8b4c2"],r:["Rare","#d4a629"],
            m:["Mythic","#e0692c"],s:["Special","#b49ed0"],b:["Basic land","#6f7a88"]};
 const rarLabel=k=>t("rarity."+k);
-function isSecretLair(code){const s=SETS.find(x=>x.code===code);return !!s&&/^secret lair/i.test(s.name||"");}
 function toast(msg){
   let b=$("#toast");
   if(!b){b=document.createElement("div");b.id="toast";
@@ -4830,6 +4880,10 @@ function wlSpark(vals){
 // card page. Value is the `range` query param price_history_series() expects.
 const PH_RANGES=[["7","range.d7"],["30","range.d30"],["365","range.y1"],["max","range.max"]];
 let WL_RANGE="7", PH_RANGE="30";
+try{WL_RANGE=localStorage.getItem("bnd_wl_range")||WL_RANGE;
+    PH_RANGE=localStorage.getItem("bnd_ph_range")||PH_RANGE;}catch(e){}
+const savePhRange=()=>{try{localStorage.setItem("bnd_wl_range",WL_RANGE);
+  localStorage.setItem("bnd_ph_range",PH_RANGE);}catch(e){}};
 function phRangeSeg(cur,id){
   return `<div class="seg phrangeseg" id="${id}">${PH_RANGES.map(([v,l])=>
     `<button data-phr="${v}" class="${cur===v?"on":""}">${t(l)}</button>`).join("")}</div>`;
@@ -4919,7 +4973,7 @@ async function drawWatchlist(){
   const rangeUI=`<div class="tools" style="margin:0 0 10px">${phRangeSeg(WL_RANGE,"wlRange")}</div>`;
   if(!r.items.length){
     out.innerHTML=rangeUI+`<div class="empty"><p>${t("home.watchlistEmpty")}</p></div>`;
-    $("#wlRange")&&bindPhRange("#wlRange",v=>{WL_RANGE=v;drawWatchlist();});
+    $("#wlRange")&&bindPhRange("#wlRange",v=>{WL_RANGE=v;savePhRange();drawWatchlist();});
     return;
   }
   out.innerHTML=rangeUI+`<div class="tscroll"><table class="wltable"><thead><tr><th>${t("missing.thCard")}</th><th>${t("cardPage.set")}</th>
@@ -4938,7 +4992,7 @@ async function drawWatchlist(){
     </tr>`).join("")}</tbody></table></div>
     <p class="sub" style="margin-top:8px">${t("home.watchlistCount",{n:r.items.length,max:r.max})}</p>`;
   bindSetLinks();bindTiles();
-  bindPhRange("#wlRange",v=>{WL_RANGE=v;drawWatchlist();});
+  bindPhRange("#wlRange",v=>{WL_RANGE=v;savePhRange();drawWatchlist();});
   document.querySelectorAll("[data-unwatch]").forEach(b=>b.onclick=async()=>{
     const [sc,nr]=b.dataset.unwatch.split("|");
     await fetch("/api/watchlist",{method:"POST",
@@ -5711,8 +5765,13 @@ async function cardPage(sc,nr){
     g.innerHTML=priceGraph(h,{h:260});bindPriceGraph(g);
     if(!chg)return;
     if(h.changePct==null){chg.textContent="";return;}
+    // the logged history often doesn't reach back a full year yet — say so
+    const wantDays={"7":7,"30":30,"365":365,"max":99999}[PH_RANGE]||30;
+    const haveDays=(Date.now()-Date.parse(h.start))/864e5;
+    const since=(PH_RANGE==="365"||PH_RANGE==="max")&&haveDays<wantDays-10
+      ? ` · ${t("ph.since",{d:phDate(h.start)})}` : "";
     chg.innerHTML=`${h.changeEur>0?"+":""}${money(h.changeEur)} `+
-      `(${h.changePct>0?"+":""}${h.changePct.toFixed(1)} %) · ${t("ph.lohi",{lo:money(h.lo),hi:money(h.hi)})}`;
+      `(${h.changePct>0?"+":""}${h.changePct.toFixed(1)} %) · ${t("ph.lohi",{lo:money(h.lo),hi:money(h.hi)})}${since}`;
     chg.style.color=h.changeEur>0?"var(--ok)":h.changeEur<0?"var(--bad)":"var(--muted)";
   };
   const fetchCardPh=async v=>renderCardPh(await getJSON(
@@ -5720,7 +5779,7 @@ async function cardPage(sc,nr){
   renderCardPh(d.hist);
   if(PH_RANGE!=="30")fetchCardPh(PH_RANGE);
   bindPhRange("#cardPhRange",v=>{
-    PH_RANGE=v;
+    PH_RANGE=v;savePhRange();
     document.querySelectorAll("#cardPhRange [data-phr]").forEach(b=>b.classList.toggle("on",b.dataset.phr===v));
     fetchCardPh(v);
   });
@@ -5994,6 +6053,15 @@ async function drawCart(){
 
 /* ---------------- deck list -> Wants-List ---------------- */
 let DECK={text:"",format:"auto",cards:null,view:"table",q:"",sort:"orig",dir:1,filter:"all",pick:null};
+// keep a reviewed deck (including every per-card set choice) across reloads and
+// navigation for the session; skip the write if it's too big for the quota.
+function deckSave(){
+  try{
+    const j=JSON.stringify({...DECK,pick:null});
+    if(j.length<4000000)sessionStorage.setItem("bnd_deck",j);
+  }catch(e){}
+}
+(function(){try{const s=sessionStorage.getItem("bnd_deck");if(s)DECK={...DECK,...JSON.parse(s),pick:null};}catch(e){}})();
 const DECK_FORMATS=[["auto","deck.fmtAuto"],["moxfield","Moxfield"],["archidekt","Archidekt"],
   ["mtga","MTG Arena"],["mtgo","MTGO"],["tappedout","TappedOut"],["deckstats","Deckstats"],
   ["plain","deck.fmtPlain"]];
@@ -6060,8 +6128,8 @@ function drawDeck(){
       <textarea id="dtext" style="height:260px" placeholder="${t("deck.pastePlaceholder")}">${esc(DECK.text)}</textarea>
       <div class="tools" style="margin-top:8px"><button id="dparse" class="pri">${t("deck.parseBtn")}</button></div>
       <div id="dmsg"></div>`;
-    $("#dfmt").onchange=e=>DECK.format=e.target.value;
-    $("#dtext").oninput=e=>DECK.text=e.target.value;
+    $("#dfmt").onchange=e=>{DECK.format=e.target.value;deckSave();};
+    $("#dtext").oninput=debounce(e=>{DECK.text=$("#dtext").value;deckSave();},300);
     $("#dparse").onclick=async()=>{
       DECK.text=$("#dtext").value;DECK.format=$("#dfmt").value;
       if(!DECK.text.trim())return;
@@ -6129,7 +6197,7 @@ function drawDeck(){
       drawDeck();
     });
   }
-  $("#dback").onclick=()=>{DECK.cards=null;DECK.pick=null;drawDeck();};
+  $("#dback").onclick=()=>{DECK.cards=null;DECK.pick=null;try{sessionStorage.removeItem("bnd_deck");}catch(e){}drawDeck();};
   $("#dallAny").onclick=()=>{cs.forEach(c=>{if(c.status!=="notFound"){c.mode="any";c.chosen=null;}});DECK.pick=null;drawDeck();};
   $("#dallDeck").onclick=()=>{cs.forEach(c=>{if(c.deckPrinting){c.mode="deck";c.chosen=c.deckPrinting;}});DECK.pick=null;drawDeck();};
   $("#dq").oninput=debounce(()=>{DECK.q=$("#dq").value;drawDeck();const q=$("#dq");if(q){q.focus();q.selectionStart=q.selectionEnd=q.value.length;}},200);
@@ -6139,6 +6207,7 @@ function drawDeck(){
   document.querySelectorAll("[data-dv]").forEach(b=>b.onclick=()=>{DECK.view=b.dataset.dv;drawDeck();});
   $("#dgen").onclick=deckGenerate;$("#dgen2").onclick=deckGenerate;
   bindDeckRows();
+  deckSave();
 }
 // Apply the search box, the filter dropdown and the sort. Each entry keeps its
 // real index in DECK.cards so the row buttons stay correct after filtering.
@@ -6240,6 +6309,7 @@ function deckUpdateOne(i){
   node.outerHTML=DECK.view==="grid"?deckTile(DECK.cards[i],i):deckRow(DECK.cards[i],i);
   bindDeckNode(document.querySelector(`[data-di="${i}"]`));
   deckRefreshSummary();
+  deckSave();
   const wl=$("#deckWL");if(wl)wl.innerHTML="";
 }
 // price + shipping estimate for the whole list. "any set" cards are priced at
@@ -6368,10 +6438,8 @@ function wantChunks(lines){
   if(!lines.length)return `<p class="sub">${t("wantlist.nothingToCopy")}</p>`;
   const parts=[];
   for(let i=0;i<lines.length;i+=CM_LIMIT)parts.push(lines.slice(i,i+CM_LIMIT));
-  const slNote=lines.some(l=>/\(Secret Lair Drop Series\)$/.test(l))
-    ? `<div class="msg" style="max-width:720px">${t("wantlist.secretLairNote")}</div>` : "";
   return `<p class="sub">${t("wantlist.limitInfo",{limit:CM_LIMIT,n:parts.length,
-      lists:parts.length>1?t("wantlist.listsPlural"):t("wantlist.list")})}</p>${slNote}
+      lists:parts.length>1?t("wantlist.listsPlural"):t("wantlist.list")})}</p>
     ${parts.map((chunk,i)=>`<div class="chunk">
       <h4>${t("wantlist.entryHeader",{i:i+1,n:parts.length,count:chunk.length})}</h4>
       <textarea readonly id="wl${i}">${chunk.join("\n")}</textarea>
@@ -8008,6 +8076,17 @@ CM_USERSCRIPT = r'''// ==UserScript==
   // Cardmarket's tooltip JS moves title -> data-bs-original-title and clears
   // title, so read both.
   function ttl(el){ return el ? (el.getAttribute("title") || el.getAttribute("data-bs-original-title") || "").trim() : ""; }
+  // On a single-product page every offer row is that product; the id sits in a
+  // hidden input. Absent on seller-offer and wantlist pages (each row differs) —
+  // there we fall back to set-slug + name matching.
+  var _pagePid;
+  function pageProductId(){
+    if(_pagePid === undefined){
+      var el = document.querySelector('input[name="idProduct"]');
+      _pagePid = el && /^\d+$/.test(el.value) ? el.value : "";
+    }
+    return _pagePid;
+  }
   function parseRow(row){
     var a = row.querySelector(".col-seller a");
     var exp = row.querySelector('a[href*="/Magic/Expansions/"]');
@@ -8019,6 +8098,7 @@ CM_USERSCRIPT = r'''// ==UserScript==
       name: (a.textContent || "").trim(),
       setSlug: (href.split("/Magic/Expansions/")[1] || "").split(/[?#]/)[0],
       setTitle: ttl(exp),
+      productId: pageProductId(),
       foil: foil
     };
   }
@@ -8280,10 +8360,11 @@ L={exact:"in collection",otherFinish:"other finish",otherVersion:"other version"
 LG={1:"en",2:"fr",3:"de",4:"es",5:"it",6:"zh",7:"ja",8:"pt",9:"ru",10:"ko",11:"zh"},
 CA={};
 function tl(e){return e?(e.getAttribute("title")||e.getAttribute("data-bs-original-title")||"").trim():"";}
+var _ppid;function ppid(){if(_ppid===undefined){var e=document.querySelector('input[name="idProduct"]');_ppid=e&&/^\d+$/.test(e.value)?e.value:"";}return _ppid;}
 function pr(r){var a=r.querySelector(".col-seller a"),x=r.querySelector('a[href*="/Magic/Expansions/"]');if(!a||!x)return null;
 var h=x.getAttribute("href")||"",f=false,s=r.querySelectorAll(".st_SpecialIcon"),i;
 for(i=0;i<s.length;i++){var v=tl(s[i]);if(v=="Foil"||v=="Folie")f=true;}
-return{name:(a.textContent||"").trim(),setSlug:(h.split("/Magic/Expansions/")[1]||"").split(/[?#]/)[0],setTitle:tl(x),foil:f};}
+return{name:(a.textContent||"").trim(),setSlug:(h.split("/Magic/Expansions/")[1]||"").split(/[?#]/)[0],setTitle:tl(x),productId:ppid(),foil:f};}
 function pw(r){var a=r.querySelector("td.name a");if(!a)return null;
 var x=r.querySelector(".expansion-symbol"),tn=r.querySelectorAll("td.ternary-header"),
 ft=tn[0]?(tn[0].textContent||"").trim().toLowerCase():"";
