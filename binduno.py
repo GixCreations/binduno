@@ -16,7 +16,7 @@ import urllib.request
 from datetime import datetime, timedelta
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-VERSION = "6.08"
+VERSION = "6.09"
 SCHEMA = 18
 
 
@@ -3300,6 +3300,9 @@ nav a.tab.on{color:var(--gold);border-color:var(--gold)}
 .wrap{max-width:1240px;margin:0 auto;padding:26px 22px 80px}
 footer{max-width:1240px;margin:0 auto;padding:18px 22px 26px;color:var(--dim);
   font-size:12px;line-height:1.6;border-top:1px solid var(--line)}
+footer .footlinks{display:flex;flex-wrap:wrap;gap:8px 18px;margin-top:10px}
+footer .footlinks a{color:var(--muted)}
+footer .footlinks a:hover{color:var(--gold)}
 h1{font-family:var(--serif);font-weight:400;font-size:30px;margin:0 0 4px}
 h2{font-family:var(--serif);font-weight:400;font-size:20px;margin:34px 0 12px}
 .sub{color:var(--muted);font-size:14px;margin:0 0 20px}
@@ -3664,19 +3667,25 @@ tr.child2 td:first-child::before{left:36px}
   th{top:54px}
   /* let wide tables scroll inside their own box instead of the whole page */
   #out,#setBody,#watchlistOut,.dbody{overflow-x:auto;-webkit-overflow-scrolling:touch}
-  #out th,#setBody th,#watchlistOut th{position:static;top:auto}
+  #out th,#setBody th,#watchlistOut th,#deckListWrap th{position:static;top:auto}
   #out>table,#setBody>table{min-width:560px}
-  /* watchlist: drop the sparkline column and let the rest wrap so it fits */
+  /* watchlist: drop the sparkline column, size columns to content, clip the set
+     name (tap the card for the full name) so it never wraps letter by letter */
   #watchlistOut tr>*:nth-child(4){display:none}
-  #watchlistOut .tscroll>table{min-width:0}
+  #watchlistOut table.wltable{table-layout:auto;min-width:0}
   #watchlistOut td,#watchlistOut th{padding:7px 6px}
-  #watchlistOut td:nth-child(5),#watchlistOut td:nth-child(5) span{white-space:normal}
+  #watchlistOut td:nth-child(1){white-space:normal;overflow-wrap:normal;word-break:normal}
+  #watchlistOut td:nth-child(2){white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:30vw}
+  #watchlistOut td:nth-child(2) span{overflow-wrap:normal}
+  #watchlistOut td:nth-child(5),#watchlistOut th:nth-child(5){width:auto;white-space:nowrap}
   .tscroll>table{min-width:480px}
   #view{overflow-x:hidden}
   table{font-size:13px}
   td,th{padding:7px 7px}
   .tools{gap:7px;margin:12px 0}
   input[type=search]{flex-basis:100%}
+  /* keep card grids at two columns on the phone instead of collapsing to one */
+  .cgrid{grid-template-columns:repeat(auto-fill,minmax(140px,1fr));gap:10px}
   .cards{grid-template-columns:repeat(auto-fit,minmax(140px,1fr));gap:9px}
   .card{padding:13px}
   .card .v{font-size:23px}
@@ -3710,7 +3719,10 @@ tr.child2 td:first-child::before{left:36px}
   .dh{padding:14px 15px}.dbody{padding:0 15px 18px}
   /* deck review + price graph: scroll wide content in its own box, shrink chrome */
   #deckListWrap{overflow-x:auto;-webkit-overflow-scrolling:touch}
-  #deckListWrap table.setcards{min-width:560px}
+  /* on the phone the table already scrolls sideways — let columns size to their
+     content instead of the fixed desktop widths, which crushed the name column */
+  #deckListWrap table.setcards{table-layout:auto;min-width:560px}
+  #deckListWrap table.setcards th{width:auto}
   .seg.deckseg{flex-wrap:nowrap}
   .seg.deckseg button{padding:5px 5px;font-size:10.5px}
   .phsvg{height:200px}
@@ -3739,6 +3751,11 @@ or approved by Wizards of the Coast. Magic: The Gathering, all card names, image
 related assets are trademarks and/or copyrights of Wizards of the Coast LLC and Hasbro,
 Inc. All prices are sourced from Scryfall and Cardmarket and shown for personal,
 non-commercial reference only.
+<div class="footlinks">
+  <a href="#manage" id="ftPhone" onclick="openManage('about','phone');return false;">Connect phone</a>
+  <a href="#manage" id="ftContact" onclick="openManage('contact');return false;">Contact</a>
+  <a href="https://github.com/GixCreations/binduno" id="ftGh" target="_blank" rel="noopener">GitHub</a>
+</div>
 <div style="margin-top:8px">Made with &#10084;&#65039; in Odenwald</div></footer>
 <div id="tipbox" role="tooltip"></div>
 <div id="cardpop"><img alt=""></div>
@@ -3837,11 +3854,11 @@ en:{
     "Archidekt, upload it now. Otherwise skip this — you can import any time under Settings.",
   "wizard.cardDataTitle":"Card database",
   "wizard.cardDataDesc":"Binduno needs Scryfall's card database (names, sets, Cardmarket "+
-    "prices) to know what exists at all — around 100–150 MB, once. This can take a minute "+
-    "or two depending on your connection.",
+    "prices) to know what exists at all — a compressed download of about 400 MB, once. "+
+    "This can take a few minutes depending on your connection.",
   "wizard.cardDataBtn":"Download card database",
-  "wizard.cardDataConfirm":"Download the Scryfall card database now (~100–150 MB)? This runs "+
-    "in the background and can take a minute or two.",
+  "wizard.cardDataConfirm":"Download the Scryfall card database now (~400 MB compressed)? "+
+    "This runs in the background and can take a few minutes.",
   "wizard.doneTitle":"All set",
   "wizard.doneBody":"Binduno is ready. You can change any of these settings again any time "+
     "under Settings, and re-run this setup from there too.",
@@ -3956,6 +3973,11 @@ en:{
   "manage.tabSets":"Excluded sets","manage.tabDesign":"Design","manage.tabShipping":"Shipping",
   "manage.tabLanguage":"Language","manage.tabGoals":"Set goals",
   "manage.tabHistory":"History","manage.tabApp":"Update app","manage.tabHelp":"Help",
+  "manage.tabContact":"Contact",
+  "contact.title":"Contact",
+  "contact.body":"Feedback, questions and bug reports are very welcome — email me at",
+  "contact.ghLine":"Source code and issue tracker:",
+  "foot.connectPhone":"Connect phone","foot.contact":"Contact",
   "cm.title":"Cardmarket helper",
   "cm.desc":"A userscript that runs on cardmarket.com and marks each single offer by whether the card is already in your collection — handy for topping up a seller's order with cheap missing cards at no extra shipping.",
   "cm.step1":"Install a free, open-source userscript manager: <a href='https://violentmonkey.github.io/' target='_blank' rel='noopener'>Violentmonkey</a> (Chrome / Firefox / Edge) or <a href='https://apps.apple.com/app/userscripts/id1463298887' target='_blank' rel='noopener'>Userscripts</a> by Quoid (Safari, from the Mac App Store).",
@@ -3975,7 +3997,8 @@ en:{
   "goal.preset.baseSet":"Base set","goal.preset.baseSetDesc":"Every plain base-frame printing on its own — extra arts of basics and foil-only stars still count.",
   "goal.preset.everything":"Everything","goal.preset.everythingDesc":"Every collector number: showcase, borderless, extended art, special foils. Serialized still excluded.",
   "goal.scope":"Counting","goal.scopeNames":"One printing per card name is enough","goal.scopePrintings":"Every collector number counts on its own",
-  "goal.extras":"Special printings (Showcase, Borderless, Extended Art, special foils)","goal.extrasInclude":"Count toward 100%","goal.extrasExclude":"Don't count — base printing only",
+  "goal.extras":"Special printings (Showcase, Borderless, Extended Art, special foils)","goal.extrasInclude":"Add to the goal","goal.extrasExclude":"Don't add to the goal",
+  "goal.extrasNote":"With \"one printing per card name\", any version you own — Showcase, Borderless, Extended Art, special foil — already completes that name; this setting then only leaves out names that exist solely as special printings (the set page still flags names you hold only as a special printing). It takes full effect under \"every collector number\", where each special printing becomes its own target.",
   "goal.serialized":"Serialized cards (numbered limited prints)","goal.serializedInclude":"Count toward 100%","goal.serializedExclude":"Don't count","goal.serializedNote":"Only relevant while special printings count.",
   "endgame.title":"Very expensive cards",
   "endgame.desc":"Cards whose cheapest printing is at or above the threshold are set aside: they don't count toward a set's missing cards or its cost, and are shown on their own on the home page instead. Turn this off to treat them like any other missing card.",
@@ -4283,11 +4306,11 @@ de:{
     "unter Einstellungen nach.",
   "wizard.cardDataTitle":"Kartendatenbank",
   "wizard.cardDataDesc":"Binduno braucht Scryfalls Kartendatenbank (Namen, Sets, "+
-    "Cardmarket-Preise), um überhaupt zu wissen was existiert — einmalig etwa 100–150 MB. "+
-    "Je nach Verbindung dauert das ein bis zwei Minuten.",
+    "Cardmarket-Preise), um überhaupt zu wissen was existiert — ein komprimierter Download "+
+    "von etwa 400 MB, einmalig. Je nach Verbindung dauert das ein paar Minuten.",
   "wizard.cardDataBtn":"Kartendatenbank herunterladen",
-  "wizard.cardDataConfirm":"Jetzt die Scryfall-Kartendatenbank herunterladen (~100–150 MB)? "+
-    "Läuft im Hintergrund und kann ein bis zwei Minuten dauern.",
+  "wizard.cardDataConfirm":"Jetzt die Scryfall-Kartendatenbank herunterladen (~400 MB komprimiert)? "+
+    "Läuft im Hintergrund und kann ein paar Minuten dauern.",
   "wizard.doneTitle":"Fertig eingerichtet",
   "wizard.doneBody":"Binduno ist startklar. Alle diese Einstellungen kannst du jederzeit "+
     "unter Einstellungen ändern, und diese Einrichtung von dort auch erneut starten.",
@@ -4402,6 +4425,11 @@ de:{
   "manage.tabSets":"Ausgeschlossene Sets","manage.tabDesign":"Design","manage.tabShipping":"Versand",
   "manage.tabLanguage":"Sprache","manage.tabGoals":"Set-Ziele",
   "manage.tabHistory":"Verlauf","manage.tabApp":"App aktualisieren","manage.tabHelp":"Hilfe",
+  "manage.tabContact":"Kontakt",
+  "contact.title":"Kontakt",
+  "contact.body":"Feedback, Fragen und Fehlermeldungen sind sehr willkommen — schreib mir an",
+  "contact.ghLine":"Quellcode und Issue-Tracker:",
+  "foot.connectPhone":"Handy verbinden","foot.contact":"Kontakt",
   "cm.title":"Cardmarket-Helfer",
   "cm.desc":"Ein Userscript, das auf cardmarket.com läuft und jedes Single-Angebot danach markiert, ob die Karte schon in deiner Sammlung ist — praktisch, um eine Händler-Bestellung mit günstigen fehlenden Karten ohne Zusatzversand aufzufüllen.",
   "cm.step1":"Einen kostenlosen, quelloffenen Userscript-Manager installieren: <a href='https://violentmonkey.github.io/' target='_blank' rel='noopener'>Violentmonkey</a> (Chrome / Firefox / Edge) oder <a href='https://apps.apple.com/app/userscripts/id1463298887' target='_blank' rel='noopener'>Userscripts</a> von Quoid (Safari, aus dem Mac App Store).",
@@ -4421,7 +4449,8 @@ de:{
   "goal.preset.baseSet":"Basis-Set","goal.preset.baseSetDesc":"Jeder normale Basis-Frame-Druck einzeln — mehrere Arten von Basics und Foil-only-Star-Karten zählen weiter.",
   "goal.preset.everything":"Alles","goal.preset.everythingDesc":"Jede Sammlernummer: Showcase, Borderless, Extended Art, Spezial-Foils. Serialisierte weiterhin ausgeschlossen.",
   "goal.scope":"Zählweise","goal.scopeNames":"Ein Druck pro Kartenname reicht","goal.scopePrintings":"Jede Sammlernummer zählt einzeln",
-  "goal.extras":"Sonderdrucke (Showcase, Borderless, Extended Art, Spezial-Foils)","goal.extrasInclude":"Zählen zur 100 %","goal.extrasExclude":"Zählen nicht — nur Basis-Druck",
+  "goal.extras":"Sonderdrucke (Showcase, Borderless, Extended Art, Spezial-Foils)","goal.extrasInclude":"Ins Ziel aufnehmen","goal.extrasExclude":"Nicht ins Ziel aufnehmen",
+  "goal.extrasNote":"Bei „ein Druck pro Kartenname“ erfüllt jede Version, die du besitzt — Showcase, Borderless, Extended Art, Spezial-Foil — den Namen bereits; diese Einstellung lässt dann nur Namen weg, die es ausschließlich als Sonderdruck gibt (die Set-Seite markiert Namen, die du nur als Sonderdruck hast, weiterhin). Voll wirksam wird sie bei „jede Sammlernummer“, wo jeder Sonderdruck ein eigenes Ziel wird.",
   "goal.serialized":"Serialisierte Karten (nummerierte limitierte Prints)","goal.serializedInclude":"Zählen zur 100 %","goal.serializedExclude":"Zählen nicht","goal.serializedNote":"Nur relevant, solange Sonderdrucke mitzählen.",
   "endgame.title":"Sehr teure Karten",
   "endgame.desc":"Karten, deren günstigster Druck den Schwellwert erreicht oder überschreitet, werden zurückgestellt: sie zählen nicht zu den fehlenden Karten eines Sets und nicht zu dessen Kosten, sondern werden separat auf der Startseite gezeigt. Aus = sie zählen wie jede andere fehlende Karte.",
@@ -6608,7 +6637,15 @@ const MANAGE_TABS=[
   ["cm","manage.tabCm",function(){ cardmarketPane(); }],
   ["appearance","manage.tabAppearance",function(){ appearancePane(); }],
   ["about","manage.tabAbout",function(){ aboutPane(); }],
+  ["contact","manage.tabContact",function(){ contactPane(); }],
 ];
+function contactPane(){
+  const repo=(window.HAS&&window.HAS.githubRepo)||"GixCreations/binduno";
+  const ghUrl="https://github.com/"+repo;
+  $("#sub").innerHTML=`<h2 style="margin-top:0">${t("contact.title")}</h2>
+  <p class="sub">${t("contact.body")} <a href="mailto:gixcreations@strickland.one">gixcreations@strickland.one</a>.</p>
+  <p class="sub">${t("contact.ghLine")} <a href="${ghUrl}" target="_blank" rel="noopener">${ghUrl}</a></p>`;
+}
 function manage(){
   $("#view").innerHTML=`<h1>${t("manage.title")}</h1>
   <div class="seg segtabs" style="margin:8px 0 18px">${MANAGE_TABS.map(([id,key])=>
@@ -6781,6 +6818,7 @@ function goalsPane(sel){
   ${seg("scope",g.scope,[["names",t("goal.scopeNames")],["printings",t("goal.scopePrintings")]])}
   <h3 style="margin-top:18px">${t("goal.extras")}</h3>
   ${seg("extras",g.extras,[["exclude",t("goal.extrasExclude")],["include",t("goal.extrasInclude")]])}
+  <p class="sub">${t("goal.extrasNote")}</p>
   <h3 style="margin-top:18px">${t("goal.serialized")}</h3>
   ${seg("serialized",g.serialized,[["exclude",t("goal.serializedExclude")],["include",t("goal.serializedInclude")]])}
   <p class="sub" style="${g.extras==="include"?"":"opacity:.5"}">${t("goal.serializedNote")}</p>`;
@@ -7459,6 +7497,11 @@ function sectionFor(p){
   return "home";
 }
 function go(p){SCROLL[location.hash||"#home"]=window.scrollY;SUPPRESS_RESTORE=true;location.hash=p;}
+function openManage(sub,aboutSub){
+  SUB=sub||"collection";if(aboutSub)ABOUT_SUB=aboutSub;
+  // already on Settings? setting the same hash won't fire hashchange — re-render directly
+  if((location.hash||"")==="#manage")manage(); else go("manage");
+}
 function restoreScroll(){
   const key=location.hash||"#home", y=SCROLL[key]||0;
   if(!y){scrollTo(0,0);return;}
@@ -7485,6 +7528,9 @@ async function doRoute(){
   try{
     if(FORCE_RELOAD||!SETS.length||!STATS){FORCE_RELOAD=false;await load();}
     if($("#ver"))$("#ver").textContent="v"+(window.HAS.version||"");
+    if($("#ftPhone"))$("#ftPhone").textContent=t("foot.connectPhone");
+    if($("#ftContact"))$("#ftContact").textContent=t("foot.contact");
+    if($("#ftGh")&&window.HAS&&window.HAS.githubRepo)$("#ftGh").href="https://github.com/"+window.HAS.githubRepo;
     paintCartBadge();
     if(!ONBOARDING_DONE&&p!=="wizard"){
       SUPPRESS_RESTORE=true;location.hash="wizard";return;
