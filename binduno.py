@@ -16,8 +16,8 @@ import urllib.request
 from datetime import datetime, timedelta
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-VERSION = "6.06"
-SCHEMA = 17
+VERSION = "6.07"
+SCHEMA = 18
 
 
 def _env(name, *legacy):
@@ -1076,18 +1076,21 @@ def refresh_cards():
         if want and _sl_unresolved:
             log(c, "Card data", "%d Secret Lair printing(s) fell back to the base "
                 "expansion (unknown Cardmarket drop)" % _sl_unresolved)
-        # For Secret Lair the drop expansion IS the whole target — Cardmarket
-        # has no separate ": Extras" page — and "Version 1/2/3" is numbered
-        # within that one drop, not across the entire "sld" set.
+        # For Secret Lair the drop expansion IS the whole target — Cardmarket has
+        # no separate ": Extras" page. If a card name has just one printing in
+        # that Cardmarket expansion, emit no (V.n) (cm_ver 0). If it has several,
+        # Cardmarket's own "Version 1/2/3" order does NOT line up with Scryfall's
+        # collector numbers, so any V.n we pick would likely hit the wrong card
+        # — mark those cm_ver -1 so wantLine() drops the version and flags them.
         sl_groups = {}
         for i in range(len(rows)):
             if cm_exps[i]:
                 sl_groups.setdefault((rows[i][3], cm_exps[i]), []).append(i)
         for idxs in sl_groups.values():
-            idxs.sort(key=lambda i: rows[i][2])
-            for pos, i in enumerate(idxs, start=1):
+            ambiguous = len(idxs) > 1
+            for i in idxs:
                 suffixes[i] = ""
-                cmvers[i] = pos if len(idxs) > 1 else 0
+                cmvers[i] = -1 if ambiguous else 0
         rows = [r + (vers[i], extras[i], suffixes[i], cmvers[i],
                      cm_pids[i], cm_exps[i],
                      _norm_name(de_names.get((r[0], r[1]), "")),
@@ -2609,7 +2612,7 @@ def cart_rows(c):
               "eur": round(r["eur"] or 0, 2), "foil": round(r["eur_foil"] or 0, 2),
               "img": r["img"], "variant": r["variant"] or "",
               "ver": r["ver"] or 1, "extras": r["extras_idx"] or 0, "cmSuffix": r["cm_suffix"] or "", "cmVer": r["cm_ver"] if r["cm_ver"] is not None else 1, "cmExpansion": r["cm_expansion"] or ""} for r in rows]
-    goods = sum(i["eur"] * i["qty"] for i in items)
+    goods = sum((i["eur"] or i["foil"]) * i["qty"] for i in items)
     n = sum(i["qty"] for i in items)
     ship = shipping(n, goods, tracked_shipping_only(c), shipping_country(c))
     by_set = {}
@@ -3481,6 +3484,7 @@ textarea{width:100%;height:130px;background:var(--panel2);color:var(--text);bord
 .msg{padding:11px 14px;border-radius:5px;margin:12px 0;font-size:13.5px}
 .msg.ok{background:#152a1e;border:1px solid #2c5a3e;color:#8fd6a8}
 .msg.err{background:#2a1616;border:1px solid #5c2c2c;color:#e0a0a0}
+.msg.warn{background:#2a2413;border:1px solid #5c4f2c;color:#d8c48f}
 .cgrid{display:grid;grid-template-columns:repeat(auto-fill,minmax(210px,1fr));gap:16px}
 .cc{background:var(--panel);border:1px solid var(--line);border-radius:7px;overflow:hidden;
   display:flex;flex-direction:column;cursor:pointer;transition:border-color .13s,transform .13s}
@@ -3931,6 +3935,10 @@ en:{
   "wantlist.list":"list","wantlist.listsPlural":"lists",
   "wantlist.entryHeader":"Wants-List {i} of {n} — {count} entries",
   "wantlist.copyList":"Copy list {i}","wantlist.copied":"Copied",
+  "wantlist.slAmbiguous":"Some Secret Lair lines carry no version number. Cardmarket lists "+
+    "several versions of that card in the same drop, and their numbering doesn't match ours, "+
+    "so a version would likely point at the wrong one. Check those lines on the card's "+
+    "Cardmarket page before adding them.",
   "manage.title":"Settings",
   "manage.tabCollection":"Collection","manage.tabCompletion":"Completion","manage.tabCm":"Cardmarket",
   "manage.tabAppearance":"Appearance","manage.tabAbout":"Update & Help",
@@ -4373,6 +4381,10 @@ de:{
   "wantlist.list":"Liste","wantlist.listsPlural":"Listen",
   "wantlist.entryHeader":"Wants-Liste {i} von {n} — {count} Einträge",
   "wantlist.copyList":"Liste {i} kopieren","wantlist.copied":"Kopiert",
+  "wantlist.slAmbiguous":"Einige Secret-Lair-Zeilen haben keine Versionsnummer. Cardmarket "+
+    "führt von dieser Karte mehrere Versionen im selben Drop, und deren Nummerierung passt "+
+    "nicht zu unserer — eine Version würde also vermutlich die falsche treffen. Prüfe diese "+
+    "Zeilen vor dem Hinzufügen auf der Cardmarket-Seite der Karte.",
   "manage.title":"Einstellungen",
   "manage.tabCollection":"Sammlung","manage.tabCompletion":"Vervollständigung","manage.tabCm":"Cardmarket",
   "manage.tabAppearance":"Darstellung","manage.tabAbout":"Update & Hilfe",
@@ -5998,8 +6010,8 @@ function cartView(){
   let r=CART.items.slice();
   if(CQ){const q=CQ.toLowerCase();
     r=r.filter(i=>i.name.toLowerCase().includes(q)||i.setName.toLowerCase().includes(q));}
-  const key={set:i=>i.setName+" "+i.name,name:i=>i.name,price:i=>i.eur,
-             line:i=>i.eur*i.qty,qty:i=>i.qty}[CSORT];
+  const key={set:i=>i.setName+" "+i.name,name:i=>i.name,price:i=>i.eur||i.foil,
+             line:i=>(i.eur||i.foil)*i.qty,qty:i=>i.qty}[CSORT];
   r.sort((a,b)=>{const x=key(a),y=key(b);
     return (typeof x==="string"?x.localeCompare(y):x-y)*CDIR;});
   return r;
@@ -6049,8 +6061,8 @@ async function drawCart(){
       <div class="qbtn"><button data-q="${i.set}|${i.number}|${i.qty-1}">\u2212</button>
         <span class="mt">${i.qty}</span>
         <button data-q="${i.set}|${i.number}|${i.qty+1}">+</button></div>
-      <div class="num" style="font-family:var(--mono);font-size:12.5px">${money(i.eur)}</div>
-      <div class="num" style="font-family:var(--mono);font-size:12.5px;color:var(--gold)">${money(i.eur*i.qty)}</div>
+      <div class="num" style="font-family:var(--mono);font-size:12.5px">${i.eur?money(i.eur):(i.foil?`<em>foil</em> ${money(i.foil)}`:"—")}</div>
+      <div class="num" style="font-family:var(--mono);font-size:12.5px;color:var(--gold)">${money((i.eur||i.foil)*i.qty)}</div>
       <button data-q="${i.set}|${i.number}|0" title="${t("cart.remove")}">\u2715</button>
     </div>`).join("")}</div>`;
   bindTiles();bindSetLinks();
@@ -6074,7 +6086,8 @@ async function drawCart(){
     const b=$("#cartToColl");
     b.textContent=t("cart.addedAllToCollection");setTimeout(()=>b.textContent=t("cart.addAllToCollection"),1700);};
   $("#cartWant").onclick=()=>{
-    $("#cartWL").innerHTML=wantChunks(cartView().map(i=>wantLine(i,i.setName,i.qty)));
+    const v=cartView();
+    $("#cartWL").innerHTML=wantChunks(v.map(i=>wantLine(i,i.setName,i.qty)),v.some(i=>i.cmVer===-1));
     bindChunks();};
 }
 
@@ -6427,13 +6440,15 @@ function deckOpenPick(i){
   q.focus();
 }
 function deckGenerate(){
+  let warn=false;
   const lines=DECK.cards.filter(c=>c.status!=="notFound").map(c=>{
     if(c.mode==="any"||(!c.deckPrinting&&c.mode!=="set"))
       return (c.qty>1?c.qty+"x ":"")+c.name;
     const p=c.mode==="set"?c.chosen:c.deckPrinting;
+    if(p.cmVer===-1)warn=true;
     return wantLine({name:c.name,cmVer:p.cmVer,cmSuffix:p.cmSuffix,cmExpansion:p.cmExpansion},p.setName,c.qty);
   });
-  $("#deckWL").innerHTML=wantChunks(lines);
+  $("#deckWL").innerHTML=wantChunks(lines,warn);
   bindChunks();
   $("#deckWL").scrollIntoView({behavior:"smooth",block:"start"});
 }
@@ -6456,17 +6471,21 @@ function wantLine(c, setName, qty){
   // cmExpansion; use it verbatim as the trailing expansion.
   const base = c.cmExpansion
     || ((setName || "").trim() === "Secret Lair Drop" ? "Secret Lair Drop Series" : cmName(setName));
-  const v = c.cmVer;                 // 0 / null => only one printing of this name here, no (V.n)
+  const v = c.cmVer;
+  // cmVer -1: a Secret Lair card with several Cardmarket versions in the same
+  // expansion — our V.n wouldn't line up with theirs, so emit no version.
+  if(v === -1) return `${n}${c.name} (${base})`;
   return v ? `${n}${c.name} (V.${v}) (${base}${c.cmSuffix || ""})`
            : `${n}${c.name} (${base}${c.cmSuffix || ""})`;
 }
 
-function wantChunks(lines){
+function wantChunks(lines, warn){
   if(!lines.length)return `<p class="sub">${t("wantlist.nothingToCopy")}</p>`;
   const parts=[];
   for(let i=0;i<lines.length;i+=CM_LIMIT)parts.push(lines.slice(i,i+CM_LIMIT));
+  const note = warn ? `<p class="msg warn" style="max-width:760px">${t("wantlist.slAmbiguous")}</p>` : "";
   return `<p class="sub">${t("wantlist.limitInfo",{limit:CM_LIMIT,n:parts.length,
-      lists:parts.length>1?t("wantlist.listsPlural"):t("wantlist.list")})}</p>
+      lists:parts.length>1?t("wantlist.listsPlural"):t("wantlist.list")})}</p>${note}
     ${parts.map((chunk,i)=>`<div class="chunk">
       <h4>${t("wantlist.entryHeader",{i:i+1,n:parts.length,count:chunk.length})}</h4>
       <textarea readonly id="wl${i}">${chunk.join("\n")}</textarea>
@@ -7215,8 +7234,11 @@ function helpPane(sel){
         ("Secret Lair Drop Series: Marvel Superdrop", …). Binduno matches each Secret
         Lair card to its drop using Cardmarket's public product list (pulled once
         during card refresh) and emits <code>Card Name (Secret Lair Drop Series: &lt;drop&gt;)</code>.
-        A card added between releases can fall back to the plain
-        <code>(Secret Lair Drop Series)</code> — those are flagged under the generated list.</p>`,
+        Cards that sit in Cardmarket's base "Secret Lair Drop Series" expansion — a card
+        added between releases, or one Cardmarket lists in several versions there — get no
+        version number, since Cardmarket's version order doesn't match ours and a guess
+        would point at the wrong printing. Those lines are flagged under the generated
+        list so you can pick the right version on Cardmarket yourself.</p>`,
    data:`<h3>Your data</h3>
      <p>Everything lives in a SQLite file on your Mac. Nothing is uploaded anywhere.</p>
      <ul><li><b>Replace</b> import wipes the stored collection and uses the file as the new truth.</li>
@@ -7342,9 +7364,12 @@ function helpPane(sel){
         („Secret Lair Drop Series: Marvel Superdrop“ …). Binduno ordnet jede Secret-Lair-
         Karte über Cardmarkets öffentliche Produktliste (einmal beim Kartendaten-Update
         geladen) ihrem Drop zu und erzeugt <code>Kartenname (Secret Lair Drop Series: &lt;Drop&gt;)</code>.
-        Eine zwischen zwei Releases hinzugekommene Karte kann auf das schlichte
-        <code>(Secret Lair Drop Series)</code> zurückfallen — solche Zeilen werden unter der
-        erzeugten Liste markiert.</p>`,
+        Karten in Cardmarkets Basis-Erweiterung „Secret Lair Drop Series“ — zwischen zwei
+        Releases hinzugekommen oder von Cardmarket dort in mehreren Versionen geführt —
+        bekommen keine Versionsnummer, weil Cardmarkets Versionsreihenfolge nicht zu
+        unserer passt und ein geratener Wert den falschen Druck träfe. Solche Zeilen
+        werden unter der erzeugten Liste markiert, damit du die richtige Version auf
+        Cardmarket selbst wählst.</p>`,
    data:`<h3>Deine Daten</h3>
      <p>Alles liegt in einer SQLite-Datei auf deinem Mac. Nichts wird irgendwohin hochgeladen.</p>
      <ul><li><b>Ersetzen</b>-Import löscht die gespeicherte Sammlung und nutzt die Datei als
