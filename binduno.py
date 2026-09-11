@@ -16,7 +16,7 @@ import urllib.request
 from datetime import datetime, timedelta
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-VERSION = "6.09"
+VERSION = "6.13"
 SCHEMA = 18
 
 
@@ -1806,11 +1806,18 @@ def set_progress(rows, gp, eg_eur=ENDGAME_EUR):
         elig = [r for r in rows if r["inGoal"]]
         total = len(elig)
         owned = sum(1 for r in elig if r["have"])
-        for grp in by_name.values():                     # cost: one buy per missing name
-            eg = [r for r in grp if r["inGoal"]]
-            if not eg or any(r["have"] for r in grp):
+        # Bug fixed 6.11: this used to walk by_name like the "names" branch
+        # below — one missing entry per name, skipped the moment ANY printing
+        # of it (even a different one) was owned. That silently made "missing"
+        # (and everything built on it: setsComplete, the buy cost, the
+        # wantlist) scope-independent, so switching "One of every card" vs.
+        # "Base set" changed total/owned but nothing anyone actually looks at.
+        # Under "printings" scope each eligible printing is its own goal, so
+        # it needs its own missing/cost entry.
+        for r in elig:
+            if r["have"]:
                 continue
-            price = _price(eg)
+            price = r["eur"] or 0.0
             if price >= eg_eur:
                 eg_n += 1; eg_v += price
             else:
@@ -1840,9 +1847,11 @@ def set_progress(rows, gp, eg_eur=ENDGAME_EUR):
 def set_rows(c):
     """One aggregated row per set.
 
-    Counting uses exactly the same rules as the buy list: a card is only
-    "missing" if you own no printing of that name inside the set, alternate
-    printings of a name are counted once, and anything at or above the
+    Counting uses exactly the same rules as the buy list, goal-scope aware
+    (see set_progress): under "One of every card" a card is only "missing"
+    if you own no printing of that name inside the set, alternate printings
+    of a name are counted once; under "Base set"/"Everything" every eligible
+    printing is its own missing entry. Either way, anything at or above the
     endgame threshold is left out of the cost.
     """
     today = datetime.now().strftime("%Y-%m-%d")
@@ -3979,7 +3988,7 @@ en:{
   "contact.ghLine":"Source code and issue tracker:",
   "foot.connectPhone":"Connect phone","foot.contact":"Contact",
   "cm.title":"Cardmarket helper",
-  "cm.desc":"A userscript that runs on cardmarket.com and marks each single offer by whether the card is already in your collection — handy for topping up a seller's order with cheap missing cards at no extra shipping.",
+  "cm.desc":"A small script that runs on cardmarket.com and marks each single offer by whether the card is already in your collection — handy for topping up a seller's order with cheap missing cards at no extra shipping.",
   "cm.step1":"Install a free, open-source userscript manager: <a href='https://violentmonkey.github.io/' target='_blank' rel='noopener'>Violentmonkey</a> (Chrome / Firefox / Edge) or <a href='https://apps.apple.com/app/userscripts/id1463298887' target='_blank' rel='noopener'>Userscripts</a> by Quoid (Safari, from the Mac App Store).",
   "cm.step2":"Open this URL — the manager offers to install the script:",
   "cm.stepAllow":"Chrome and Brave (since v120) also need user scripts switched on: open the extension's details page (chrome://extensions or brave://extensions -> Violentmonkey -> Details) and enable 'Allow User Scripts', then reload the page.",
@@ -3994,20 +4003,20 @@ en:{
   "goal.presetTitle":"Quick pick",
   "goal.presetDesc":"Sets all three options at once. Fine-tune below afterwards if you like.",
   "goal.preset.oneEach":"One of every card","goal.preset.oneEachDesc":"Any single printing of each card name finishes the set.",
-  "goal.preset.baseSet":"Base set","goal.preset.baseSetDesc":"Every plain base-frame printing on its own — extra arts of basics and foil-only stars still count.",
-  "goal.preset.everything":"Everything","goal.preset.everythingDesc":"Every collector number: showcase, borderless, extended art, special foils. Serialized still excluded.",
+  "goal.preset.baseSet":"Base set","goal.preset.baseSetDesc":"Every plain base-frame printing on its own — including every basic-land art, and any card that only ever got a foil printing.",
+  "goal.preset.everything":"Everything","goal.preset.everythingDesc":"Every collector number counts on its own — showcase, borderless, extended art and special foils all count. Numbered limited prints (serialized cards) still excluded.",
   "goal.scope":"Counting","goal.scopeNames":"One printing per card name is enough","goal.scopePrintings":"Every collector number counts on its own",
   "goal.extras":"Special printings (Showcase, Borderless, Extended Art, special foils)","goal.extrasInclude":"Add to the goal","goal.extrasExclude":"Don't add to the goal",
-  "goal.extrasNote":"With \"one printing per card name\", any version you own — Showcase, Borderless, Extended Art, special foil — already completes that name; this setting then only leaves out names that exist solely as special printings (the set page still flags names you hold only as a special printing). It takes full effect under \"every collector number\", where each special printing becomes its own target.",
+  "goal.extrasNote":"Under \"one printing per card name\", this barely matters: any version you own already completes that name either way — it only decides whether the set page quietly flags names you own solely as a special printing. Under \"every collector number\" it matters fully: turned on, each special printing (Showcase, Borderless, Extended Art, special foil) becomes its own separate target you need to own.",
   "goal.serialized":"Serialized cards (numbered limited prints)","goal.serializedInclude":"Count toward 100%","goal.serializedExclude":"Don't count","goal.serializedNote":"Only relevant while special printings count.",
   "endgame.title":"Very expensive cards",
   "endgame.desc":"Cards whose cheapest printing is at or above the threshold are set aside: they don't count toward a set's missing cards or its cost, and are shown on their own on the home page instead. Turn this off to treat them like any other missing card.",
   "endgame.enable":"Set aside cards above a price threshold",
   "endgame.threshold":"Threshold",
-  "wizard.endgameTitle":"How to handle very expensive cards","wizard.endgameDesc":"Some singles cost hundreds of euros. Binduno can set those aside so one Reserved-List card doesn't make a whole set look unaffordable. Change this any time under Settings → Completion.",
+  "wizard.endgameTitle":"How to handle very expensive cards","wizard.endgameDesc":"Some singles cost hundreds of euros — often old cards that will never be reprinted. Binduno can set those aside so one very expensive card doesn't make a whole set look unaffordable. Change this any time under Settings → Completion.",
   "wizard.egSetAside":"Set aside cards from {eur}","wizard.egSetAsideDesc":"They're listed separately on the home page and left out of set cost/missing counts.",
   "wizard.egCountAll":"Count every card","wizard.egCountAllDesc":"No price cutoff — expensive cards are normal missing cards.",
-  "wizard.cmTitle":"Cardmarket browser helper","wizard.cmDesc":"Optional: a userscript that marks single offers on cardmarket.com by whether the card is already in your collection. Set it up any time under Settings → Cardmarket.",
+  "wizard.cmTitle":"Cardmarket browser helper","wizard.cmDesc":"Optional: a small script that marks single offers on cardmarket.com by whether the card is already in your collection. Set it up any time under Settings → Cardmarket.",
   "wizard.cmOpen":"Open setup instructions",
   "wizard.collectorTitle":"What kind of collector are you?",
   "wizard.collectorDesc":"This sets how Binduno measures set completion. You can change it any time under Settings → Set goals.",
@@ -4431,7 +4440,7 @@ de:{
   "contact.ghLine":"Quellcode und Issue-Tracker:",
   "foot.connectPhone":"Handy verbinden","foot.contact":"Kontakt",
   "cm.title":"Cardmarket-Helfer",
-  "cm.desc":"Ein Userscript, das auf cardmarket.com läuft und jedes Single-Angebot danach markiert, ob die Karte schon in deiner Sammlung ist — praktisch, um eine Händler-Bestellung mit günstigen fehlenden Karten ohne Zusatzversand aufzufüllen.",
+  "cm.desc":"Ein kleines Script, das auf cardmarket.com läuft und jedes Single-Angebot danach markiert, ob die Karte schon in deiner Sammlung ist — praktisch, um eine Händler-Bestellung mit günstigen fehlenden Karten ohne Zusatzversand aufzufüllen.",
   "cm.step1":"Einen kostenlosen, quelloffenen Userscript-Manager installieren: <a href='https://violentmonkey.github.io/' target='_blank' rel='noopener'>Violentmonkey</a> (Chrome / Firefox / Edge) oder <a href='https://apps.apple.com/app/userscripts/id1463298887' target='_blank' rel='noopener'>Userscripts</a> von Quoid (Safari, aus dem Mac App Store).",
   "cm.step2":"Diese URL öffnen — der Manager bietet die Installation des Scripts an:",
   "cm.stepAllow":"Chrome und Brave (ab v120) brauchen zusätzlich aktivierte User-Skripte: auf der Detailseite der Erweiterung (chrome://extensions bzw. brave://extensions -> Violentmonkey -> Details) 'User-Skripte zulassen' einschalten, dann Seite neu laden.",
@@ -4446,20 +4455,20 @@ de:{
   "goal.presetTitle":"Schnellauswahl",
   "goal.presetDesc":"Setzt alle drei Optionen auf einmal. Danach unten bei Bedarf feinjustieren.",
   "goal.preset.oneEach":"Ein Exemplar pro Karte","goal.preset.oneEachDesc":"Irgendein Druck jedes Kartennamens vervollständigt das Set.",
-  "goal.preset.baseSet":"Basis-Set","goal.preset.baseSetDesc":"Jeder normale Basis-Frame-Druck einzeln — mehrere Arten von Basics und Foil-only-Star-Karten zählen weiter.",
-  "goal.preset.everything":"Alles","goal.preset.everythingDesc":"Jede Sammlernummer: Showcase, Borderless, Extended Art, Spezial-Foils. Serialisierte weiterhin ausgeschlossen.",
+  "goal.preset.baseSet":"Basis-Set","goal.preset.baseSetDesc":"Jeder normale Basis-Frame-Druck einzeln — auch jede Illustration der Basisländer, und Karten, die es nur als Foil gab.",
+  "goal.preset.everything":"Alles","goal.preset.everythingDesc":"Jede Sammlernummer zählt einzeln — Showcase, Borderless, Extended Art und Spezial-Foils zählen alle mit. Nummerierte limitierte Drucke (serialisierte Karten) bleiben ausgeschlossen.",
   "goal.scope":"Zählweise","goal.scopeNames":"Ein Druck pro Kartenname reicht","goal.scopePrintings":"Jede Sammlernummer zählt einzeln",
   "goal.extras":"Sonderdrucke (Showcase, Borderless, Extended Art, Spezial-Foils)","goal.extrasInclude":"Ins Ziel aufnehmen","goal.extrasExclude":"Nicht ins Ziel aufnehmen",
-  "goal.extrasNote":"Bei „ein Druck pro Kartenname“ erfüllt jede Version, die du besitzt — Showcase, Borderless, Extended Art, Spezial-Foil — den Namen bereits; diese Einstellung lässt dann nur Namen weg, die es ausschließlich als Sonderdruck gibt (die Set-Seite markiert Namen, die du nur als Sonderdruck hast, weiterhin). Voll wirksam wird sie bei „jede Sammlernummer“, wo jeder Sonderdruck ein eigenes Ziel wird.",
+  "goal.extrasNote":"Bei „ein Druck pro Kartenname“ macht das kaum einen Unterschied: jede Version, die du besitzt, erfüllt den Namen so oder so — es entscheidet nur, ob die Set-Seite Namen markiert, die du nur als Sonderdruck besitzt. Bei „jede Sammlernummer“ wirkt es voll: eingeschaltet wird jeder Sonderdruck (Showcase, Borderless, Extended Art, Spezial-Foil) zu einem eigenen Ziel, das du besitzen musst.",
   "goal.serialized":"Serialisierte Karten (nummerierte limitierte Prints)","goal.serializedInclude":"Zählen zur 100 %","goal.serializedExclude":"Zählen nicht","goal.serializedNote":"Nur relevant, solange Sonderdrucke mitzählen.",
   "endgame.title":"Sehr teure Karten",
   "endgame.desc":"Karten, deren günstigster Druck den Schwellwert erreicht oder überschreitet, werden zurückgestellt: sie zählen nicht zu den fehlenden Karten eines Sets und nicht zu dessen Kosten, sondern werden separat auf der Startseite gezeigt. Aus = sie zählen wie jede andere fehlende Karte.",
   "endgame.enable":"Karten über einem Preis-Schwellwert zurückstellen",
   "endgame.threshold":"Schwellwert",
-  "wizard.endgameTitle":"Wie mit sehr teuren Karten umgehen","wizard.endgameDesc":"Manche Singles kosten hunderte Euro. Binduno kann sie zurückstellen, damit eine Reserved-List-Karte nicht ein ganzes Set unbezahlbar aussehen lässt. Jederzeit änderbar unter Einstellungen → Vervollständigung.",
+  "wizard.endgameTitle":"Wie mit sehr teuren Karten umgehen","wizard.endgameDesc":"Manche Singles kosten hunderte Euro — oft alte Karten, die nie neu aufgelegt werden. Binduno kann sie zurückstellen, damit eine einzelne sehr teure Karte nicht ein ganzes Set unbezahlbar aussehen lässt. Jederzeit änderbar unter Einstellungen → Vervollständigung.",
   "wizard.egSetAside":"Karten ab {eur} zurückstellen","wizard.egSetAsideDesc":"Sie stehen separat auf der Startseite und fließen nicht in Set-Kosten/Fehlmengen ein.",
   "wizard.egCountAll":"Jede Karte zählen","wizard.egCountAllDesc":"Keine Preisgrenze — teure Karten sind normale fehlende Karten.",
-  "wizard.cmTitle":"Cardmarket-Browser-Helfer","wizard.cmDesc":"Optional: ein Userscript, das Single-Angebote auf cardmarket.com danach markiert, ob die Karte schon in deiner Sammlung ist. Jederzeit einrichtbar unter Einstellungen → Cardmarket.",
+  "wizard.cmTitle":"Cardmarket-Browser-Helfer","wizard.cmDesc":"Optional: ein kleines Script, das Single-Angebote auf cardmarket.com danach markiert, ob die Karte schon in deiner Sammlung ist. Jederzeit einrichtbar unter Einstellungen → Cardmarket.",
   "wizard.cmOpen":"Einrichtung öffnen",
   "wizard.collectorTitle":"Welche Art von Sammler bist du?",
   "wizard.collectorDesc":"Das legt fest, wie Binduno die Set-Vervollständigung misst. Jederzeit änderbar unter Einstellungen → Set-Ziele.",
@@ -8903,6 +8912,26 @@ def run_tray(url, autoopen=False):
             try:
                 Foundation.NSTimer.scheduledTimerWithTimeInterval_repeats_block_(
                     1.5, False, lambda _t: _reassert())
+            except Exception:                                 # noqa: BLE001
+                pass
+
+            # A bare NSStatusItem (no full AppKit app lifecycle behind it, the
+            # way a normal signed menu-bar app has) can also get silently
+            # dropped later — after sleep/wake or a WindowServer restart —
+            # with no exception and no signal to the process. Confirmed on
+            # this Mac: 8 other menu-bar icons survive that, only Binduno's
+            # goes missing. Two nets: react to wake immediately, and a slow
+            # heartbeat as a catch-all for whatever else causes it.
+            try:
+                AppKit.NSWorkspace.sharedWorkspace().notificationCenter() \
+                    .addObserverForName_object_queue_usingBlock_(
+                        AppKit.NSWorkspaceDidWakeNotification, None, None,
+                        lambda _n: _reassert())
+            except Exception:                                 # noqa: BLE001
+                pass
+            try:
+                Foundation.NSTimer.scheduledTimerWithTimeInterval_repeats_block_(
+                    45.0, True, lambda _t: _reassert())
             except Exception:                                 # noqa: BLE001
                 pass
             _open_browser()
