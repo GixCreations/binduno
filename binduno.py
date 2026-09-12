@@ -16,8 +16,8 @@ import urllib.request
 from datetime import datetime, timedelta
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-VERSION = "6.13"
-SCHEMA = 18
+VERSION = "6.14"
+SCHEMA = 19
 
 
 def _env(name, *legacy):
@@ -985,9 +985,13 @@ def refresh_cards():
                 special = (bool(set(k.get("promo_types") or []) & set(PROMO_LABEL))
                            or bool(set(k.get("frame_effects") or []) & SPECIAL_FRAMES)
                            or k.get("border_color") == "borderless")
+                # The number-vs-psize backstop is applied per set below, once
+                # the total imported count per set is known (see "numeric
+                # extras backstop" further down) — comparing a lone card's
+                # number in isolation misfires on sets whose numbering isn't
+                # actually 1..psize (see that comment for why).
                 extra = 1 if (special or k.get("promo") or k.get("variation")
-                              or k.get("oversized")
-                              or (psize and ni > psize)) else 0
+                              or k.get("oversized")) else 0
                 rows.append((code, cn, ni,
                              _norm_name(k.get("name", "")), k.get("type_line") or "",
                              (k.get("rarity") or "r")[:1],
@@ -1001,6 +1005,28 @@ def refresh_cards():
                              (k.get("purchase_uris") or {}).get("cardmarket", "") or "",
                              k.get("scryfall_uri", "") or "", legal,
                              variant, ",".join(fin)))
+
+        # Numeric extras backstop: a printing whose number exceeds the set's
+        # declared size (psize) is only a meaningful "this is bonus content"
+        # signal when the set actually HAS more cards than psize implies —
+        # Time Spiral's 121 timeshifted cards numbered 302+ on top of a
+        # printed_size of 301. When printed_size is unset on Scryfall, psize
+        # falls back to card_count, i.e. the set's own total — nothing can be
+        # "extra by count" there since total == psize by construction. Some
+        # very old sets number their cards non-sequentially anyway (Renaissance:
+        # 122 cards, numbered with gaps up to 189) — comparing each card's
+        # number to psize in isolation flagged every one of those as an extra,
+        # hiding a fully ordinary base set behind the "off-goal" filter.
+        set_counts = {}
+        for r in rows:
+            set_counts[r[0]] = set_counts.get(r[0], 0) + 1
+        for i, r in enumerate(rows):
+            if r[10]:
+                continue
+            code, ni = r[0], r[2]
+            psize = sets[code][4] or 0
+            if psize and set_counts[code] > psize and ni > psize:
+                rows[i] = r[:10] + (1,) + r[11:]
 
         # Cardmarket numbers the printings of one card name inside a set as
         # V.1, V.2 ... in collector-number order. Mirror that so want lists
