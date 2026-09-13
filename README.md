@@ -100,7 +100,7 @@ Paste a deck list from **Moxfield, Archidekt, MTG Arena, MTGO, TappedOut, Deckst
 <p align="center"><img src="docs/pricehistory.jpg" width="880" alt="Price history graph on a card page"></p>
 <p align="center"><img src="docs/watchlist.jpg" width="880" alt="Price watchlist with a 7/30-day/1-year/Max range switch"></p>
 
-> Right after a fresh install the history reaches back about 90 days (the size of MTGJSON's public price file). Binduno then logs prices itself every day it runs, so the history fills in on its own — after a year, *1 Y* really is a year.
+> Right after a fresh install the history reaches back further than 90 days if the project's own price server is reachable (it's been logging daily since it went up), or about 90 days from MTGJSON's public price file otherwise. Binduno then logs prices itself every day it runs, so the history fills in on its own — after a year, *1 Y* really is a year.
 
 ### The Cardmarket browser helper
 
@@ -185,8 +185,8 @@ Open **Settings → Update & Help → Update App → "Update from GitHub"** and 
 
 - **One file.** `binduno.py`, Python 3.9+, standard library only. The web UI lives in the same file.
 - **Local storage.** A SQLite database in your user application‑data folder.
-- **Card data.** Scryfall's public bulk export (`all_cards`) plus set metadata. Prices are Cardmarket's EUR trend figures, via Scryfall; deeper price history is backfilled once from MTGJSON. Card refresh also pulls Cardmarket's public product list once to map Secret Lair cards to their exact drop.
-- **Nothing leaves your machine** except the card‑data download from Scryfall and, if you use the browser helper, the pages you already opened on Cardmarket.
+- **Card data.** Scryfall's public bulk export (`all_cards`) plus set metadata. Prices are Cardmarket's EUR trend figures, via Scryfall; deeper price history is backfilled once, from the project's own price server if it's reachable (it logs daily and so builds up more than 90 days over time) or from MTGJSON otherwise. Card refresh also pulls Cardmarket's public product list once to map Secret Lair cards to their exact drop.
+- **Nothing leaves your machine** except the card‑data download from Scryfall, that one‑time price backfill request, and, if you use the browser helper, the pages you already opened on Cardmarket.
 
 ---
 
