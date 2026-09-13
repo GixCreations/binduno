@@ -16,7 +16,7 @@ import urllib.request
 from datetime import datetime, timedelta
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-VERSION = "6.14"
+VERSION = "6.15"
 SCHEMA = 19
 
 
@@ -2473,16 +2473,20 @@ def card_search(c, p):
     # collapsed by name the price test has to hit the cheapest printing, so it
     # belongs in HAVING; otherwise it is a plain row filter
     having, hargs = [], []
+    # Foil-only printings (common on modern foil-etched/surge-foil treatments)
+    # have no k.eur at all. That used to make COALESCE(k.eur,0) read as "free"
+    # and slip through any max-price filter no matter their real (foil) price
+    # — fall back to k.eur_foil exactly like the price shown in the UI does.
     if price_min is not None:
         if uniq:
-            having.append("MIN(k.eur) >= ?"); hargs.append(price_min)
+            having.append("MIN(COALESCE(k.eur,k.eur_foil,0)) >= ?"); hargs.append(price_min)
         else:
-            where.append("COALESCE(k.eur,0) >= ?"); args.append(price_min)
+            where.append("COALESCE(k.eur,k.eur_foil,0) >= ?"); args.append(price_min)
     if price_max is not None:
         if uniq:
-            having.append("MIN(k.eur) <= ?"); hargs.append(price_max)
+            having.append("MIN(COALESCE(k.eur,k.eur_foil,0)) <= ?"); hargs.append(price_max)
         else:
-            where.append("COALESCE(k.eur,0) <= ?"); args.append(price_max)
+            where.append("COALESCE(k.eur,k.eur_foil,0) <= ?"); args.append(price_max)
     w = " AND ".join(where)
     grp = ("GROUP BY k.name" + (" HAVING " + " AND ".join(having) if having else "")) if uniq else ""
     args = args + hargs
@@ -2490,7 +2494,11 @@ def card_search(c, p):
     # when collapsing by name, MIN() makes SQLite return the row of the cheapest
     # printing for the bare columns, so set/number/price stay consistent
     eur_expr = "MIN(k.eur)" if uniq else "k.eur"
-    sortmap = {"name": "k.name", "released": "s.released", "number": "k.num_int",
+    # "Sort by name" has to follow whichever name is actually shown — with the
+    # card-name-language setting on German, sorting on the English k.name left
+    # the visible (German) order looking unsorted.
+    name_col = "COALESCE(k.name_de,k.name)" if p.get("lang") == "de" else "k.name"
+    sortmap = {"name": name_col, "released": "s.released", "number": "k.num_int",
                "price": ("MIN(k.eur)" if uniq else "COALESCE(k.eur,0)"),
                "rarity": "k.rarity",
                "qty": "COALESCE(o.qty,0)", "cmc": "k.cmc", "set": "s.name"}
@@ -2538,8 +2546,8 @@ def card_detail(c, code, number):
         else:
             qty_normal += x["q"]
     prints = []
-    for x in c.execute("""SELECT k.set_code, k.number, k.name_de, k.eur, k.eur_foil, s.name set_name,
-                                 s.released, COALESCE(o.qty,0) qty
+    for x in c.execute("""SELECT k.set_code, k.number, k.name_de, k.eur, k.eur_foil, k.img,
+                                 s.name set_name, s.released, COALESCE(o.qty,0) qty
                           FROM cards k JOIN sets s ON s.code=k.set_code
                           LEFT JOIN (SELECT set_code,number,SUM(qty) qty FROM collection
                                      GROUP BY set_code,number) o
@@ -2547,7 +2555,7 @@ def card_detail(c, code, number):
                           WHERE k.name=? AND k.digital=0
                           ORDER BY s.released DESC""", (r["name"],)):
         prints.append({"set": x["set_code"], "setName": x["set_name"], "number": x["number"],
-                       "nameDe": x["name_de"] or "",
+                       "nameDe": x["name_de"] or "", "img": x["img"] or "",
                        "released": x["released"], "eur": round(x["eur"] or 0, 2),
                        "foil": round(x["eur_foil"] or 0, 2), "qty": x["qty"]})
     legal = {}
@@ -2605,7 +2613,10 @@ def missing_names(c, p):
     args = args + hargs
     total = c.execute(f"SELECT COUNT(*) n, COALESCE(SUM(mp),0) v FROM "
                       f"(SELECT MIN(k.eur) mp {base})", args).fetchone()
-    sortmap = {"name": "k.name", "price": "MIN(k.eur)", "rarity": "k.rarity",
+    # Same reasoning as card_search: sort on whatever name is actually shown.
+    # Grouped by k.name, so the German column needs its own aggregate too.
+    name_col = "COALESCE(MIN(k.name_de),k.name)" if p.get("lang") == "de" else "k.name"
+    sortmap = {"name": name_col, "price": "MIN(k.eur)", "rarity": "k.rarity",
                "released": "s.released", "set": "s.name"}
     sort = sortmap.get(p.get("sort", "price"), "MIN(k.eur)")
     d = "DESC" if p.get("dir") == "-1" else "ASC"
@@ -2838,6 +2849,7 @@ class Handler(BaseHTTPRequestHandler):
             self.send_json({"version": VERSION,
                             "dbPath": DB,
                             "homeDir": os.path.expanduser("~"),
+                            "platform": sys.platform,
                             "stats": cached_home(c),
                             "hasCards": has_cards,
                             "hasCollection": has_collection,
@@ -3546,12 +3558,12 @@ textarea{width:100%;height:130px;background:var(--panel2);color:var(--text);bord
   font-size:14px;line-height:1.3;opacity:0;transition:opacity .13s}
 .cc:hover .tilecart{opacity:1}
 .cc .tilecart:hover{border-color:var(--gold);color:var(--gold)}
-.cc .owned{position:absolute;bottom:7px;left:7px;background:rgba(15,19,25,.92);
+.cc .owned{display:inline-block;margin-left:6px;background:var(--panel2);
   border:1px solid var(--ok);color:var(--ok);border-radius:11px;padding:1px 8px;
-  font-family:var(--mono);font-size:11px}
-.cc .miss{position:absolute;bottom:7px;left:7px;background:rgba(15,19,25,.92);
+  font-family:var(--mono);font-size:11px;vertical-align:1px}
+.cc .miss{display:inline-block;margin-left:6px;background:var(--panel2);
   border:1px solid var(--line);color:var(--muted);border-radius:11px;padding:1px 8px;
-  font-family:var(--mono);font-size:11px}
+  font-family:var(--mono);font-size:11px;vertical-align:1px}
 .cc .meta{padding:8px 10px;display:flex;flex-direction:column;gap:3px}
 .cc .cn{font-size:13px;line-height:1.25;overflow-wrap:anywhere}
 .cc .cset{font-family:var(--mono);font-size:10.5px;color:var(--dim);
@@ -4145,9 +4157,15 @@ en:{
   "manageApp.filePickerNote":"Choose binduno.py — the file picker shows all files "+
     "because macOS has no file type registered for .py",
   "manageApp.installBtn":"Install update","manageApp.installing":"Installing…",
-  "manageApp.rebuildTitle":"Rebuild the macOS app",
-  "manageApp.rebuildDesc":"If the app icon or launcher ever breaks, run "+
-    "<code>python3 binduno.py --install-app</code> once in Terminal.",
+  "manageApp.rebuildTitleMac":"Rebuild the macOS app",
+  "manageApp.rebuildDescMac":"If the app icon or launcher ever breaks: open Terminal, "+
+    "<code>cd</code> into the folder that holds <code>binduno.py</code>, then run "+
+    "<code>python3 binduno.py --install-app</code> there.",
+  "manageApp.rebuildTitleWin":"Rebuild the Windows .exe",
+  "manageApp.rebuildDescWin":"If it ever needs rebuilding: open a command prompt in "+
+    "the folder that holds <code>binduno.py</code> and run "+
+    "<code>py binduno.py --build-exe</code>. The new <code>Binduno.exe</code> appears "+
+    "in a <code>dist</code> folder next to it.",
   "manageApp.whereThingsLive":"Where things live",
   "manageApp.database":"Database","manageApp.logFile":"Log file",
   "manageApp.updatedMsg":"Updated {from} → {to}. Restarting…",
@@ -4167,8 +4185,12 @@ en:{
   "setPage.thType":"Type","setPage.thFoil":"Foil","setPage.thCopies":"Copies",
   "setPage.thOwned":"Owned","setPage.thNote":"Note","setPage.yes":"yes","setPage.no":"no",
   "buyPage.title":"Buy missing cards",
-  "buyPage.desc":"{setName} — {n} {cards} whose name you own in no printing of this set. "+
-    "Prices are Cardmarket trend prices, not the cheapest offer.",
+  "buyPage.desc":"{setName} — {n} {cards} whose name you own in no printing of this set.",
+  "buyPage.infoTitle":"Prices & shipping",
+  "buyPage.infoTip":"Prices are Cardmarket trend prices, not the cheapest offer. Shipping "+
+    "is estimated: about {cps} cards per seller, then Cardmarket letter rates (up to 17 "+
+    "cards 1.40 €, up to 40 cards 2.10 €) or 5.00 € tracked once an order passes 25 €. "+
+    "Hover any shipping figure below for the exact calculation.",
   "buyPage.cardSingular":"card","buyPage.cardPlural":"cards",
   "buyPage.pickGroup":"Pick a group to add it straight to the Wants-List Cart.",
   "buyPage.allMissing":"All missing cards",
@@ -4600,9 +4622,15 @@ de:{
   "manageApp.filePickerNote":"binduno.py auswählen — der Dateiauswahl-Dialog zeigt alle "+
     "Dateien, da macOS keinen Dateityp für .py registriert hat",
   "manageApp.installBtn":"Update installieren","manageApp.installing":"Installiert…",
-  "manageApp.rebuildTitle":"Die macOS-App neu bauen",
-  "manageApp.rebuildDesc":"Falls Icon oder Starter je kaputtgehen, einmal "+
-    "<code>python3 binduno.py --install-app</code> im Terminal ausführen.",
+  "manageApp.rebuildTitleMac":"Die macOS-App neu bauen",
+  "manageApp.rebuildDescMac":"Falls Icon oder Starter je kaputtgehen: Terminal öffnen, "+
+    "mit <code>cd</code> in den Ordner wechseln, in dem <code>binduno.py</code> liegt, "+
+    "und dort <code>python3 binduno.py --install-app</code> ausführen.",
+  "manageApp.rebuildTitleWin":"Die Windows-.exe neu bauen",
+  "manageApp.rebuildDescWin":"Falls sie je neu gebaut werden muss: Eingabeaufforderung "+
+    "im Ordner mit <code>binduno.py</code> öffnen und dort "+
+    "<code>py binduno.py --build-exe</code> ausführen. Die neue <code>Binduno.exe</code> "+
+    "landet in einem <code>dist</code>-Ordner daneben.",
   "manageApp.whereThingsLive":"Wo alles liegt",
   "manageApp.database":"Datenbank","manageApp.logFile":"Logdatei",
   "manageApp.updatedMsg":"Aktualisiert {from} → {to}. Startet neu…",
@@ -4622,8 +4650,12 @@ de:{
   "setPage.thType":"Typ","setPage.thFoil":"Foil","setPage.thCopies":"Kopien",
   "setPage.thOwned":"In Besitz","setPage.thNote":"Notiz","setPage.yes":"ja","setPage.no":"nein",
   "buyPage.title":"Fehlende Karten kaufen",
-  "buyPage.desc":"{setName} — {n} {cards}, die du in keinem Druck dieses Sets besitzt. "+
-    "Preise sind Cardmarket-Trendpreise, nicht das günstigste Angebot.",
+  "buyPage.desc":"{setName} — {n} {cards}, die du in keinem Druck dieses Sets besitzt.",
+  "buyPage.infoTitle":"Preise & Versand",
+  "buyPage.infoTip":"Preise sind Cardmarket-Trendpreise, nicht das günstigste Angebot. "+
+    "Versand geschätzt: ca. {cps} Karten pro Verkäufer, dann Cardmarket-Brieftarife (bis "+
+    "17 Karten 1,40 €, bis 40 Karten 2,10 €) oder 5,00 € versichert ab 25 € Bestellwert. "+
+    "Für die genaue Rechnung auf eine Versandzahl unten hovern.",
   "buyPage.cardSingular":"Kartenname","buyPage.cardPlural":"Kartennamen",
   "buyPage.pickGroup":"Gruppe wählen, um sie direkt in den Wants-Liste-Cart zu legen.",
   "buyPage.allMissing":"Alle fehlenden Karten",
@@ -5623,10 +5655,10 @@ const VAR=c=>(c.variant?`<span class="varlbl">${c.variant}</span>`:"")+
 const cardTile=c=>`<div class="cc" data-card="${c.set}|${c.number}">
   <div class="imgwrap">${c.img?`<img class="face" src="${c.img}" alt="${cardName(c)}" loading="lazy">`
     :`<div class="noimg">${cardName(c)}</div>`}
-    <span class="${c.qty?"owned":"miss"}">${c.qty?c.qty+"×":"0"}</span>
     <button class="tilecart" data-cart="${c.set}|${c.number}"
       title="${t('common.addToCart')}">+</button></div>
-  <div class="meta"><div class="cn">${cardName(c)}</div>
+  <div class="meta"><div class="cn">${cardName(c)}
+      <span class="${c.qty?"owned":"miss"}">${c.qty?c.qty+"×":"0"}</span></div>
     ${c.variant||c.extras?`<div class="vrow">${VAR(c)}</div>`:""}
     ${c.setName?`<div class="cset">${c.setName} · #${c.number}</div>`:""}
     <div class="cp">${c.eur?money(c.eur):(c.foil?"<em>foil</em> "+money(c.foil):"—")}${
@@ -5668,7 +5700,8 @@ function drawCards(){
     ["qty",t("setPage.thCopies")],["have",t("setPage.thOwned")]];
   const rows=DETAIL.cards.slice().sort((a,b)=>{
     let x=a[CS],y=b[CS];
-    if(CS==="number"){x=parseInt(a.number,10)||0;y=parseInt(b.number,10)||0;}
+    if(CS==="name"){x=cardName(a);y=cardName(b);}
+    else if(CS==="number"){x=parseInt(a.number,10)||0;y=parseInt(b.number,10)||0;}
     else if(CS==="rarity"){x=RORDER[a.rarity]??9;y=RORDER[b.rarity]??9;}
     else if(CS==="have"){x=a.have?1:0;y=b.have?1:0;}
     else if(CS==="eur"){x=a.eur||0;y=b.eur||0;}
@@ -5763,7 +5796,8 @@ async function buyPage(code){
     `<h1>${t("buyPage.title")}</h1>
      <p class="sub">${t("buyPage.desc",{setName:DETAIL.name,n,
        cards:n===1?t("buyPage.cardSingular"):t("buyPage.cardPlural")})}
-       ${shipNote()}</p>
+       <span data-tip-title="${t('buyPage.infoTitle')}" data-tip="${t('buyPage.infoTip',{cps:CPS})}"
+         style="margin-left:2px">ⓘ</span></p>
      <p class="sub">${t("buyPage.pickGroup")}</p>
      <div id="buyOpts"></div>`;
   bindCrumbs();
@@ -5864,7 +5898,8 @@ async function cardPage(sc,nr){
         `<div><span>${f}</span><span class="tag ${v[0]==="l"?"l":v[0]==="b"?"b":v[0]==="r"?"r":"n"}">${
           v.replace("_"," ").toUpperCase()}</span></div>`).join("")}</div>
       <h2>${t("cardPage.allPrintings")} <span class="sub" style="margin:0">${d.printings.length}</span></h2>
-      <div class="list">${d.printings.map(p=>`<div class="li" data-card="${p.set}|${p.number}" data-swap="1">
+      <div class="list">${d.printings.map(p=>`<div class="li" data-card="${p.set}|${p.number}" data-swap="1"
+        data-pop="${p.img||""}">
         <span class="nm">${p.setName}</span>
         <span class="mt">#${p.number} · ${p.released}</span>
         <span class="mt" style="flex:0 0 78px;text-align:right;color:var(--gold)">${
@@ -5935,7 +5970,7 @@ async function cardsPane(){
     rarity:CF.rarity,colors:CF.colors.join(""),colormode:CF.colormode,
     owned:CF.owned,unique:CF.unique,baseonly:CF.baseonly,allsets:CF.allsets,noprice:CF.noprice,
     minprice:CF.minprice,maxprice:CF.maxprice,
-    sort:CF.sort,dir:CF.dir,page:CF.page,per:CF.per});
+    sort:CF.sort,dir:CF.dir,page:CF.page,per:CF.per,lang:CARDLANG});
   box.innerHTML=`<p class="sub">${t("browse.searching")}</p>`;
   const r=await getJSON("/api/cards?"+p);
   const pages=Math.max(1,Math.ceil(r.total/r.per));
@@ -6084,7 +6119,7 @@ function cartView(){
   let r=CART.items.slice();
   if(CQ){const q=CQ.toLowerCase();
     r=r.filter(i=>i.name.toLowerCase().includes(q)||i.setName.toLowerCase().includes(q));}
-  const key={set:i=>i.setName+" "+i.name,name:i=>i.name,price:i=>i.eur||i.foil,
+  const key={set:i=>i.setName+" "+i.name,name:i=>cardName(i),price:i=>i.eur||i.foil,
              line:i=>(i.eur||i.foil)*i.qty,qty:i=>i.qty}[CSORT];
   r.sort((a,b)=>{const x=key(a),y=key(b);
     return (typeof x==="string"?x.localeCompare(y):x-y)*CDIR;});
@@ -6626,7 +6661,7 @@ async function drawMissing(){
   const el=$("#mOut");el.innerHTML=`<p class="sub">${t("missing.loading")}</p>`;
   const p=new URLSearchParams({q:MF.q,rarity:MF.rarity,set:MF.set,maxprice:MF.maxprice,
     minprice:MF.minprice,hideendgame:MF.hideendgame,sort:MF.sort,dir:MF.dir,
-    page:MF.page,per:MF.per});
+    page:MF.page,per:MF.per,lang:CARDLANG});
   const r=await fetch("/api/missing?"+p,{cache:"no-store"}).then(x=>x.json());
   const pages=Math.max(1,Math.ceil(r.total/r.per));
   el.innerHTML=`<div class="cards" style="margin:0 0 14px">
@@ -7055,39 +7090,63 @@ function updatePane(){
     else if(!s.error){await load();$("#refMsg").textContent=doneMsg;}
   }
 }
+// Which category blocks are expanded (persists across re-renders — a fresh
+// setsPane() call rebuilds `groups` from the latest SETS but keeps whichever
+// categories the user had opened) and the live search text.
+let SETS_EXPANDED=new Set(),SETS_Q="";
 function setsPane(sel){
   const groups={};
   SETS.forEach(s=>{(groups[s.kind]=groups[s.kind]||[]).push(s);});
-  const keys=Object.keys(groups).sort();
   $(sel||"#sub").innerHTML=`<h2 style="margin-top:0">${t("manageSets.title")}</h2>
   <p class="sub">${t("manageSets.desc")}</p>
-  <div class="tools"><input type="search" id="sq" placeholder="${t("manageSets.searchPlaceholder")}">
+  <div class="tools"><input type="search" id="sq" placeholder="${t("manageSets.searchPlaceholder")}" value="${SETS_Q}">
     <button id="allOn">${t("manageSets.includeEverything")}</button>
     <button id="allDef">${t("manageSets.restoreDefaults")}</button></div>
-  ${keys.map(k=>{
-    const g=groups[k],on=g.filter(s=>s.counted).length;
-    return `<div class="list" style="margin-bottom:10px"><div class="li" style="background:var(--panel2)">
-      <span class="nm"><b>${k}</b></span><span class="mt">${t("manageSets.ofCounted",{on,total:g.length})}</span>
-      <button data-grp="${k}" data-m="exclude">${t("manageSets.excludeAll")}</button>
-      <button data-grp="${k}" data-m="include">${t("manageSets.includeAll")}</button></div>
-      ${g.map(s=>`<div class="li srow" data-n="${s.name.toLowerCase()} ${s.code}">
-        ${icon(s,17)}<span class="nm">${s.name}</span>
-        <span class="mt">${s.code.toUpperCase()} · ${s.released}</span>
-        <button data-tog2="${s.code}" style="flex:0 0 108px">${
-          s.counted?t("manageSets.counted"):t("manageSets.excluded")}</button></div>`).join("")}</div>`;}).join("")}`;
-  $("#sq").oninput=e=>{const q=e.target.value.toLowerCase();
-    document.querySelectorAll(".srow").forEach(r=>
-      r.style.display=r.dataset.n.includes(q)?"":"none");};
-  document.querySelectorAll("[data-tog2]").forEach(b=>b.onclick=async()=>{
-    const s=SETS.find(x=>x.code===b.dataset.tog2);
-    await fetch("/api/set-pref",{method:"POST",
-      body:JSON.stringify({code:s.code,mode:s.counted?"exclude":"include"})});
-    await load();setsPane(sel);});
-  document.querySelectorAll("[data-grp]").forEach(b=>b.onclick=async()=>{
-    const codes=groups[b.dataset.grp].map(s=>s.code);
-    await fetch("/api/set-pref-bulk",{method:"POST",
-      body:JSON.stringify({codes,mode:b.dataset.m})});
-    await load();setsPane(sel);});
+  <div id="setsBody"></div>`;
+  const renderBody=()=>{
+    const q=SETS_Q.trim().toLowerCase();
+    const keys=Object.keys(groups).sort();
+    $("#setsBody").innerHTML=keys.map(k=>{
+      const g=groups[k],on=g.filter(s=>s.counted).length;
+      // A search opens every matching category regardless of its saved
+      // expand state (and closes non-matching ones) without touching that
+      // saved state — clearing the search goes back to what was open before.
+      const matches=q?g.filter(s=>(s.name+" "+s.code).toLowerCase().includes(q)):null;
+      if(q&&matches.length===0)return"";
+      const open=q?true:SETS_EXPANDED.has(k);
+      const rows=open?(matches||g):[];
+      return `<div class="list" style="margin-bottom:10px">
+        <div class="li" style="background:var(--panel2);cursor:pointer" data-grptoggle="${k}">
+          <span class="mt" style="flex:0 0 14px">${open?"▾":"▸"}</span>
+          <span class="nm"><b>${k}</b></span><span class="mt">${t("manageSets.ofCounted",{on,total:g.length})}</span>
+          <button data-grp="${k}" data-m="exclude">${t("manageSets.excludeAll")}</button>
+          <button data-grp="${k}" data-m="include">${t("manageSets.includeAll")}</button></div>
+        ${rows.map(s=>`<div class="li srow">
+          ${icon(s,17)}<span class="nm">${s.name}</span>
+          <span class="mt">${s.code.toUpperCase()} · ${s.released}</span>
+          <button data-tog2="${s.code}" style="flex:0 0 108px">${
+            s.counted?t("manageSets.counted"):t("manageSets.excluded")}</button></div>`).join("")}</div>`;
+    }).join("");
+    document.querySelectorAll("[data-grptoggle]").forEach(el=>el.onclick=()=>{
+      const k=el.dataset.grptoggle;
+      SETS_EXPANDED.has(k)?SETS_EXPANDED.delete(k):SETS_EXPANDED.add(k);
+      renderBody();});
+    document.querySelectorAll("[data-tog2]").forEach(b=>b.onclick=async()=>{
+      const s=SETS.find(x=>x.code===b.dataset.tog2);
+      await fetch("/api/set-pref",{method:"POST",
+        body:JSON.stringify({code:s.code,mode:s.counted?"exclude":"include"})});
+      await load();setsPane(sel);});
+    document.querySelectorAll("[data-grp]").forEach(b=>b.onclick=async ev=>{
+      ev.stopPropagation();                          // don't also fire the header's expand toggle
+      const codes=groups[b.dataset.grp].map(s=>s.code);
+      await fetch("/api/set-pref-bulk",{method:"POST",
+        body:JSON.stringify({codes,mode:b.dataset.m})});
+      await load();setsPane(sel);});
+  };
+  renderBody();
+  // Re-renders only #setsBody, not the search input itself — retyping on
+  // every keystroke would recreate the field and throw the cursor out of it.
+  $("#sq").oninput=e=>{SETS_Q=e.target.value;renderBody();};
   $("#allOn").onclick=async()=>{
     await fetch("/api/set-pref-bulk",{method:"POST",
       body:JSON.stringify({codes:SETS.map(s=>s.code),mode:"include"})});
@@ -7118,6 +7177,7 @@ function appPane(sel){
   const upd=(window.HAS&&window.HAS.update)||{};
   const acheck=window.HAS.autoUpdateCheck!==false;
   const ainst=!!window.HAS.autoUpdateInstall;
+  const PLATFORM=window.HAS.platform||"";
   $(sel||"#sub").innerHTML=`
   ${upd.available?`<div class="msg ok" style="max-width:640px">
       <b>${t("gh.available",{cur:upd.current||"",next:upd.latest,name:""})}</b>
@@ -7138,20 +7198,22 @@ function appPane(sel){
   <h2>${t("manageApp.title")}</h2>
   <p class="sub">${t("manageApp.desc")}</p>
   <div class="drop" id="updrop"><input type="file" id="upfile">
-    <div class="datei" style="margin-top:6px;font-family:var(--mono);font-size:11.5px;color:var(--dim)">
-      ${t("manageApp.filePickerNote")}</div></div>
+    ${PLATFORM==="darwin"?`<div class="datei" style="margin-top:6px;font-family:var(--mono);font-size:11.5px;color:var(--dim)">
+      ${t("manageApp.filePickerNote")}</div>`:""}</div>
   <button id="upbtn" class="pri" disabled style="margin-top:10px">${t("manageApp.installBtn")}</button>
   <div id="upMsg"></div>
   <h2>${t("manageApp.wizardTitle")}</h2>
   <p class="sub">${t("manageApp.wizardDesc")}</p>
   <button id="restartWiz">${t("manageApp.wizardBtn")}</button>
-  <h2>${t("manageApp.rebuildTitle")}</h2>
-  <p class="sub">${t("manageApp.rebuildDesc")}</p>
+  ${PLATFORM==="darwin"?`<h2>${t("manageApp.rebuildTitleMac")}</h2>
+  <p class="sub">${t("manageApp.rebuildDescMac")}</p>`
+   :PLATFORM==="win32"?`<h2>${t("manageApp.rebuildTitleWin")}</h2>
+  <p class="sub">${t("manageApp.rebuildDescWin")}</p>`:""}
   <h2>${t("manageApp.whereThingsLive")}</h2>
   <div class="list"><div class="li"><span class="nm">${t("manageApp.database")}</span>
       <span class="mt" id="dbpath"></span></div>
-    <div class="li"><span class="nm">${t("manageApp.logFile")}</span>
-      <span class="mt">~/Library/Logs/Binduno.log</span></div></div>`;
+    ${PLATFORM==="darwin"?`<div class="li"><span class="nm">${t("manageApp.logFile")}</span>
+      <span class="mt">~/Library/Logs/Binduno.log</span></div>`:""}</div>`;
   const home=window.HAS.homeDir;
   $("#dbpath").textContent=home&&window.HAS.dbPath&&window.HAS.dbPath.startsWith(home)
     ?"~"+window.HAS.dbPath.slice(home.length):(window.HAS.dbPath||"");
