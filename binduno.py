@@ -16,7 +16,7 @@ import urllib.request
 from datetime import datetime, timedelta
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-VERSION = "6.39"
+VERSION = "6.40"
 SCHEMA = 19
 
 
@@ -4210,6 +4210,16 @@ textarea{width:100%;height:130px;background:var(--panel2);color:var(--text);bord
 .radio .d{display:block;color:var(--muted);font-size:12.5px;margin-top:2px}
 .prog{height:8px;background:#1d242e;border-radius:5px;overflow:hidden;margin:10px 0}
 .prog span{display:block;height:100%;background:var(--gold);transition:width .3s}
+#refreshFloat{position:fixed;right:18px;bottom:18px;z-index:80;display:none;
+  background:var(--panel,#12161d);border:1px solid var(--line,#232a34);border-radius:10px;
+  padding:13px 16px;width:min(300px,calc(100vw - 36px));box-shadow:0 12px 34px rgba(0,0,0,.4)}
+#refreshFloat .rf-head{display:flex;align-items:center;gap:9px;font-size:13px;
+  color:var(--text);margin-bottom:9px}
+#refreshFloat .rf-spin{width:13px;height:13px;border-radius:50%;flex:0 0 auto;
+  border:2px solid var(--line);border-top-color:var(--gold);animation:rfSpin .8s linear infinite}
+#refreshFloat .rf-msg{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+#refreshFloat .prog{margin:0}
+@keyframes rfSpin{to{transform:rotate(360deg)}}
 #busy{position:fixed;inset:0;z-index:500;display:none;align-items:center;justify-content:center;
   background:rgba(8,10,14,.72);backdrop-filter:blur(2px)}
 #busy .busybox{background:var(--panel,#12161d);border:1px solid var(--line,#232a34);
@@ -4493,6 +4503,10 @@ non-commercial reference only.
 <div style="margin-top:8px">Made with &#10084;&#65039; in Odenwald</div></footer>
 <div id="tipbox" role="tooltip"></div>
 <div id="cardpop"><img alt=""></div>
+<div id="refreshFloat">
+  <div class="rf-head"><span class="rf-spin"></span><span class="rf-msg" id="refreshFloatMsg"></span></div>
+  <div class="prog"><span id="refreshFloatBar" style="width:0%"></span></div>
+</div>
 
 
 <script>
@@ -8668,6 +8682,43 @@ paintNav();
 applyGridCols();
 fetch("/api/ui-lang",{method:"POST",body:JSON.stringify({lang:LANG})}).catch(()=>{});
 route();
+// Floating card-data-refresh indicator: page-independent, so it stays visible
+// across navigation instead of vanishing with whichever page happened to
+// trigger it (the wizard/manage-page progress bars only exist while you're
+// on that exact page) - and it's the only UI for the automatic daily
+// background sync (_auto_sync_check), which never went through either of
+// those page-specific triggers and previously had no visible indicator at
+// all. Runs for the whole tab lifetime; idles at a slow poll when nothing is
+// running, so the constant background cost is one tiny request every few
+// seconds.
+(function(){
+  const box=$("#refreshFloat"), bar=$("#refreshFloatBar"), msg=$("#refreshFloatMsg");
+  let wasRunning=false;
+  async function tick(){
+    let s;
+    try{ s=await fetch("/api/refresh-status",{cache:"no-store"}).then(r=>r.json()); }
+    catch(e){ setTimeout(tick,4000); return; }
+    if(s.running){
+      wasRunning=true;
+      box.style.display="block";
+      bar.style.width=Math.max(0,Math.min(100,s.pct||0))+"%";
+      msg.textContent=s.step||"";
+      setTimeout(tick,700);
+    }else{
+      box.style.display="none";
+      if(wasRunning){
+        // Just finished (manually or the automatic background sync) - reload
+        // cached data and re-render whatever page is currently open so it
+        // reflects the new card data without the user having to do it by hand.
+        wasRunning=false;
+        FORCE_RELOAD=true;
+        route();
+      }
+      setTimeout(tick,4000);
+    }
+  }
+  tick();
+})();
 </script></body></html>"""
 
 
