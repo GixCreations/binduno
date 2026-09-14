@@ -63,6 +63,41 @@ release needed. Still worth folding the same entry into `CM_SLD_EXPANSIONS`
 in `binduno.py` on the next real release anyway, so a fresh install (or one
 with no network path to binduno.com) isn't missing it either.
 
+## Rough install-count tracker (`count_installs.py`)
+
+The maintainer's own curiosity, nothing more: a *very* rough sense of how
+many people have installed Binduno, without adding any tracking to the app
+itself. `/pricedata/history.sqlite.gz` is fetched exactly once by a fresh
+install doing its one-time price-history backfill
+(`backfill_price_history()` in `binduno.py`) - already documented,
+already-disclosed traffic, not anything new. `count_installs.py` just
+counts matching lines in nginx's own `binduno.access.log` after the fact,
+on the server. No new endpoint, no new request, nothing any Binduno
+install does differently, nothing sent anywhere.
+
+Since that log rotates daily (14 days kept, see
+`/etc/logrotate.d/nginx`), the script tracks the *increment* since its
+last run (detecting a rotation when the current match count is lower than
+last time, and treating everything currently in the file as new in that
+case) and keeps a running total that survives rotation, in
+`/opt/binduno-pricelogger/install-count/`:
+
+- `total.txt` — the running total (all that's usually needed)
+- `history.csv` — `timestamp,running_total` appended every run, so growth
+  over time is visible, not just the latest number
+- `last_line_count.txt` — internal checkpoint, not meaningful on its own
+
+Runs every 6 hours via `binduno-installcount.timer` (same
+`binduno-price` user as everything else here). Check the current number:
+
+```bash
+ssh <admin>@<vps> "sudo cat /opt/binduno-pricelogger/install-count/total.txt"
+```
+
+Not exact - a failed/retried backfill could count twice, an install that
+never reaches this server at all counts zero - but a reasonable
+order-of-magnitude signal. Nothing here is exposed publicly.
+
 ## Deployment (already set up on the VPS, kept here for reference)
 
 ```bash
