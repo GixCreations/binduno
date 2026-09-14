@@ -98,6 +98,16 @@ Not exact - a failed/retried backfill could count twice, an install that
 never reaches this server at all counts zero - but a reasonable
 order-of-magnitude signal. Nothing here is exposed publicly.
 
+**Incident, 2026-09-14 (day this was set up):** the first real count showed
+13 - all 13 turned out to be the *same* IP address, which turned out to be
+the assistant's own machine from that day's live testing against the real
+production server (fresh test databases each time, so each one triggered
+its own one-time backfill). `EXCLUDE_IPS` in `count_installs.py` now
+excludes known non-real IPs like that one; the counter was reset to 0
+afterward. Add to `EXCLUDE_IPS` (and re-deploy, `sudo systemctl` not
+needed - the timer just runs the updated file next time) after any future
+session that does live testing here from a different IP.
+
 ## Deployment (already set up on the VPS, kept here for reference)
 
 ```bash
