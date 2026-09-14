@@ -16,7 +16,7 @@ import urllib.request
 from datetime import datetime, timedelta
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-VERSION = "6.30"
+VERSION = "6.31"
 SCHEMA = 19
 
 
@@ -1026,6 +1026,19 @@ def refresh_cards(bulk_type="all_cards"):
         opener = gzip.open if magic == b"\x1f\x8b" else open
 
         REFRESH.update(step="Reading cards", pct=68)
+        # One-off diagnostic (2026-09): a report of refresh_cards() taking ~3x
+        # longer and using ~9x more memory on Windows than macOS for the same
+        # bulk file, even with Defender fully excluded (ruling out AV
+        # scanning) - a PyInstaller onefile build occasionally fails to bundle
+        # the C-accelerated _json extension, silently falling back to the much
+        # slower, more memory-hungry pure-Python decoder. Logged every run
+        # (cheap) so it's visible in Settings -> History without needing
+        # remote access to the machine that's slow.
+        _c_json = json.decoder.scanstring is not json.decoder.py_scanstring
+        log(c, "Card data", f"Diagnostics: Python {sys.version.split()[0]} on "
+                            f"{sys.platform}, frozen={getattr(sys, 'frozen', False)}, "
+                            f"json C-accelerator={'yes' if _c_json else 'NO (pure-Python fallback - much slower)'}")
+        _t_parse = time.time()
         rows = []
         alt_pick = {}
         with opener(tmp, "rt", encoding="utf-8") as f:
@@ -1040,6 +1053,8 @@ def refresh_cards(bulk_type="all_cards"):
                             it.append(json.loads(line))
                         except json.JSONDecodeError:
                             pass
+            log(c, "Card data", f"Diagnostics: JSON parse took {time.time() - _t_parse:.1f}s "
+                                f"for {len(it):,} objects")
             # Some sets never had an English printing (Renaissance, FBB, ...).
             # Import those in their own language so they are at least visible.
             # Language exclusivity is decided per PRINTING (set + collector
