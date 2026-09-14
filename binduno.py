@@ -16,7 +16,7 @@ import urllib.request
 from datetime import datetime, timedelta
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-VERSION = "6.15"
+VERSION = "6.27"
 SCHEMA = 19
 
 
@@ -269,8 +269,9 @@ def init(c):
       set_code TEXT, number TEXT, qty INT DEFAULT 1, added TEXT,
       PRIMARY KEY(set_code, number));
     CREATE TABLE IF NOT EXISTS collection(
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
       set_code TEXT, number TEXT, name TEXT, qty INT, lang TEXT, foil TEXT,
-      PRIMARY KEY(set_code, number, lang, foil));
+      purchase_price REAL, purchase_date TEXT, price_source TEXT);
     CREATE TABLE IF NOT EXISTS history(
       id INTEGER PRIMARY KEY AUTOINCREMENT, ts TEXT, action TEXT, detail TEXT);
     CREATE TABLE IF NOT EXISTS meta(k TEXT PRIMARY KEY, v TEXT);
@@ -285,6 +286,8 @@ def init(c):
     CREATE INDEX IF NOT EXISTS ix_cards_name ON cards(name);
     CREATE INDEX IF NOT EXISTS ix_cards_rar ON cards(rarity);
     CREATE INDEX IF NOT EXISTS ix_coll_set ON collection(set_code);
+    CREATE INDEX IF NOT EXISTS ix_coll_setnum ON collection(set_code, number);
+    CREATE INDEX IF NOT EXISTS ix_coll_name ON collection(name);
     """)
     # add columns that later versions introduced (CREATE TABLE IF NOT EXISTS
     # silently leaves existing tables alone, so this has to be explicit)
@@ -309,6 +312,31 @@ def init(c):
                 except sqlite3.Error:
                     pass
     c.commit()
+    # One-time structural migration: collection used to be one row per
+    # (set_code, number, lang, foil) with a qty count. Purchase-price tracking
+    # needs several rows per key (one per acquisition batch — two batches of
+    # the same printing can carry different prices/dates), which the old
+    # composite PRIMARY KEY forbids. ALTER TABLE can't drop a PRIMARY KEY, so
+    # this rebuilds the table; existing rows carry over with no purchase price
+    # recorded (price_source stays NULL) — every reader falls back to the live
+    # Cardmarket trend price for those until an import or manual edit sets one.
+    have_coll = {r["name"] for r in c.execute("PRAGMA table_info(collection)")}
+    if have_coll and "purchase_price" not in have_coll:
+        if c.execute("SELECT 1 FROM collection LIMIT 1").fetchone():
+            backup_user_data(c, "collection-batch-migration")
+        c.execute("ALTER TABLE collection RENAME TO collection_pre_batch")
+        c.execute("""CREATE TABLE collection(
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            set_code TEXT, number TEXT, name TEXT, qty INT, lang TEXT, foil TEXT,
+            purchase_price REAL, purchase_date TEXT, price_source TEXT)""")
+        c.execute("""INSERT INTO collection(set_code,number,name,qty,lang,foil)
+                     SELECT set_code,number,name,qty,lang,foil FROM collection_pre_batch""")
+        c.execute("DROP TABLE collection_pre_batch")
+        c.execute("CREATE INDEX IF NOT EXISTS ix_coll_set ON collection(set_code)")
+        c.execute("CREATE INDEX IF NOT EXISTS ix_coll_setnum ON collection(set_code, number)")
+        c.execute("CREATE INDEX IF NOT EXISTS ix_coll_name ON collection(name)")
+        c.commit()
+        log(c, "Collection", "Migrated to per-batch purchase-price tracking")
     old_schema = meta_get(c, "schema")
     if old_schema != str(SCHEMA):
         # A schema bump only rebuilds the regenerable Scryfall catalog, never
@@ -444,8 +472,19 @@ def restore_user_data(c, name):
             rows = bk.execute(f"SELECT * FROM {t}").fetchall()
             c.execute(f"DELETE FROM {t}")
             if rows:
-                c.executemany(f"INSERT INTO {t} VALUES({','.join('?' * len(rows[0]))})",
-                              [tuple(r) for r in rows])
+                # Match by column NAME, not position/count — a backup made
+                # before a schema change (e.g. collection gaining purchase
+                # price columns) has fewer columns than the live table now
+                # expects; inserting it positionally would misalign columns
+                # or fail outright. Columns the backup doesn't have are left
+                # at their default (NULL) in the live table.
+                cols = rows[0].keys()
+                live_cols = {r["name"] for r in c.execute(f"PRAGMA table_info({t})")}
+                use = [col for col in cols if col in live_cols]
+                if use:
+                    ph = ",".join("?" * len(use))
+                    c.executemany(f"INSERT INTO {t}({','.join(use)}) VALUES({ph})",
+                                  [tuple(r[col] for col in use) for r in rows])
         c.commit()
     finally:
         bk.close()
@@ -803,7 +842,12 @@ def _norm_name(n):
     return n
 
 
-def refresh_cards():
+def refresh_cards(bulk_type="all_cards"):
+    # bulk_type="default_cards": used only by the headless price-history
+    # server (see pricelogger/sync.py) - it never shows a card name, only
+    # prices, so it doesn't need every foreign-language object and default_
+    # cards is far smaller to parse (a real difference on a memory-limited
+    # VPS). Every normal Binduno install keeps the "all_cards" default.
     c = connect(); init(c)
     try:
         REFRESH.update(running=True, step="Loading set list", pct=3, error="")
@@ -827,9 +871,9 @@ def refresh_cards():
         # default_cards only includes a foreign-language object for a card when
         # that card was NEVER printed in English — a bilingual card like most of
         # the German-language product line simply has no German object in it.
-        entry = next((e for e in cat.get("data", []) if e.get("type") == "all_cards"), None)
+        entry = next((e for e in cat.get("data", []) if e.get("type") == bulk_type), None)
         if not entry:
-            raise RuntimeError("all_cards not available")
+            raise RuntimeError(f"{bulk_type} not available")
         durl = find_bulk_url(entry)
         if not durl:
             raise RuntimeError("no download link in bulk-data entry")
@@ -1261,6 +1305,123 @@ def price_history_series(c, set_code, number, days):
             "start": series[0]["d"], "end": series[-1]["d"], "npts": len(series)}
 
 
+def _window_series(series, days):
+    """Slice a {d,eur} series (see compute_value_history) to the last `days`
+    days, left-anchored with the value carried in from before the window —
+    same trick as price_history_series, extracted so both can share it."""
+    if not series or not days:
+        return series
+    cutoff = (datetime.now().date() - timedelta(days=days)).isoformat()
+    out, carry = [], None
+    for p in series:
+        if p["d"] < cutoff:
+            carry = p
+            continue
+        out.append(p)
+    if carry is not None:
+        out.insert(0, {**carry, "d": cutoff})
+    return out or series[-1:]
+
+
+def compute_value_history(c):
+    """Total Cardmarket trend value of the whole collection over time, plus
+    the currently most valuable holdings. Reconstructed from the daily
+    price_history log (log_price_history logs a row only on days a price
+    actually changed) and each collection batch's purchase_date: a batch
+    counts toward the total from the day it was bought onward. A batch with
+    no purchase_date (older imports, before purchase-price tracking existed)
+    or one bought before the earliest priced day counts from the very start
+    of the chart instead. Printings with less price history than others are
+    backfilled flat with their earliest known price for the days before it -
+    an approximation, but MTGJSON's initial 90-day backfill means it rarely
+    matters in practice. Expensive on a large collection (open one SQLite
+    connection's worth of work) - always call through cached_value_history()."""
+    rows = c.execute("SELECT set_code, number, foil, qty, purchase_date FROM collection").fetchall()
+    keys = {(r["set_code"], r["number"]) for r in rows}
+    if not keys:
+        return {"series": [], "top": []}
+
+    price_hist = {}
+    for r in c.execute("""SELECT set_code, number, date, eur_cents, eur_foil_cents
+                          FROM price_history ORDER BY date"""):
+        k = (r["set_code"], r["number"])
+        if k in keys:
+            price_hist.setdefault(k, []).append(
+                (r["date"], (r["eur_cents"] or 0) / 100, (r["eur_foil_cents"] or 0) / 100))
+    cur_price = {}
+    for r in c.execute("SELECT set_code, number, eur, eur_foil FROM cards"):
+        k = (r["set_code"], r["number"])
+        if k in keys:
+            cur_price[k] = (r["eur"] or 0, r["eur_foil"] or 0)
+
+    today = datetime.now().strftime("%Y-%m-%d")
+    all_dates = [today] + [d for pts in price_hist.values() for d, _, _ in pts] \
+        + [r["purchase_date"] for r in rows if r["purchase_date"]]
+    start = min(all_dates)
+
+    qty_state = {k: [0, 0] for k in keys}
+    for r in rows:
+        idx = 1 if r["foil"] == "foil" else 0
+        if not r["purchase_date"] or r["purchase_date"] <= start:
+            qty_state[(r["set_code"], r["number"])][idx] += r["qty"]
+    price_state = {}
+    for k in keys:
+        pts = price_hist.get(k)
+        price_state[k] = (pts[0][1], pts[0][2]) if pts else cur_price.get(k, (0, 0))
+
+    events = []
+    for r in rows:
+        if r["purchase_date"] and r["purchase_date"] > start:
+            idx = 1 if r["foil"] == "foil" else 0
+            events.append((r["purchase_date"], (r["set_code"], r["number"]), "qty", idx, r["qty"]))
+    for k, pts in price_hist.items():
+        for d, eur, foil in pts:
+            if d > start:
+                events.append((d, k, "price", eur, foil))
+    for k in keys:
+        if not price_hist.get(k) or price_hist[k][-1][0] != today:
+            eur, foil = cur_price.get(k, (0, 0))
+            events.append((today, k, "price", eur, foil))
+    events.sort(key=lambda e: e[0])
+
+    total = sum(qty_state[k][0] * price_state[k][0] + qty_state[k][1] * price_state[k][1]
+                for k in keys)
+    series = [{"d": start, "eur": round(total, 2)}]
+    i = 0
+    while i < len(events):
+        d = events[i][0]
+        while i < len(events) and events[i][0] == d:
+            _, k, kind, a, b = events[i]
+            if kind == "qty":
+                idx, qty = a, b
+                total += qty * price_state[k][idx]
+                qty_state[k][idx] += qty
+            else:
+                eur, foil = a, b
+                total += qty_state[k][0] * (eur - price_state[k][0])
+                total += qty_state[k][1] * (foil - price_state[k][1])
+                price_state[k] = (eur, foil)
+            i += 1
+        series.append({"d": d, "eur": round(total, 2)})
+
+    top = []
+    for r in c.execute("""
+            SELECT k.name, k.name_de, k.set_code, s.name set_name, k.number, k.img, o.foil,
+                   SUM(o.qty) qty,
+                   CASE WHEN o.foil='foil' THEN k.eur_foil ELSE k.eur END price
+            FROM collection o
+            JOIN cards k ON k.set_code=o.set_code AND k.number=o.number
+            JOIN sets s ON s.code=o.set_code
+            GROUP BY o.set_code, o.number, o.foil
+            HAVING price IS NOT NULL AND price > 0
+            ORDER BY qty*price DESC LIMIT 300"""):
+        top.append({"name": r["name"], "nameDe": r["name_de"] or "", "set": r["set_code"],
+                    "setName": r["set_name"], "number": r["number"], "img": r["img"] or "",
+                    "foil": r["foil"] == "foil", "qty": r["qty"],
+                    "price": round(r["price"], 2), "value": round(r["qty"] * r["price"], 2)})
+    return {"series": series, "top": top}
+
+
 def watchlist_rows(c, days=7):
     """One row per watched card: current price plus a price series over the
     requested window (see price_history_series)."""
@@ -1293,6 +1454,14 @@ def watchlist_rows(c, days=7):
 # deleted — only the derived price rows are kept.
 MTGJSON_PRINTINGS_URL = "https://mtgjson.com/api/v5/AllPrintings.sqlite.gz"
 MTGJSON_PRICES_URL = "https://mtgjson.com/api/v5/AllPrices.json.gz"
+# The project's own price-history server (see pricelogger/sync.py) - a small
+# SQLite export of the same price_history table, rebuilt daily. It has been
+# logging since it was first set up, so once it has run for a while it holds
+# *more* than MTGJSON's fixed 90-day window. Tried first; MTGJSON is the
+# fallback if this isn't reachable (e.g. the server is down, or a self-built
+# install has no network path to it).
+BINDUNO_PRICEDATA_URL = _env("PRICEDATA_URL", "MTG_TRACKER_PRICEDATA_URL") or \
+    "https://binduno.com/pricedata/history.sqlite.gz"
 
 
 def _download_to(url, dest):
@@ -1300,6 +1469,36 @@ def _download_to(url, dest):
     # default urllib User-Agent, same as Scryfall's UA requirement elsewhere.
     # Resumable + retrying: the MTGJSON files are large too.
     _resumable_download(url, dest)
+
+
+def _backfill_from_binduno_server(c):
+    """Try the project's own central price-history export before falling
+    back to MTGJSON. Returns the number of rows inserted, or None if the
+    server isn't reachable/the file is missing — the caller falls back to
+    MTGJSON in that case, exactly as if this function didn't exist."""
+    tmp_dir = tempfile.mkdtemp(prefix="binduno_price_server_")
+    try:
+        gz_path = os.path.join(tmp_dir, "history.sqlite.gz")
+        _download_to(BINDUNO_PRICEDATA_URL, gz_path)
+        db_path = os.path.join(tmp_dir, "history.sqlite")
+        with gzip.open(gz_path, "rb") as fin, open(db_path, "wb") as fout:
+            shutil.copyfileobj(fin, fout)
+        src = sqlite3.connect(db_path)
+        rows = src.execute(
+            "SELECT set_code, number, date, eur_cents, eur_foil_cents FROM price_history"
+        ).fetchall()
+        src.close()
+        if rows:
+            # OR IGNORE: never clobber a day the app already logged itself.
+            c.executemany("""INSERT OR IGNORE INTO price_history
+                              (set_code, number, date, eur_cents, eur_foil_cents)
+                              VALUES(?,?,?,?,?)""", rows)
+            c.commit()
+        return len(rows)
+    except Exception:                                        # noqa: BLE001
+        return None
+    finally:
+        shutil.rmtree(tmp_dir, ignore_errors=True)
 
 
 def backfill_price_history(auto=False):
@@ -1316,6 +1515,18 @@ def backfill_price_history(auto=False):
     if auto:
         meta_set(c, "price_backfill_last_try",
                  datetime.now().isoformat(timespec="seconds"))
+
+    _p(running=True, step="Checking the Binduno price server", pct=5, error="")
+    n = _backfill_from_binduno_server(c)
+    if n is not None:
+        downsample_price_history(c)
+        meta_set(c, "price_backfill_done", "1")
+        log(c, "Price history",
+            f"Backfilled {n:,} price point(s) from the Binduno price server")
+        _p(running=False, step="Done", pct=100)
+        c.close()
+        return
+
     tmp_dir = tempfile.mkdtemp(prefix="binduno_price_backfill_")
     try:
         _p(running=True, step="Downloading MTGJSON card index", pct=5, error="")
@@ -1422,22 +1633,33 @@ def _foil_norm(s):
 # foil). Matching later happens on set_code + numeric collector number, so a
 # format only works if its export carries both.
 def _imp_manabox(rows):
-    return [((r.get("Set code") or ""), (r.get("Collector number") or ""),
-             (r.get("Name") or "").split(" // ")[0], r.get("Quantity"),
-             r.get("Language"), _foil_norm(r.get("Foil"))) for r in rows]
+    out = []
+    for r in rows:
+        price = None
+        cur = (r.get("Purchase price currency") or "").strip().upper()
+        raw = (r.get("Purchase price") or "").strip()
+        if raw and cur in ("", "EUR"):                    # other currencies: no conversion, fall back
+            try:
+                price = float(raw)
+            except ValueError:
+                price = None
+        out.append(((r.get("Set code") or ""), (r.get("Collector number") or ""),
+                    (r.get("Name") or "").split(" // ")[0], r.get("Quantity"),
+                    r.get("Language"), _foil_norm(r.get("Foil")), price))
+    return out
 
 
 def _imp_moxfield(rows):
     return [((r.get("Edition") or ""), (r.get("Collector Number") or ""),
              (r.get("Name") or "").split(" // ")[0], r.get("Count"),
-             r.get("Language"), _foil_norm(r.get("Foil"))) for r in rows]
+             r.get("Language"), _foil_norm(r.get("Foil")), None) for r in rows]
 
 
 def _imp_archidekt(rows):
     return [((r.get("Edition Code") or r.get("Set Code") or ""),
              (r.get("Collector Number") or ""),
              (r.get("Name") or "").split(" // ")[0], r.get("Quantity"),
-             r.get("Language"), _foil_norm(r.get("Finish") or r.get("Foil")))
+             r.get("Language"), _foil_norm(r.get("Finish") or r.get("Foil")), None)
             for r in rows]
 
 
@@ -1459,37 +1681,106 @@ def _detect_format(fields):
     return None
 
 
-def _commit_collection_rows(c, raw_rows, mode, label):
-    """raw_rows: iterable of (set_code, number, name, qty, lang, foil) — the
-    shape every IMPORT_FORMATS parser (and the Cardmarket-purchase import)
-    returns. Aggregates duplicates and writes them into `collection`."""
-    agg, cards = {}, 0
-    for setc, num, name, qraw, lang, foil in raw_rows:
+def _reconcile_batches(old, new, today, source):
+    """old: existing DB rows for one (set,number,lang,foil) key, as
+    (qty, purchase_price, purchase_date, price_source) — oldest first.
+    new: freshly parsed rows for the same key from the import file, as
+    (qty, purchase_price). Returns the batches to write for that key.
+
+    There is no stable identity for a physical card — ManaBox (like every
+    other export format) gives a quantity, not per-copy serial numbers — so
+    "the same copies as before" can only be approximated by count: whichever
+    part of the new total is covered by the old total keeps the old price
+    and date, in the order the old batches were originally added; anything
+    beyond that (the count grew) is priced from the new file. If the new
+    total is smaller, the surplus old batches are simply dropped — same as
+    any other Replace import forgetting a card no longer in the file."""
+    old_total = sum(q for q, _, _, _ in old)
+    new_total = sum(q for q, _ in new)
+    keep = min(old_total, new_total)
+    out, remaining = [], keep
+    for q, price, date, src in old:
+        if remaining <= 0:
+            break
+        take = min(q, remaining)
+        out.append((take, price, date, src))
+        remaining -= take
+    extra = new_total - keep
+    for q, price in new:
+        if extra <= 0:
+            break
+        take = min(q, extra)
+        out.append((take, price, today, source if price is not None else None))
+        extra -= take
+    return out
+
+
+def _commit_collection_rows(c, raw_rows, mode, label, keep_existing_prices=True):
+    """raw_rows: iterable of (set_code, number, name, qty, lang, foil,
+    purchase_price) — the shape every IMPORT_FORMATS parser (and the
+    Cardmarket-purchase import) returns; purchase_price is None when the
+    source doesn't know one (Moxfield/Archidekt have no such column; ManaBox
+    only when a row has no price or a non-EUR currency). Each distinct
+    (set, number, lang, foil, purchase_price) combination becomes its own
+    batch row, so multiple purchases of the same printing at different
+    prices/times stay distinguishable instead of blending into one average.
+    `keep_existing_prices` only matters for mode="replace": whether a card
+    that was already in the collection keeps its recorded purchase price
+    (see _reconcile_batches) or is priced fresh from this import, as if the
+    whole collection were being entered for the first time."""
+    source = {"ManaBox": "manabox", "Cardmarket purchase": "cm"}.get(label, label.lower())
+    agg, names, cards = {}, {}, 0
+    for setc, num, name, qraw, lang, foil, price in raw_rows:
         try:
             q = int(float(qraw or 1))
         except (ValueError, TypeError):
             q = 1
         if q <= 0:
             continue
-        key = (setc.lower().strip(), num.strip(), _lang_code(lang), foil)
-        if key in agg:
-            agg[key][0] += q
-        else:
-            agg[key] = [q, name.strip()]
+        pkey = round(price, 2) if price is not None else None
+        key = (setc.lower().strip(), num.strip(), _lang_code(lang), foil, pkey)
+        agg[key] = agg.get(key, 0) + q
+        names[key[:4]] = name.strip()
         cards += q
-    rows = [(k[0], k[1], v[1], v[0], k[2], k[3]) for k, v in agg.items()]
-    if not rows:
+    if not agg:
         return {"rows": 0, "cards": 0, "mode": mode}
+    today = datetime.now().strftime("%Y-%m-%d")
+    new_by_key = {}
+    for (setc, num, lang, foil, price), q in agg.items():
+        new_by_key.setdefault((setc, num, lang, foil), []).append((q, price))
+
+    insert_rows = []
     if mode == "replace":
         if c.execute("SELECT 1 FROM collection LIMIT 1").fetchone():
             backup_user_data(c, "replace-import")
+        old_by_key = {}
+        if keep_existing_prices:
+            for r in c.execute("""SELECT set_code, number, lang, foil, qty,
+                                          purchase_price, purchase_date, price_source
+                                   FROM collection ORDER BY id"""):
+                k = (r["set_code"].lower().strip(), r["number"].strip(), r["lang"], r["foil"])
+                old_by_key.setdefault(k, []).append(
+                    (r["qty"], r["purchase_price"], r["purchase_date"], r["price_source"]))
         c.execute("DELETE FROM collection")
-        c.executemany("INSERT OR REPLACE INTO collection VALUES(?,?,?,?,?,?)", rows)
+        for k4, new_batches in new_by_key.items():
+            setc, num, lang, foil = k4
+            if keep_existing_prices and k4 in old_by_key:
+                batches = _reconcile_batches(old_by_key[k4], new_batches, today, source)
+            else:
+                batches = [(q, price, today, source if price is not None else None)
+                           for q, price in new_batches]
+            for q, price, date, src in batches:
+                insert_rows.append((setc, num, names[k4], q, lang, foil, price, date, src))
     else:
-        for row in rows:
-            c.execute("""INSERT INTO collection VALUES(?,?,?,?,?,?)
-                         ON CONFLICT(set_code,number,lang,foil)
-                         DO UPDATE SET qty=qty+excluded.qty""", row)
+        for k4, new_batches in new_by_key.items():
+            setc, num, lang, foil = k4
+            for q, price in new_batches:
+                src = source if price is not None else None
+                insert_rows.append((setc, num, names[k4], q, lang, foil, price,
+                                    today if price is not None else None, src))
+    c.executemany("""INSERT INTO collection
+                      (set_code,number,name,qty,lang,foil,purchase_price,purchase_date,price_source)
+                      VALUES(?,?,?,?,?,?,?,?,?)""", insert_rows)
     meta_set(c, "collection_updated", datetime.now().isoformat(timespec="seconds"))
     log(c, "Collection", f"{cards:,} cards imported ({label}, {mode} mode)")
     c.commit()
@@ -1501,10 +1792,42 @@ def _commit_collection_rows(c, raw_rows, mode, label):
         c.execute("PRAGMA wal_checkpoint(PASSIVE)")
     except sqlite3.Error:
         pass
-    return {"rows": len(rows), "cards": cards, "mode": mode}
+    return {"rows": len(insert_rows), "cards": cards, "mode": mode}
 
 
-def import_collection(c, text, mode, fmt="auto"):
+def _adjust_collection_qty(c, set_code, number, lang, foil, name, target_qty):
+    """Reconcile the total owned qty for one (set,number,lang,foil) printing
+    to target_qty, across however many purchase-price batches exist for it
+    (the +/-/x4 buttons on a card page work on a total, not one batch).
+    Growing adds a new batch with no known price — falls back to the live
+    trend price like any other quick add; shrinking removes from the most
+    recently added batch first, the same "undo the last thing" order the
+    plain qty column implied before batches existed."""
+    rows = c.execute("""SELECT id, qty FROM collection
+                        WHERE set_code=? AND number=? AND lang=? AND foil=?
+                        ORDER BY id DESC""", (set_code, number, lang, foil)).fetchall()
+    cur = sum(r["qty"] for r in rows)
+    if target_qty == cur:
+        return
+    if target_qty > cur:
+        today = datetime.now().strftime("%Y-%m-%d")
+        c.execute("""INSERT INTO collection(set_code,number,name,qty,lang,foil,purchase_date)
+                     VALUES(?,?,?,?,?,?,?)""",
+                  (set_code, number, name, target_qty - cur, lang, foil, today))
+    else:
+        remove = cur - target_qty
+        for r in rows:
+            if remove <= 0:
+                break
+            if r["qty"] <= remove:
+                c.execute("DELETE FROM collection WHERE id=?", (r["id"],))
+                remove -= r["qty"]
+            else:
+                c.execute("UPDATE collection SET qty=qty-? WHERE id=?", (remove, r["id"]))
+                remove = 0
+
+
+def import_collection(c, text, mode, fmt="auto", keep_existing_prices=True):
     text = (text or "").lstrip("\ufeff").lstrip()
     if text[:1] in ("{", "["):
         raise ValueError("This looks like a JSON file, not a CSV export. Export your "
@@ -1529,7 +1852,7 @@ def import_collection(c, text, mode, fmt="auto"):
         missing = ", ".join(sorted(need - set(fields)))
         raise ValueError(f"This does not look like a {label} export — missing "
                          f"column(s): {missing}")
-    result = _commit_collection_rows(c, parse(list(rdr)), mode, label)
+    result = _commit_collection_rows(c, parse(list(rdr)), mode, label, keep_existing_prices)
     if not result["rows"]:
         raise ValueError(f"The {label} file was read, but held no cards.")
     result["format"] = fmt
@@ -1539,8 +1862,11 @@ def import_collection(c, text, mode, fmt="auto"):
 
 def import_cm_purchase(c, items, mode="add"):
     """Add every article scraped from a Cardmarket purchase page straight into
-    the collection. items: [{name, setSlug, setTitle, number, qty, foil, lang}]
-    - the same shape the cm-helper userscript already builds for /api/cm-match.
+    the collection. items: [{name, setSlug, setTitle, number, qty, foil, lang,
+    price}] - the same shape the cm-helper userscript already builds for
+    /api/cm-match, plus an optional per-line price the userscript doesn't
+    scrape yet (reserved for later — falls back to the live trend price like
+    any other import that doesn't know one).
     Cards whose set can't be resolved (promos, unusual products) are skipped
     and reported back so the user can add them by hand."""
     rows, skipped = [], []
@@ -1552,8 +1878,13 @@ def import_cm_purchase(c, items, mode="add"):
             if name:
                 skipped.append(name)
             continue
+        price = it.get("price")
+        try:
+            price = float(price) if price is not None else None
+        except (ValueError, TypeError):
+            price = None
         rows.append((code, num, name, it.get("qty") or 1,
-                     it.get("lang") or "en", "foil" if it.get("foil") else "normal"))
+                     it.get("lang") or "en", "foil" if it.get("foil") else "normal", price))
     result = _commit_collection_rows(c, rows, mode, "Cardmarket purchase")
     result["matched"] = len(rows)
     result["skipped"] = len(skipped)
@@ -2035,13 +2366,16 @@ def set_detail(c, code):
     gp = goal_prefs(c)
     eg_eur = endgame_prefs(c)["eur"]
     ps = s["printed_size"] or 0
-    q = """SELECT k.number, k.num_int, k.name, k.name_de, k.type_line, k.rarity, k.eur,
+    q = """SELECT k.number, k.num_int, k.name, k.name_de, k.type_line, k.type_de, k.rarity, k.eur,
                   k.eur_foil, k.img, k.mana, k.artist, k.colors, k.variant, k.finishes, k.ver,
                   k.extras_idx, k.cm_suffix, k.cm_ver, k.cm_expansion, k.extra,
-                  COALESCE(o.qty,0) qty
+                  COALESCE(o.qty,0) qty, COALESCE(o.qty_normal,0) qty_normal,
+                  COALESCE(o.qty_foil,0) qty_foil
            FROM cards k
-           LEFT JOIN (SELECT set_code,number,SUM(qty) qty FROM collection
-                      GROUP BY set_code,number) o
+           LEFT JOIN (SELECT set_code, number, SUM(qty) qty,
+                             SUM(CASE WHEN foil='foil' THEN qty ELSE 0 END) qty_foil,
+                             SUM(CASE WHEN foil<>'foil' THEN qty ELSE 0 END) qty_normal
+                      FROM collection GROUP BY set_code,number) o
                   ON o.set_code=k.set_code AND o.number=k.number
            WHERE k.set_code=? AND k.digital=0
            ORDER BY k.num_int, k.number"""
@@ -2057,7 +2391,7 @@ def set_detail(c, code):
         have = r["qty"] > 0
         tl = r["type_line"] or ""
         cards.append({"number": r["number"], "name": r["name"], "nameDe": r["name_de"] or "",
-                      "type": r["type_line"], "rarity": r["rarity"],
+                      "type": r["type_line"], "typeDe": r["type_de"] or "", "rarity": r["rarity"],
                       "basic": tl.startswith("Basic ") and "Land" in tl,
                       "extra": r["extra"], "inGoal": goal_eligible(r["extra"], r["variant"], gp),
                       "eur": round(eur, 2),
@@ -2065,7 +2399,8 @@ def set_detail(c, code):
                       "img": r["img"], "mana": r["mana"], "artist": r["artist"],
                       "variant": r["variant"] or "", "finishes": r["finishes"] or "",
                       "ver": r["ver"] or 1, "extras": r["extras_idx"] or 0, "cmSuffix": r["cm_suffix"] or "", "cmVer": r["cm_ver"] if r["cm_ver"] is not None else 1, "cmExpansion": r["cm_expansion"] or "",
-                      "qty": r["qty"], "have": have, "note": "", "want": False})
+                      "qty": r["qty"], "qtyNormal": r["qty_normal"], "qtyFoil": r["qty_foil"],
+                      "have": have, "note": "", "want": False})
     # Decide want / note per card. "names" scope: one owned printing of a name
     # settles it, and a still-missing name flags exactly one printing to buy —
     # eg[0], the lowest collector number (Cardmarket's V.1). Picking "the
@@ -2461,8 +2796,11 @@ def card_search(c, p):
                 for ch in cols:
                     where.append(f"k.colors LIKE '%{ch}%'")
     own = p.get("owned", "all")
-    join = ("LEFT JOIN (SELECT set_code,number,SUM(qty) qty FROM collection "
-            "GROUP BY set_code,number) o ON o.set_code=k.set_code AND o.number=k.number")
+    join = ("LEFT JOIN (SELECT set_code, number, SUM(qty) qty, "
+            "SUM(CASE WHEN foil='foil' THEN qty ELSE 0 END) qty_foil, "
+            "SUM(CASE WHEN foil<>'foil' THEN qty ELSE 0 END) qty_normal "
+            "FROM collection GROUP BY set_code,number) o "
+            "ON o.set_code=k.set_code AND o.number=k.number")
     if own == "owned":
         where.append("o.qty IS NOT NULL")
     elif own == "missing":
@@ -2504,7 +2842,7 @@ def card_search(c, p):
                "qty": "COALESCE(o.qty,0)", "cmc": "k.cmc", "set": "s.name"}
     sort = sortmap.get(p.get("sort", "released"), "s.released")
     d = "DESC" if p.get("dir") == "-1" else "ASC"
-    per = max(1, min(120, int(p.get("per", 60))))
+    per = max(1, min(200, int(p.get("per", 48))))
     page = max(1, int(p.get("page", 1)))
     base = f"FROM cards k JOIN sets s ON s.code=k.set_code {join} WHERE {w}"
     if uniq:
@@ -2513,20 +2851,23 @@ def card_search(c, p):
     else:
         total = c.execute(f"SELECT COUNT(*) n {base}", args).fetchone()["n"]
     rows = c.execute(
-        f"""SELECT k.set_code, s.name set_name, s.released, k.number, k.name, k.name_de, k.type_line,
+        f"""SELECT k.set_code, s.name set_name, s.released, k.number, k.name, k.name_de, k.type_line, k.type_de,
                    k.rarity, {eur_expr} eur, k.eur_foil, k.img, k.mana, k.artist, k.colors,
-                   k.variant, k.finishes, k.ver, k.extras_idx, k.cm_suffix, k.cm_ver, k.cm_expansion, COALESCE(o.qty,0) qty {base} {grp}
+                   k.variant, k.finishes, k.ver, k.extras_idx, k.cm_suffix, k.cm_ver, k.cm_expansion,
+                   COALESCE(o.qty,0) qty, COALESCE(o.qty_normal,0) qty_normal,
+                   COALESCE(o.qty_foil,0) qty_foil {base} {grp}
             ORDER BY {sort} {d}, k.name LIMIT ? OFFSET ?""",
         args + [per, (page - 1) * per]).fetchall()
     return {"total": total, "page": page, "per": per,
             "cards": [{"set": r["set_code"], "setName": r["set_name"],
                        "released": r["released"], "number": r["number"],
                        "name": r["name"], "nameDe": r["name_de"] or "",
-                       "type": r["type_line"], "rarity": r["rarity"],
+                       "type": r["type_line"], "typeDe": r["type_de"] or "", "rarity": r["rarity"],
                        "eur": round(r["eur"] or 0, 2), "foil": round(r["eur_foil"] or 0, 2),
                        "img": r["img"], "mana": r["mana"], "artist": r["artist"],
                        "colors": r["colors"], "variant": r["variant"] or "",
                        "finishes": r["finishes"] or "", "ver": r["ver"] or 1, "extras": r["extras_idx"] or 0, "cmSuffix": r["cm_suffix"] or "", "cmVer": r["cm_ver"] if r["cm_ver"] is not None else 1, "cmExpansion": r["cm_expansion"] or "",
+                       "qtyNormal": r["qty_normal"], "qtyFoil": r["qty_foil"],
                        "qty": r["qty"]} for r in rows]}
 
 
@@ -2565,6 +2906,27 @@ def card_detail(c, code, number):
         legal[FMT_LABEL[f]] = code_map.get(ch, "not_legal")
     in_watchlist = bool(c.execute("SELECT 1 FROM watchlist WHERE set_code=? AND number=?",
                                   (code, number)).fetchone())
+    # Every owned copy of this card NAME, in any set — one row per purchase
+    # batch, so the same printing bought at different times/prices shows as
+    # separate lines instead of one blended quantity.
+    copies = []
+    for x in c.execute("""SELECT o.id, o.set_code, s.name set_name, o.number, o.foil, o.qty,
+                                 o.purchase_price, o.purchase_date, o.price_source,
+                                 k.eur, k.eur_foil, k.img
+                          FROM collection o
+                          JOIN cards k ON k.set_code=o.set_code AND k.number=o.number
+                          JOIN sets s ON s.code=o.set_code
+                          WHERE k.name=?
+                          ORDER BY s.released DESC, o.id""", (r["name"],)):
+        trend = (x["eur_foil"] if (x["foil"] or "normal") != "normal" and x["eur_foil"]
+                 else x["eur"]) or 0
+        copies.append({"id": x["id"], "set": x["set_code"], "setName": x["set_name"],
+                       "number": x["number"], "foil": (x["foil"] or "normal") == "foil",
+                       "qty": x["qty"], "img": x["img"] or "",
+                       "purchasePrice": round(x["purchase_price"], 2)
+                                        if x["purchase_price"] is not None else None,
+                       "purchaseDate": x["purchase_date"] or "",
+                       "priceSource": x["price_source"] or "", "trend": round(trend, 2)})
     return {"set": r["set_code"], "setName": r["set_name"], "setIcon": r["icon"],
             "inWatchlist": in_watchlist,
             "released": r["released"], "number": r["number"], "name": r["name"],
@@ -2576,7 +2938,7 @@ def card_detail(c, code, number):
             "variant": r["variant"] or "", "finishes": r["finishes"] or "",
             "ver": r["ver"] or 1, "extras": r["extras_idx"] or 0, "cmSuffix": r["cm_suffix"] or "", "cmVer": r["cm_ver"] if r["cm_ver"] is not None else 1, "cmExpansion": r["cm_expansion"] or "", "cardmarket": r["cm_uri"], "scryfall": r["scry_uri"],
             "qty": qty, "qtyNormal": qty_normal, "qtyFoil": qty_foil,
-            "legal": legal, "printings": prints,
+            "legal": legal, "printings": prints, "copies": copies,
             "hist": price_history_series(c, code, number, 30)}
 
 
@@ -2675,13 +3037,19 @@ def export_collection(c):
     w.writerow(["Name", "Set code", "Set name", "Collector number", "Foil", "Rarity",
                 "Quantity", "Language", "Purchase price", "Purchase price currency"])
     for r in c.execute("""SELECT o.name, o.set_code, s.name set_name, o.number, o.foil,
-                                 k.rarity, o.qty, o.lang, k.eur, k.eur_foil
+                                 k.rarity, o.qty, o.lang, k.eur, k.eur_foil, o.purchase_price
                           FROM collection o
                           LEFT JOIN cards k ON k.set_code=o.set_code AND k.number=o.number
                           LEFT JOIN sets s ON s.code=o.set_code
                           ORDER BY o.set_code, o.number"""):
-        price = (r["eur_foil"] if (r["foil"] or "normal") != "normal" and r["eur_foil"]
-                 else r["eur"]) or ""
+        # The real recorded purchase price wins; only fall back to the current
+        # trend price for batches nothing is known about (pre-price-tracking
+        # imports, quick +/- adds) so the export still round-trips a usable
+        # number into ManaBox's own column.
+        price = r["purchase_price"]
+        if price is None:
+            price = (r["eur_foil"] if (r["foil"] or "normal") != "normal" and r["eur_foil"]
+                     else r["eur"]) or ""
         w.writerow([r["name"], (r["set_code"] or "").upper(), r["set_name"] or "",
                     r["number"], r["foil"] or "normal",
                     {"c": "common", "u": "uncommon", "r": "rare", "m": "mythic"}.get(
@@ -2691,7 +3059,7 @@ def export_collection(c):
 
 
 # --------------------------------------------------------------------- server
-CACHE = {"stamp": None, "sets": None, "home": None}
+CACHE = {"stamp": None, "sets": None, "home": None, "vh": None}
 SETS_CACHE_FILE = os.path.join(BASE, "sets_cache.pkl")
 
 
@@ -2719,7 +3087,7 @@ def _cache_save():
         import pickle
         tmp = SETS_CACHE_FILE + ".tmp"
         with open(tmp, "wb") as f:
-            pickle.dump({k: CACHE[k] for k in ("stamp", "sets", "home")}, f,
+            pickle.dump({k: CACHE[k] for k in ("stamp", "sets", "home", "vh")}, f,
                         pickle.HIGHEST_PROTOCOL)
         os.replace(tmp, SETS_CACHE_FILE)
     except Exception:                               # noqa: BLE001
@@ -2742,9 +3110,9 @@ def cached_sets(c):
         return CACHE["sets"]
     disk = _cache_load(stamp)
     if disk and disk.get("sets") is not None:
-        CACHE.update(stamp=stamp, sets=disk["sets"], home=disk.get("home"))
+        CACHE.update(stamp=stamp, sets=disk["sets"], home=disk.get("home"), vh=disk.get("vh"))
         return CACHE["sets"]
-    CACHE.update(stamp=stamp, sets=set_rows(c), home=None)
+    CACHE.update(stamp=stamp, sets=set_rows(c), home=None, vh=None)
     _cache_save()
     return CACHE["sets"]
 
@@ -2763,8 +3131,22 @@ def cached_home(c):
     return CACHE["home"]
 
 
+def cached_value_history(c):
+    """Full collection value history + top holdings (see compute_value_history).
+    Cached like cached_home() on the same stamp, in memory and on disk.
+    Precomputed once in the background shortly after startup (see
+    auto_sync_loop) so opening the value page normally never waits on it."""
+    stamp = _sets_stamp(c)
+    if CACHE["vh"] is not None and CACHE["stamp"] == stamp:
+        return CACHE["vh"]
+    cached_sets(c)                                   # brings CACHE["stamp"] to `stamp`
+    CACHE["vh"] = compute_value_history(c)
+    _cache_save()
+    return CACHE["vh"]
+
+
 def bust():
-    CACHE.update(stamp=None, sets=None, home=None)
+    CACHE.update(stamp=None, sets=None, home=None, vh=None)
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -2927,6 +3309,18 @@ class Handler(BaseHTTPRequestHandler):
             self.send_json(price_history_series(
                 c, qs.get("set", ""), qs.get("number", ""),
                 _range_days(qs.get("range", "30"))))
+        elif p == "/api/value-history":
+            vh = cached_value_history(c)
+            series = _window_series(vh["series"], _range_days(qs.get("range", "30")))
+            first = series[0]["eur"] if series else 0
+            last = series[-1]["eur"] if series else 0
+            self.send_json({"series": series, "top": vh["top"],
+                            "lo": min((pt["eur"] for pt in series), default=0),
+                            "hi": max((pt["eur"] for pt in series), default=0),
+                            "changeEur": round(last - first, 2),
+                            "changePct": round((last - first) / first * 100, 1) if first else None,
+                            "start": series[0]["d"] if series else None,
+                            "end": series[-1]["d"] if series else None})
         elif p == "/api/export":
             body = export_collection(c).encode()
             self.send_response(200)
@@ -3007,7 +3401,8 @@ class Handler(BaseHTTPRequestHandler):
             try:
                 payload = json.loads(raw)
                 res = import_collection(c, payload["csv"], payload.get("mode", "replace"),
-                                        payload.get("format", "auto"))
+                                        payload.get("format", "auto"),
+                                        payload.get("keepExistingPrices", True))
                 bust()
                 cached_home(c)     # rebuild sets + home now, on the connection that committed
                 self.send_json({"ok": True, **res})
@@ -3140,16 +3535,16 @@ class Handler(BaseHTTPRequestHandler):
                 c.execute("DELETE FROM cart")
             elif act == "toCollection":
                 items = cart_rows(c)["items"]
+                today = datetime.now().strftime("%Y-%m-%d")
                 for it in items:
-                    row = c.execute("""SELECT qty FROM collection
-                                       WHERE set_code=? AND number=? AND lang='en' AND foil='normal'""",
-                                    (it["set"], it["number"])).fetchone()
-                    cur = row["qty"] if row else 0
-                    c.execute("""INSERT INTO collection(set_code,number,name,qty,lang,foil)
-                                 VALUES(?,?,?,?,'en','normal')
-                                 ON CONFLICT(set_code,number,lang,foil)
-                                 DO UPDATE SET qty=excluded.qty""",
-                              (it["set"], it["number"], it["name"], cur + it["qty"]))
+                    # The cart is a want-list, not a receipt — no purchase
+                    # price is known here, only that these are being added
+                    # now. New batch row per line; price stays unset so
+                    # every reader falls back to the live trend price.
+                    c.execute("""INSERT INTO collection
+                                 (set_code,number,name,qty,lang,foil,purchase_date)
+                                 VALUES(?,?,?,?,'en','normal',?)""",
+                              (it["set"], it["number"], it["name"], it["qty"], today))
                 if items:
                     log(c, "Collection", f"Added {len(items)} cart line(s) to collection")
                     bust()
@@ -3243,30 +3638,41 @@ class Handler(BaseHTTPRequestHandler):
             set_code, number = d["set"], d["number"]
             foil = "foil" if d.get("foil") else "normal"
             name = d.get("name", "")
-            row = c.execute("""SELECT qty FROM collection
+            cur = c.execute("""SELECT COALESCE(SUM(qty),0) q FROM collection
                                WHERE set_code=? AND number=? AND lang='en' AND foil=?""",
-                            (set_code, number, foil)).fetchone()
-            cur = row["qty"] if row else 0
+                            (set_code, number, foil)).fetchone()["q"]
             if d.get("action") == "set":
                 new_qty = max(0, int(d.get("qty", 0)))
             else:
                 new_qty = max(0, cur + int(d.get("delta", 0)))
             if new_qty != cur:
-                if new_qty == 0:
-                    c.execute("""DELETE FROM collection
-                                WHERE set_code=? AND number=? AND lang='en' AND foil=?""",
-                             (set_code, number, foil))
-                else:
-                    c.execute("""INSERT INTO collection(set_code,number,name,qty,lang,foil)
-                                 VALUES(?,?,?,?,'en',?)
-                                 ON CONFLICT(set_code,number,lang,foil)
-                                 DO UPDATE SET qty=excluded.qty""",
-                              (set_code, number, name, new_qty, foil))
+                _adjust_collection_qty(c, set_code, number, "en", foil, name, new_qty)
                 c.commit(); bust()
                 log(c, "Collection",
                     f'{name} ({"Foil" if foil == "foil" else "Nonfoil"}) '
                     f'{set_code.upper()} #{number} -> {new_qty}x')
             self.send_json(card_detail(c, set_code, number))
+        elif self.path == "/api/purchase-price":
+            d = json.loads(raw)
+            row = c.execute("SELECT set_code, number FROM collection WHERE id=?",
+                            (d.get("id"),)).fetchone()
+            if not row:
+                self.send_json({"ok": False, "error": "unknown collection row"}, 404)
+                return
+            price = d.get("price")
+            try:
+                price = round(float(price), 2) if price not in (None, "") else None
+            except (ValueError, TypeError):
+                price = None
+            c.execute("""UPDATE collection SET purchase_price=?, price_source=?,
+                                purchase_date=COALESCE(purchase_date, ?)
+                         WHERE id=?""",
+                      (price, "manual" if price is not None else None,
+                       datetime.now().strftime("%Y-%m-%d"), d.get("id")))
+            c.commit(); bust()
+            shown = f"{price:.2f} €" if price is not None else "unset"
+            log(c, "Collection", f"Purchase price for collection row {d.get('id')} -> {shown}")
+            self.send_json(card_detail(c, row["set_code"], row["number"]))
         elif self.path == "/api/reset":
             if c.execute("SELECT 1 FROM collection LIMIT 1").fetchone():
                 backup_user_data(c, "reset")
@@ -3359,6 +3765,10 @@ h2{font-family:var(--serif);font-weight:400;font-size:20px;margin:34px 0 12px}
   min-height:13px;line-height:13px}
 .card .v{font-family:var(--serif);font-size:28px;margin-top:6px}
 .card .n{font-family:var(--mono);font-size:11.5px;color:var(--dim);margin-top:3px}
+.clickable{transition:transform .15s ease,border-color .15s ease,box-shadow .15s ease}
+.clickable:hover{transform:translateY(-3px);border-color:var(--gold);
+  box-shadow:0 8px 18px rgba(0,0,0,.28)}
+.clickable:active{transform:translateY(-1px)}
 .donuts{display:grid;grid-template-columns:repeat(auto-fit,minmax(230px,1fr));gap:12px;margin-top:12px}
 .donut{background:var(--panel);border:1px solid var(--line);border-radius:6px;padding:18px;
   display:flex;gap:16px;align-items:center}
@@ -3402,7 +3812,10 @@ button:focus-visible,input:focus-visible,select:focus-visible{outline:2px solid 
 .seg{display:inline-flex;border:1px solid var(--line);border-radius:4px;overflow:hidden}
 .seg button{border:0;border-radius:0;padding:8px 12px}
 .seg button.on{background:var(--gold);color:#181206}
-.grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(268px,1fr));gap:12px}
+.gridcols{display:inline-flex;align-items:center;gap:7px;font-size:12.5px;color:var(--muted)}
+.gridcols .gcVal{font-family:var(--mono);color:var(--text);min-width:1.2em;text-align:center}
+.gridcols .gcRange{width:90px;accent-color:var(--gold)}
+.grid{display:grid;grid-template-columns:repeat(var(--grid-cols,4),1fr);gap:12px}
 .set{background:var(--panel);border:1px solid var(--line);border-radius:6px;padding:15px;
   display:flex;flex-direction:column;gap:9px}
 .set.done{border-color:var(--ok);background:linear-gradient(180deg,var(--good-bg),var(--panel))}
@@ -3494,6 +3907,7 @@ table.setcards thead th[data-sk]{cursor:pointer;user-select:none}
 table.setcards thead th[data-sk]:hover{color:var(--gold)}
 .phsvg{width:100%;height:240px;max-width:820px;display:block;border:1px solid var(--line);
   border-radius:8px;background:var(--panel);padding:4px}
+#vhGraph .phsvg{max-width:none}
 .phgrid{stroke:var(--line);stroke-width:1;opacity:.6}
 .phlbl{fill:var(--muted);font-size:10px;font-family:var(--mono)}
 .phhit{cursor:crosshair}
@@ -3545,10 +3959,12 @@ textarea{width:100%;height:130px;background:var(--panel2);color:var(--text);bord
 .msg.ok{background:#152a1e;border:1px solid #2c5a3e;color:#8fd6a8}
 .msg.err{background:#2a1616;border:1px solid #5c2c2c;color:#e0a0a0}
 .msg.warn{background:#2a2413;border:1px solid #5c4f2c;color:#d8c48f}
-.cgrid{display:grid;grid-template-columns:repeat(auto-fill,minmax(210px,1fr));gap:16px}
+.cgrid{display:grid;grid-template-columns:repeat(var(--grid-cols,4),1fr);gap:16px}
 .cc{background:var(--panel);border:1px solid var(--line);border-radius:7px;overflow:hidden;
-  display:flex;flex-direction:column;cursor:pointer;transition:border-color .13s,transform .13s}
-.cc:hover{border-color:var(--gold);transform:translateY(-2px)}
+  display:flex;flex-direction:column;cursor:pointer;
+  transition:border-color .15s ease,transform .15s ease,box-shadow .15s ease}
+.cc:hover{border-color:var(--gold);transform:translateY(-3px);box-shadow:0 8px 18px rgba(0,0,0,.28)}
+.cc:active{transform:translateY(-1px)}
 .cc .imgwrap{aspect-ratio:488/680;background:#0c1016;position:relative}
 .cc img.face{width:100%;height:100%;object-fit:cover;display:block}
 .cc .noimg{display:flex;align-items:center;justify-content:center;height:100%;
@@ -3558,12 +3974,13 @@ textarea{width:100%;height:130px;background:var(--panel2);color:var(--text);bord
   font-size:14px;line-height:1.3;opacity:0;transition:opacity .13s}
 .cc:hover .tilecart{opacity:1}
 .cc .tilecart:hover{border-color:var(--gold);color:var(--gold)}
-.cc .owned{display:inline-block;margin-left:6px;background:var(--panel2);
+.cc .cqty{margin:1px 0}
+.cc .owned{display:inline-block;background:var(--panel2);
   border:1px solid var(--ok);color:var(--ok);border-radius:11px;padding:1px 8px;
-  font-family:var(--mono);font-size:11px;vertical-align:1px}
-.cc .miss{display:inline-block;margin-left:6px;background:var(--panel2);
+  font-family:var(--mono);font-size:11px}
+.cc .miss{display:inline-block;background:var(--panel2);
   border:1px solid var(--line);color:var(--muted);border-radius:11px;padding:1px 8px;
-  font-family:var(--mono);font-size:11px;vertical-align:1px}
+  font-family:var(--mono);font-size:11px}
 .cc .meta{padding:8px 10px;display:flex;flex-direction:column;gap:3px}
 .cc .cn{font-size:13px;line-height:1.25;overflow-wrap:anywhere}
 .cc .cset{font-family:var(--mono);font-size:10.5px;color:var(--dim);
@@ -3693,6 +4110,7 @@ tr.child2 td:first-child::before{left:36px}
 /* --- phone / narrow-viewport layout --- */
 @media(max-width:680px){
   body{font-size:14px}
+  .gridcols{display:none}     /* mobile forces its own fixed grid columns - the slider has no effect here */
   /* one compact nav row: icon + tabs + a power button pinned right */
   .navin{gap:11px;padding:9px 12px;height:auto;flex-wrap:wrap;align-items:center}
   .brand{font-size:0}                 /* keep the icon, drop the wordmark */
@@ -3743,8 +4161,8 @@ tr.child2 td:first-child::before{left:36px}
   .grid{grid-template-columns:1fr;gap:9px}
   .set{padding:13px}
   .set .hd{min-height:0}
-  .rarrow{grid-template-columns:66px 1fr 66px;gap:9px}
-  .rarrow .nm{font-size:10.5px}
+  .rarrow{grid-template-columns:66px 1fr 96px;gap:8px}
+  .rarrow .nm{font-size:10.5px;white-space:nowrap}
   .cartrow{grid-template-columns:38px 1fr auto;gap:8px 10px;padding:10px}
   .cartrow img{width:38px}
   .cartrow .qbtn,.cartrow>:nth-child(4),.cartrow>:nth-child(5){grid-column:2/-1}
@@ -3877,6 +4295,9 @@ en:{
     "\"Add to Watchlist\".",
   "home.watchlist7d":"Last 7 days","home.watchlistChange":"Change","home.watchlistTrend":"Trend",
   "range.d7":"7 D","range.d30":"30 D","range.y1":"1 Y","range.max":"Max",
+  "valuePage.title":"Value over time","valuePage.desc":"How your whole collection's Cardmarket trend value has moved, based on the daily price log.",
+  "valuePage.mostValuable":"Most valuable cards","valuePage.mostValuableDesc":"Your holdings ranked by total value (price × copies owned).",
+  "valuePage.none":"Nothing owned with a known price yet.","valuePage.thValue":"Total value",
   "ph.title":"Price history","ph.none":"No price history logged yet.",
   "ph.lohi":"low {lo} · high {hi}","ph.since":"history since {d}",
   "home.watchlistRemove":"Remove from watchlist",
@@ -3930,6 +4351,7 @@ en:{
   "collection.groupSubsetsTitleOn":"Show subsets indented under their parent set",
   "collection.groupSubsetsTitleOff":"Table view only",
   "collection.grid":"Grid","collection.table":"Table",
+  "view.perPage":"{n} per page","view.perRow":"Per row",
   "setCard.currentValue":"Current value","setCard.complete":"complete",
   "setCard.cardsToBuy":"{n} cards to buy {v}","setCard.shipPrefix":"+ ship {v}",
   "setCard.sealedNoted":"Sealed noted","setCard.cheaper":" — cheaper",
@@ -4090,6 +4512,11 @@ en:{
   "manageUpdate.replaceDesc":"Wipe the stored collection and use this file as the new truth.",
   "manageUpdate.add":"Add",
   "manageUpdate.addDesc":"Keep what is stored and add these quantities on top.",
+  "manageUpdate.keepPrices":"Keep existing purchase prices",
+  "manageUpdate.keepPricesDesc":"Cards already in the collection keep their recorded "+
+    "purchase price; only genuinely new copies are priced from this file (or the current "+
+    "trend price if it has none). Turn off to price everything fresh from this import, as "+
+    "if the collection were starting over.",
   "manageUpdate.importBtn":"Import collection","manageUpdate.importing":"Importing…",
   "busy.importing":"Importing your collection…","busy.clearing":"Clearing your collection…",
   "busy.recount":"Recalculating set totals — almost there…",
@@ -4200,10 +4627,14 @@ en:{
   "cardPage.buyOnCardmarket":"Buy on Cardmarket · {price}","cardPage.buyFoil":"Buy foil · {price}",
   "cardPage.viewOnScryfall":"View on Scryfall","cardPage.regular":"Regular",
   "cardPage.copiesOwned":"Copies owned","cardPage.yourCollection":"Your collection",
-  "cardPage.nonfoil":"Nonfoil","cardPage.setTo4":"Set to 4 copies",
+  "cardPage.nonfoil":"Nonfoil","cardPage.setTo4":"Add 4 copies",
   "cardPage.wantListEntry":"Wants-List entry","cardPage.set":"Set",
   "cardPage.illustratedBy":"Illustrated by {artist}","cardPage.formatLegality":"Format legality",
   "cardPage.allPrintings":"All printings",
+  "cardPage.yourCopies":"Your copies",
+  "cardPage.yourCopiesDesc":"Every batch of this card name you own, across all sets — "+
+    "grouped by when/what you paid, not blended into one quantity. Purchase price is "+
+    "editable; leave it blank to fall back to the current trend price.",
   "setPage.noteEndgame":"Endgame","setPage.noteOtherPrinting":"Other printing",
   "setPage.notInGoal":"off-goal","setPage.baseMissing":"base missing",
   "setPage.hideOffGoal":"Hide off‑goal cards",
@@ -4337,6 +4768,9 @@ de:{
     "„Zur Watchlist hinzufügen“ klicken.",
   "home.watchlist7d":"Letzte 7 Tage","home.watchlistChange":"Änderung","home.watchlistTrend":"Trend",
   "range.d7":"7 T","range.d30":"30 T","range.y1":"1 J","range.max":"Max",
+  "valuePage.title":"Wertverlauf","valuePage.desc":"Wie sich der Cardmarket-Trendwert deiner gesamten Sammlung entwickelt hat, basierend auf dem täglichen Preis-Log.",
+  "valuePage.mostValuable":"Wertvollste Karten","valuePage.mostValuableDesc":"Deine Karten in Besitz, sortiert nach Gesamtwert (Preis × Kopien in Besitz).",
+  "valuePage.none":"Noch nichts mit bekanntem Preis in Besitz.","valuePage.thValue":"Gesamtwert",
   "ph.title":"Preisverlauf","ph.none":"Noch kein Preisverlauf aufgezeichnet.",
   "ph.lohi":"Tief {lo} · Hoch {hi}","ph.since":"Verlauf ab {d}",
   "home.watchlistRemove":"Von Watchlist entfernen",
@@ -4392,6 +4826,7 @@ de:{
   "collection.groupSubsetsTitleOn":"Subsets eingerückt unter ihrem Hauptset anzeigen",
   "collection.groupSubsetsTitleOff":"Nur in der Tabellenansicht",
   "collection.grid":"Kacheln","collection.table":"Tabelle",
+  "view.perPage":"{n} pro Seite","view.perRow":"Pro Zeile",
   "setCard.currentValue":"Aktueller Wert","setCard.complete":"vollständig",
   "setCard.cardsToBuy":"{n} Karten zu kaufen {v}","setCard.shipPrefix":"+ Versand {v}",
   "setCard.sealedNoted":"Sealed notiert","setCard.cheaper":" — günstiger",
@@ -4553,6 +4988,11 @@ de:{
   "manageUpdate.replaceDesc":"Gespeicherte Sammlung löschen und diese Datei als neue Wahrheit verwenden.",
   "manageUpdate.add":"Hinzufügen",
   "manageUpdate.addDesc":"Gespeichertes behalten und diese Mengen obendrauf addieren.",
+  "manageUpdate.keepPrices":"Bestehende Kaufpreise behalten",
+  "manageUpdate.keepPricesDesc":"Karten, die schon in der Sammlung sind, behalten ihren "+
+    "erfassten Kaufpreis; nur wirklich neue Kopien werden aus dieser Datei bepreist (oder "+
+    "zum aktuellen Trendpreis, falls die Datei keinen Preis nennt). Ausschalten, um die "+
+    "Sammlung komplett neu zu bepreisen, als würde sie neu aufgenommen.",
   "manageUpdate.importBtn":"Sammlung importieren","manageUpdate.importing":"Importiert…",
   "busy.importing":"Sammlung wird importiert…","busy.clearing":"Sammlung wird gelöscht…",
   "busy.recount":"Set-Summen werden neu berechnet — gleich fertig…",
@@ -4643,7 +5083,7 @@ de:{
   "common.addToCart":"Zum Wants-Liste-Cart hinzufügen","common.addedCount":"{n} hinzugefügt","common.close":"Schließen",
   "common.shipNote":"Versand geschätzt: ca. {cps} Karten pro Verkäufer, dann Cardmarket-"+
     "Brieftarife (bis 17 Karten 1,40 €, bis 40 Karten 2,10 €) oder 5,00 € versichert ab "+
-    "25 € Bestellwert. Für die genaue Rechnung über eine Versandangabe hovern.",
+    "25 € Bestellwert. Für die genaue Rechnung mit der Maus über eine Versandangabe fahren.",
   "setPage.ownedOfTotal":"{owned} von {total} besessen",
   "setPage.addAllMissing":"Alle fehlenden zum Wants-Liste-Cart hinzufügen",
   "setPage.buyMissingDots":"Fehlende kaufen…",
@@ -4655,7 +5095,7 @@ de:{
   "buyPage.infoTip":"Preise sind Cardmarket-Trendpreise, nicht das günstigste Angebot. "+
     "Versand geschätzt: ca. {cps} Karten pro Verkäufer, dann Cardmarket-Brieftarife (bis "+
     "17 Karten 1,40 €, bis 40 Karten 2,10 €) oder 5,00 € versichert ab 25 € Bestellwert. "+
-    "Für die genaue Rechnung auf eine Versandzahl unten hovern.",
+    "Für die genaue Rechnung mit der Maus über eine Versandzahl unten fahren.",
   "buyPage.cardSingular":"Kartenname","buyPage.cardPlural":"Kartennamen",
   "buyPage.pickGroup":"Gruppe wählen, um sie direkt in den Wants-Liste-Cart zu legen.",
   "buyPage.allMissing":"Alle fehlenden Karten",
@@ -4665,10 +5105,14 @@ de:{
   "cardPage.buyOnCardmarket":"Auf Cardmarket kaufen · {price}","cardPage.buyFoil":"Foil kaufen · {price}",
   "cardPage.viewOnScryfall":"Auf Scryfall ansehen","cardPage.regular":"Normal",
   "cardPage.copiesOwned":"Kopien in Besitz","cardPage.yourCollection":"Deine Sammlung",
-  "cardPage.nonfoil":"Nonfoil","cardPage.setTo4":"Auf 4 Kopien setzen",
+  "cardPage.nonfoil":"Nonfoil","cardPage.setTo4":"4 Kopien hinzufügen",
   "cardPage.wantListEntry":"Wants-Liste-Eintrag","cardPage.set":"Set",
   "cardPage.illustratedBy":"Illustriert von {artist}","cardPage.formatLegality":"Format-Legalität",
   "cardPage.allPrintings":"Alle Drucke",
+  "cardPage.yourCopies":"Deine Exemplare",
+  "cardPage.yourCopiesDesc":"Jeder besessene Posten dieses Kartennamens, über alle Sets "+
+    "hinweg — nach Kauf getrennt, nicht zu einer Menge verschmolzen. Kaufpreis ist "+
+    "editierbar; leer lassen, um auf den aktuellen Trendpreis zurückzufallen.",
   "setPage.noteEndgame":"Endgame","setPage.noteOtherPrinting":"Anderer Druck",
   "setPage.notInGoal":"zählt nicht","setPage.baseMissing":"Basis fehlt",
   "setPage.hideOffGoal":"Off‑Goal-Karten ausblenden",
@@ -4785,6 +5229,14 @@ const pct=n=>(n*100).toFixed(1)+" %";
 const RAR={c:["Common","#7d8896"],u:["Uncommon","#a8b4c2"],r:["Rare","#d4a629"],
            m:["Mythic","#e0692c"],s:["Special","#b49ed0"],b:["Basic land","#6f7a88"]};
 const rarLabel=k=>t("rarity."+k);
+// Sticky "N per page" choice, one per view (sets/cards/value-page-top),
+// same localStorage-backed pattern as GRID_COLS below.
+const PER_CHOICES=[12,24,48,96,192];
+function loadPer(key,dflt){
+  try{const v=+localStorage.getItem("bnd_per_"+key);return PER_CHOICES.includes(v)?v:dflt;}
+  catch(e){return dflt;}
+}
+function savePer(key,val){try{localStorage.setItem("bnd_per_"+key,val);}catch(e){}}
 function toast(msg){
   let b=$("#toast");
   if(!b){b=document.createElement("div");b.id="toast";
@@ -4829,7 +5281,7 @@ let SHOW_COSTS=false;
 let HIDE_OFFGOAL=false;   // set page: hide printings that don't count toward the goal
 let RARMODE="names";   // "By rarity" on Home: card-name counts vs. every printing
 let FORCE_RELOAD=false;   // set after an import so the next route re-fetches
-let SETS=[],STATS=null,PAGE=1,PER=24,VIEW="grid",SORT="totalCost",DIR=1,
+let SETS=[],STATS=null,PAGE=1,PER=loadPer("sets",24),VIEW="grid",SORT="totalCost",DIR=1,
     Q="",FLABELS=null,FSTAT="started";
 
 function donut(p,color,size=96){
@@ -4909,30 +5361,31 @@ function home(){
     <label class="chk" style="margin:14px 0 0;font-size:12.5px;color:var(--muted)">
       <input type="checkbox" id="startNever"> ${t("start.hide")}</label></div>`}
   <div class="donuts">
-    <div class="donut">${donut(nm,"#d4a629")}
+    <div class="donut clickable" id="tileNames" style="cursor:pointer">${donut(nm,"#d4a629")}
       <div><div class="t">${t("home.cardNames")}</div><div class="p">${pct(nm)}</div>
       <div class="s">${t("home.xOfY",{a:num(s.names.owned),b:num(s.names.total)})}</div></div></div>
-    <div class="donut">${donut(pr,"#4a90c4")}
+    <div class="donut clickable" id="tilePrintings" style="cursor:pointer">${donut(pr,"#4a90c4")}
       <div><div class="t">${t("home.printings")}</div><div class="p">${pct(pr)}</div>
       <div class="s">${t("home.xOfY",{a:num(s.printings.owned),b:num(s.printings.total)})}</div></div></div>
-    <div class="donut">${donut(s.setsComplete/Math.max(1,s.setsTotal),"#4f9d69")}
+    <div class="donut clickable" id="tileSetsComplete" style="cursor:pointer">${donut(s.setsComplete/Math.max(1,s.setsTotal),"#4f9d69")}
       <div><div class="t">${t("home.setsCompleted")}</div><div class="p">${s.setsComplete}</div>
       <div class="s">${t("home.ofCountedSets",{n:s.setsTotal})}</div></div></div>
   </div>
   <div class="cards" style="margin-top:12px">
-    <div class="card"><div class="k">${t("home.physicalCards")}</div><div class="v">${num(s.physical)}</div>
+    <div class="card clickable" id="tilePhysical" style="cursor:pointer"><div class="k">${t("home.physicalCards")}</div><div class="v">${num(s.physical)}</div>
       <div class="n">${t("home.duplicatesIncluded")}</div></div>
-    <div class="card"><div class="k">${t("home.collectionValue")}</div>
+    <div class="card clickable" id="tileValue" style="cursor:pointer">
+      <div class="k">${t("home.collectionValue")}</div>
       <div class="v" style="color:var(--gold)">${money(s.value)}</div>
       <div class="n">${t("home.cardmarketTrend")}</div></div>
     ${SHOW_COSTS?`<div class="card"><div class="k">${t("home.remainingCost")}</div><div class="v">${money(s.remaining)}</div>
       <div class="n">${t("home.inclShipping",{n:money(s.shipping)})}</div></div>`:""}
-    ${(SHOW_COSTS&&window.HAS.endgame&&window.HAS.endgame.on!==false)?`<div class="card" id="bigTicket" style="cursor:pointer"
+    ${(SHOW_COSTS&&window.HAS.endgame&&window.HAS.endgame.on!==false)?`<div class="card clickable" id="bigTicket" style="cursor:pointer"
          title="${t("home.showTheseCards")}">
       <div class="k">${t("home.cardsOver",{eur:Math.round((window.HAS.endgame&&window.HAS.endgame.eur)||300)+" €"})}</div>
       <div class="v" style="color:var(--mythic)">${num(s.endgameCount)}</div>
       <div class="n">${t("home.leftOutOfRemaining",{n:money(s.endgameValue)})}</div></div>`:""}
-    <div class="card"><div class="k">${t("home.namesStillMissing")}</div>
+    <div class="card clickable" id="tileMissing" style="cursor:pointer"><div class="k">${t("home.namesStillMissing")}</div>
       <div class="v">${num(s.names.total-s.names.owned)}</div>
       <div class="n">${t("home.acrossCountedSets")}</div></div>
   </div>
@@ -4942,12 +5395,7 @@ function home(){
       <button data-rm="names" class="${RARMODE==="names"?"on":""}">${t("home.cardNames")}</button>
       <button data-rm="printings" class="${RARMODE==="printings"?"on":""}">${t("home.printings")}</button>
     </span></h2>
-  <div class="rarbars">${(()=>{const RD=(RARMODE==="names"?s.rarityNames:s.rarity)||{};
-     return Object.entries(RAR).filter(([k])=>RD[k]).map(([k,[,col]])=>{
-     const d=RD[k],p=d.owned/Math.max(1,d.total);
-     return `<div class="rarrow"><div class="lb">${rarLabel(k)}</div>
-       <div class="track"><div class="fill" style="width:${p*100}%;background:${col}"></div></div>
-       <div class="nm">${num(d.owned)} / ${num(d.total)}</div></div>`;}).join("");})()}</div>
+  <div class="rarbars" id="rarBars"></div>
 
   <h2>${t("home.closestToCompletion")}</h2>
   <div class="list">${s.nearest.map(x=>row(x)).join("")||`<div class="li">${t("home.nothingOpen")}</div>`}</div>
@@ -4961,7 +5409,8 @@ function home(){
   <h2>${t("home.watchlist")}</h2>
   <p class="sub">${t("home.watchlistDesc")}</p>
   <div id="watchlistOut"><p class="sub">${t("missing.loading")}</p></div>`;
-  document.querySelectorAll("[data-rm]").forEach(b=>b.onclick=()=>{RARMODE=b.dataset.rm;home();});
+  renderRarBars();
+  document.querySelectorAll("[data-rm]").forEach(b=>b.onclick=()=>{RARMODE=b.dataset.rm;renderRarBars();});
   if($("#updGo"))$("#updGo").onclick=()=>{SUB="about";ABOUT_SUB="app";go("manage");};
   if($("#updHide"))$("#updHide").onclick=()=>{dismissUpdate(upd.latest);const b=$("#updBanner");if(b)b.remove();};
   const seeStart=()=>{try{localStorage.setItem("bnd_start_seen","1");}catch(e){}};
@@ -4980,7 +5429,38 @@ function home(){
         sort:"price",dir:-1,page:1};
     go("collection");
   };
+  if($("#tileNames"))$("#tileNames").onclick=()=>go("missing");
+  if($("#tileMissing"))$("#tileMissing").onclick=()=>go("missing");
+  if($("#tilePrintings"))$("#tilePrintings").onclick=()=>{
+    CMODE="cards";
+    CF={...CF,q:"",text:"",artist:"",type:"",rarity:"",colors:[],owned:"missing",
+        unique:"0",baseonly:"0",allsets:"0",noprice:"0",minprice:"",maxprice:"",
+        sort:"released",dir:-1,page:1};
+    go("collection");
+  };
+  if($("#tileSetsComplete"))$("#tileSetsComplete").onclick=()=>{
+    FSTAT="done";CMODE="sets";Q="";FLABELS=null;PAGE=1;
+    go("collection");
+  };
+  if($("#tilePhysical"))$("#tilePhysical").onclick=()=>{
+    CMODE="cards";
+    CF={...CF,q:"",text:"",artist:"",type:"",rarity:"",colors:[],owned:"owned",
+        unique:"0",baseonly:"0",allsets:"0",noprice:"0",minprice:"",maxprice:"",
+        sort:"released",dir:-1,page:1};
+    go("collection");
+  };
+  if($("#tileValue"))$("#tileValue").onclick=()=>go("value");
   drawWatchlist();
+}
+function renderRarBars(){
+  const el=$("#rarBars");if(!el||!STATS)return;
+  const s=STATS,RD=(RARMODE==="names"?s.rarityNames:s.rarity)||{};
+  el.innerHTML=Object.entries(RAR).filter(([k])=>RD[k]).map(([k,[,col]])=>{
+    const d=RD[k],p=d.owned/Math.max(1,d.total);
+    return `<div class="rarrow"><div class="lb">${rarLabel(k)}</div>
+      <div class="track"><div class="fill" style="width:${p*100}%;background:${col}"></div></div>
+      <div class="nm">${num(d.owned)} / ${num(d.total)}</div></div>`;}).join("");
+  document.querySelectorAll("#rarMode [data-rm]").forEach(b=>b.classList.toggle("on",b.dataset.rm===RARMODE));
 }
 function sparkline(vals){
   const w=100,h=28,pad=3;
@@ -5023,11 +5503,13 @@ function wlSpark(vals){
 // 7 / 30 days / 1 year / everything — shared by the Home watchlist and every
 // card page. Value is the `range` query param price_history_series() expects.
 const PH_RANGES=[["7","range.d7"],["30","range.d30"],["365","range.y1"],["max","range.max"]];
-let WL_RANGE="7", PH_RANGE="30";
+let WL_RANGE="7", PH_RANGE="30", VH_RANGE="30";
 try{WL_RANGE=localStorage.getItem("bnd_wl_range")||WL_RANGE;
-    PH_RANGE=localStorage.getItem("bnd_ph_range")||PH_RANGE;}catch(e){}
+    PH_RANGE=localStorage.getItem("bnd_ph_range")||PH_RANGE;
+    VH_RANGE=localStorage.getItem("bnd_vh_range")||VH_RANGE;}catch(e){}
 const savePhRange=()=>{try{localStorage.setItem("bnd_wl_range",WL_RANGE);
-  localStorage.setItem("bnd_ph_range",PH_RANGE);}catch(e){}};
+  localStorage.setItem("bnd_ph_range",PH_RANGE);
+  localStorage.setItem("bnd_vh_range",VH_RANGE);}catch(e){}};
 function phRangeSeg(cur,id){
   return `<div class="seg phrangeseg" id="${id}">${PH_RANGES.map(([v,l])=>
     `<button data-phr="${v}" class="${cur===v?"on":""}">${t(l)}</button>`).join("")}</div>`;
@@ -5036,6 +5518,33 @@ function phDate(s){
   const [y,m,d]=s.split("-");
   return d+"."+m+"."+(new Date().getFullYear()!=+y?" "+y:"");
 }
+// Grid density (columns per row): one global, sticky preference - it drives
+// the same --grid-cols CSS var everywhere so it only has to be set once.
+let GRID_COLS=4;
+try{GRID_COLS=+localStorage.getItem("bnd_grid_cols")||GRID_COLS;}catch(e){}
+GRID_COLS=Math.min(6,GRID_COLS);
+function applyGridCols(){document.documentElement.style.setProperty("--grid-cols",GRID_COLS);}
+function perPageHTML(id,current){
+  return `<select id="${id}" class="perSel">${PER_CHOICES.map(n=>
+    `<option value="${n}" ${+current===n?"selected":""}>${t("view.perPage",{n})}</option>`).join("")}
+    </select>`;
+}
+function gridColsHTML(view){
+  if(view!=="grid")return "";
+  return `<span class="gridcols" title="${t("view.perRow")}">
+    <span class="gclbl">${t("view.perRow")}</span>
+    <input type="range" class="gcRange" min="2" max="6" step="1" value="${GRID_COLS}">
+    <span class="gcVal">${GRID_COLS}</span></span>`;
+}
+function bindGridCols(root){
+  const box=root||document, r=box.querySelector(".gcRange");
+  if(!r)return;
+  r.oninput=()=>{
+    GRID_COLS=+r.value;applyGridCols();          // pure CSS var - no re-render needed
+    try{localStorage.setItem("bnd_grid_cols",GRID_COLS);}catch(e){}
+    const v=box.querySelector(".gcVal");if(v)v.textContent=GRID_COLS;
+  };
+}
 // a proper price chart: y grid with € labels, x date labels, an area fill,
 // min/max dots and a crosshair that follows the pointer.
 function priceGraph(h,opt){
@@ -5043,11 +5552,17 @@ function priceGraph(h,opt){
   const S=(h&&h.series)||[];
   if(S.length<2)return `<p class="sub">${t("ph.none")}</p>`;
   const key=opt.foil?"foil":"eur";
-  const W=960,H=opt.h||260,PL=52,PR=16,PT=14,PB=28;
+  const W=opt.w||960,H=opt.h||260,PR=16,PT=14,PB=28;
   const t0=Date.parse(S[0].d),t1=Date.parse(S[S.length-1].d),span=(t1-t0)||1;
   let lo=Math.min(...S.map(p=>p[key])),hi=Math.max(...S.map(p=>p[key]));
   if(lo===hi){lo=Math.max(0,lo*0.9);hi=hi*1.1||1;}
   const gap=(hi-lo)*0.14;lo=Math.max(0,lo-gap);hi=hi+gap;
+  // Left padding has to fit the widest y-axis label - a card's own price
+  // history never needs more than ~52px, but the whole-collection value
+  // graph can run into the thousands and got clipped at a fixed width.
+  // .phlbl is monospace, so a char-count estimate is exact enough.
+  const widest=Math.max(...[0,.25,.5,.75,1].map(f=>money(hi-(hi-lo)*f).length));
+  const PL=Math.max(52,widest*6.2+14);
   const X=d=>PL+(Date.parse(d)-t0)/span*(W-PL-PR);
   const Y=v=>PT+(1-(v-lo)/((hi-lo)||1))*(H-PT-PB);
   const P=S.map(p=>[X(p.d),Y(p[key])]);
@@ -5178,6 +5693,85 @@ function explainPage(){
   bindCrumbs();
 }
 
+const valueTile=x=>`<div class="cc" data-card="${x.set}|${x.number}">
+  <div class="imgwrap">${x.img?`<img class="face" src="${x.img}" alt="${cardName(x)}" loading="lazy">`
+    :`<div class="noimg">${cardName(x)}</div>`}</div>
+  <div class="meta"><div class="cn">${cardName(x)}${x.foil?` <span class="varlbl">${t("setPage.thFoil")}</span>`:""}</div>
+    <div class="cset">${x.setName} · ${x.qty}×</div>
+    <div class="cp">${money(x.price)} <em>· ${money(x.value)}</em></div>
+  </div></div>`;
+let VH_TOP=[],VH_TOP_VIEW="grid",VH_TOP_PAGE=1,VH_TOP_PER=loadPer("valuetop",24);
+async function valuePage(){
+  if(!window.HAS.hasCards||!window.HAS.hasCollection) return setupPrompt();
+  CRUMBS=[];
+  $("#view").innerHTML=`${crumbs([{label:t("nav.home"),hash:"home"},{label:t("valuePage.title")}])}
+    <h1>${t("valuePage.title")}</h1>
+    <p class="sub" style="max-width:640px">${t("valuePage.desc")}</p>
+    <div class="tools" style="margin:16px 0 0">${phRangeSeg(VH_RANGE,"vhRange")}</div>
+    <p class="sub" id="vhChg" style="margin:8px 0"></p>
+    <div id="vhGraph"><p class="sub">${t("browse.searching")}</p></div>
+    <h2 style="margin-top:24px">${t("valuePage.mostValuable")}</h2>
+    <p class="sub" style="max-width:640px">${t("valuePage.mostValuableDesc")}</p>
+    <div id="vhTopOut"><p class="sub">${t("browse.searching")}</p></div>`;
+  bindCrumbs();
+  const renderTop=()=>{
+    const total=VH_TOP.length;
+    const pages=Math.max(1,Math.ceil(total/VH_TOP_PER));
+    VH_TOP_PAGE=Math.min(VH_TOP_PAGE,pages);
+    const page=VH_TOP.slice((VH_TOP_PAGE-1)*VH_TOP_PER,VH_TOP_PAGE*VH_TOP_PER);
+    const out=$("#vhTopOut");
+    if(!total){out.innerHTML=`<div class="empty"><p>${t("valuePage.none")}</p></div>`;return;}
+    out.innerHTML=`<div class="tools">
+        <div class="seg" id="vhTopSeg"><button data-cv="grid" class="${VH_TOP_VIEW==="grid"?"on":""}">${t("collection.grid")}</button>
+        <button data-cv="table" class="${VH_TOP_VIEW==="table"?"on":""}">${t("collection.table")}</button></div>
+        ${perPageHTML("vhTopPer",VH_TOP_PER)}
+        ${gridColsHTML(VH_TOP_VIEW)}
+        <span class="pill">${t("buyPage.cardsCount",{n:num(total)})}</span></div>
+      ${VH_TOP_VIEW==="grid"
+        ? `<div class="cgrid">${page.map(valueTile).join("")}</div>`
+        : `<table><thead><tr><th>${t("missing.thCard")}</th><th>${t("cardPage.set")}</th>
+           <th class="num">${t("browse.sortCopiesOwned")}</th><th class="num">${t("missing.thPrice")}</th>
+           <th class="num">${t("valuePage.thValue")}</th></tr></thead><tbody>${page.map(x=>`<tr>
+           <td><span class="nmline"><span class="setlink" data-card="${x.set}|${x.number}"
+             data-pop="${x.img||""}">${cardName(x)}</span>${x.foil?` <span class="varlbl">${t("setPage.thFoil")}</span>`:""}</span></td>
+           <td><span class="setlink" data-set="${x.set}">${x.setName}</span></td>
+           <td class="num">${x.qty}</td>
+           <td class="num">${money(x.price)}</td>
+           <td class="num" style="color:var(--gold)">${money(x.value)}</td></tr>`).join("")}
+           </tbody></table>`}
+      <div class="pager">${pages>1?`<button ${VH_TOP_PAGE<=1?"disabled":""} id="vhTopPv">${t("collection.previous")}</button>
+        <span>${t("missing.pagerPageOfN",{p:VH_TOP_PAGE,n:num(pages)})}</span>
+        <button ${VH_TOP_PAGE>=pages?"disabled":""} id="vhTopNx">${t("collection.next")}</button>`:""}</div>`;
+    bindTiles(out);bindSetLinks();bindGridCols(out);
+    document.querySelectorAll("#vhTopSeg [data-cv]").forEach(b=>b.onclick=()=>{VH_TOP_VIEW=b.dataset.cv;VH_TOP_PAGE=1;renderTop();});
+    $("#vhTopPer").onchange=e=>{VH_TOP_PER=+e.target.value;savePer("valuetop",VH_TOP_PER);VH_TOP_PAGE=1;renderTop();};
+    if($("#vhTopPv"))$("#vhTopPv").onclick=()=>{VH_TOP_PAGE--;renderTop();};
+    if($("#vhTopNx"))$("#vhTopNx").onclick=()=>{VH_TOP_PAGE++;renderTop();};
+  };
+  const renderGraph=h=>{
+    // Match the SVG's internal coordinate width to its actual rendered pixel
+    // width - viewBox + preserveAspectRatio="none" otherwise stretches
+    // everything (text included) whenever the container is much wider than
+    // the fixed default (this page has no max-width, unlike the card page).
+    const w=Math.max(600,$("#vhGraph").clientWidth||960);
+    $("#vhGraph").innerHTML=priceGraph(h,{w});bindPriceGraph($("#vhGraph"));
+    if(h.changePct==null){$("#vhChg").textContent="";return;}
+    $("#vhChg").innerHTML=`${h.changeEur>0?"+":""}${money(h.changeEur)} `+
+      `(${h.changePct>0?"+":""}${h.changePct.toFixed(1)} %) · ${t("ph.lohi",{lo:money(h.lo),hi:money(h.hi)})}`;
+    $("#vhChg").style.color=h.changeEur>0?"var(--ok)":h.changeEur<0?"var(--bad)":"var(--muted)";
+  };
+  const fetchVh=async v=>{
+    const h=await getJSON("/api/value-history?range="+v);
+    renderGraph(h);VH_TOP=h.top;VH_TOP_PAGE=1;renderTop();
+  };
+  await fetchVh(VH_RANGE);
+  bindPhRange("#vhRange",v=>{
+    VH_RANGE=v;savePhRange();
+    document.querySelectorAll("#vhRange [data-phr]").forEach(b=>b.classList.toggle("on",b.dataset.phr===v));
+    fetchVh(v);
+  });
+}
+
 /* ---------------- Setup wizard ---------------- */
 const WIZ_STEPS=["welcome","lang","country","import","carddata","collector","endgame","cmhelper","done"];
 let WIZ_STEP=0, WIZ_IMPORT_TEXT=null;
@@ -5213,7 +5807,7 @@ function wizardPage(){
       <h2>${t("lang.cardSetNames")}</h2>
       <p class="sub">${t("lang.cardSetNamesDesc")}</p>
       <div class="cards" style="grid-template-columns:repeat(auto-fit,minmax(220px,1fr))">${
-        CARD_LANGS.map(([id,label,desc])=>`<div class="card" data-cl="${id}"
+        CARD_LANGS.map(([id,label,desc])=>`<div class="card clickable" data-cl="${id}"
           style="cursor:pointer;${CARDLANG===id?"border-color:var(--gold)":""}">
           <div class="k">${CARDLANG===id?t("lang.current"):""}</div>
           <div class="v" style="font-size:16px">${label}</div>
@@ -5258,11 +5852,11 @@ function wizardPage(){
     body=`<h1>${t("wizard.endgameTitle")}</h1>
       <p class="sub">${t("wizard.endgameDesc")}</p>
       <div class="cards" style="grid-template-columns:repeat(auto-fit,minmax(200px,1fr))">
-        <div class="card" data-eg="on" style="cursor:pointer;${e.on!==false?"border-color:var(--gold)":""}">
+        <div class="card clickable" data-eg="on" style="cursor:pointer;${e.on!==false?"border-color:var(--gold)":""}">
           <div class="k">${e.on!==false?t("lang.current"):""}</div>
           <div class="v" style="font-size:15px">${t("wizard.egSetAside",{eur:money(eur)})}</div>
           <div class="n">${t("wizard.egSetAsideDesc")}</div></div>
-        <div class="card" data-eg="off" style="cursor:pointer;${e.on===false?"border-color:var(--gold)":""}">
+        <div class="card clickable" data-eg="off" style="cursor:pointer;${e.on===false?"border-color:var(--gold)":""}">
           <div class="k">${e.on===false?t("lang.current"):""}</div>
           <div class="v" style="font-size:15px">${t("wizard.egCountAll")}</div>
           <div class="n">${t("wizard.egCountAllDesc")}</div></div>
@@ -5417,9 +6011,13 @@ function collection(){
         VIEW==="table"?"":"disabled"}> ${t("collection.groupSubsets")}</label>
     <div class="seg" id="viewSeg"><button data-v="grid" class="${VIEW==="grid"?"on":""}">${t("collection.grid")}</button>
       <button data-v="table" class="${VIEW==="table"?"on":""}">${t("collection.table")}</button></div>
+    ${perPageHTML("perSel",PER)}
+    <span id="gcolsBox">${gridColsHTML(VIEW)}</span>
   </div>
   <div id="out"></div><div class="pager" id="pg"></div>`;
   bindModeSeg();
+  bindGridCols();
+  $("#perSel").onchange=e=>{PER=+e.target.value;savePer("sets",PER);PAGE=1;render();};
   $("#famChk").onchange=e=>{FAMILY=e.target.checked;PAGE=1;render();};
   $("#hideExc").onchange=e=>{HIDEEXC=e.target.checked;PAGE=1;render();};
   $("#q").oninput=e=>{Q=e.target.value;PAGE=1;render();};
@@ -5534,7 +6132,7 @@ function render(){
       body:JSON.stringify({code:s.code,mode:s.counted?"exclude":"include"})});
     await load();render();});
 }
-const card=s=>`<div class="set ${s.missing===0&&s.counted?"done":""} ${s.counted?"":"off"}">
+const card=s=>`<div class="set clickable ${s.missing===0&&s.counted?"done":""} ${s.counted?"":"off"}">
   <div class="hd" data-set="${s.code}" style="cursor:pointer">${icon(s)}
     <div><div class="nm">${s.name}</div>
     <div class="cd">${s.code.toUpperCase()} · ${s.released}</div></div></div>
@@ -5652,18 +6250,21 @@ const VAR=c=>(c.variant?`<span class="varlbl">${c.variant}</span>`:"")+
   ((c.ver&&c.ver>1&&!c.extras)?`<span class="verlbl" data-tip-title="${t('tip.cmVerTitle')}"
     data-tip="${t('tip.cmVer',{v:c.ver})}"
     >V.${c.ver}</span>`:"");
-const cardTile=c=>`<div class="cc" data-card="${c.set}|${c.number}">
+const cardTile=c=>{
+  const qn=c.qtyNormal||0,qf=c.qtyFoil||0,qt=qn+qf;
+  const ownLabel=qt?[qn?`${qn}×`:"",qf?`${t("setPage.thFoil")} ${qf}×`:""].filter(Boolean).join(" · "):"0";
+  return `<div class="cc" data-card="${c.set}|${c.number}">
   <div class="imgwrap">${c.img?`<img class="face" src="${c.img}" alt="${cardName(c)}" loading="lazy">`
     :`<div class="noimg">${cardName(c)}</div>`}
     <button class="tilecart" data-cart="${c.set}|${c.number}"
       title="${t('common.addToCart')}">+</button></div>
-  <div class="meta"><div class="cn">${cardName(c)}
-      <span class="${c.qty?"owned":"miss"}">${c.qty?c.qty+"×":"0"}</span></div>
+  <div class="meta"><div class="cn">${cardName(c)}</div>
+    <div class="cqty"><span class="${qt?"owned":"miss"}">${ownLabel}</span></div>
     ${c.variant||c.extras?`<div class="vrow">${VAR(c)}</div>`:""}
     ${c.setName?`<div class="cset">${c.setName} · #${c.number}</div>`:""}
     <div class="cp">${c.eur?money(c.eur):(c.foil?"<em>foil</em> "+money(c.foil):"—")}${
       c.eur&&c.foil?` <em>· foil ${money(c.foil)}</em>`:""}</div>
-  </div></div>`;
+  </div></div>`;};
 function bindTiles(root){
   (root||document).querySelectorAll("[data-card]").forEach(e=>e.onclick=ev=>{
     ev.stopPropagation();
@@ -5740,7 +6341,7 @@ function drawCards(){
       <td class="num">${c.number}</td>
       <td><span class="nmline"><span class="setlink"
         data-card="${DETAIL.code}|${c.number}" data-pop="${c.img||""}">${cardName(c)}</span>${VAR(c)}</span></td>
-      <td>${c.type||""}</td>
+      <td>${cardType(c)}</td>
       <td>${RAR[c.rarity]?rarLabel(c.rarity):"?"}</td><td class="num">${c.eur?money(c.eur):"—"}</td>
       <td class="num">${c.foil?money(c.foil):"—"}</td>
       <td class="num">${c.qty||""}</td>
@@ -5898,16 +6499,65 @@ async function cardPage(sc,nr){
         `<div><span>${f}</span><span class="tag ${v[0]==="l"?"l":v[0]==="b"?"b":v[0]==="r"?"r":"n"}">${
           v.replace("_"," ").toUpperCase()}</span></div>`).join("")}</div>
       <h2>${t("cardPage.allPrintings")} <span class="sub" style="margin:0">${d.printings.length}</span></h2>
-      <div class="list">${d.printings.map(p=>`<div class="li" data-card="${p.set}|${p.number}" data-swap="1"
+      ${d.printings.length>8?`<input type="search" id="printsQ" placeholder="${t("manageSets.searchPlaceholder")}"
+        style="margin-bottom:8px;width:100%;max-width:320px">`:""}
+      <div class="list" id="printsBody"></div>
+      <h2 id="copiesHead" style="display:none">${t("cardPage.yourCopies")}</h2>
+      <p class="sub" id="copiesDesc" style="display:none;max-width:640px">${t("cardPage.yourCopiesDesc")}</p>
+      <input type="search" id="copiesQ" placeholder="${t("manageSets.searchPlaceholder")}"
+        style="display:none;margin-bottom:8px;width:100%;max-width:320px">
+      <div class="list" id="copiesBody"></div>
+    </div></div>`;
+  bindCrumbs();bindSetLinks();
+  const renderPrints=()=>{
+    const q=($("#printsQ")?$("#printsQ").value:"").trim().toLowerCase();
+    const rows=d.printings.filter(p=>!q||p.setName.toLowerCase().includes(q));
+    $("#printsBody").innerHTML=rows.map(p=>`<div class="li" data-card="${p.set}|${p.number}" data-swap="1"
         data-pop="${p.img||""}">
         <span class="nm">${p.setName}</span>
         <span class="mt">#${p.number} · ${p.released}</span>
         <span class="mt" style="flex:0 0 78px;text-align:right;color:var(--gold)">${
           p.eur?money(p.eur):"—"}</span>
         <span class="mt" style="flex:0 0 62px;text-align:right">${p.qty?p.qty+"×":"—"}</span>
-      </div>`).join("")}</div>
-    </div></div>`;
-  bindCrumbs();bindTiles();bindSetLinks();
+      </div>`).join("");
+    bindTiles($("#printsBody"));
+  };
+  const renderCopies=()=>{
+    const has=d.copies.length>0;
+    $("#copiesHead").style.display=has?"":"none";
+    $("#copiesDesc").style.display=has?"":"none";
+    $("#copiesQ").style.display=has&&d.copies.length>8?"":"none";
+    if(!has){$("#copiesBody").innerHTML="";return;}
+    const q=$("#copiesQ").value.trim().toLowerCase();
+    const rows=d.copies.filter(cp=>!q||cp.setName.toLowerCase().includes(q));
+    $("#copiesBody").innerHTML=rows.map(cp=>`<div class="li" data-card="${cp.set}|${cp.number}"
+        data-pop="${cp.img||""}">
+        <span class="nm">${cp.setName}${cp.foil?` <span class="varlbl">${t("setPage.thFoil")}</span>`:""}</span>
+        <span class="mt">#${cp.number} · ${cp.qty}×</span>
+        <span class="mt" style="flex:0 0 96px" onclick="event.stopPropagation()">
+          <input type="number" step="0.01" min="0" class="priceIn" data-copyid="${cp.id}"
+            value="${cp.purchasePrice!=null?cp.purchasePrice:""}"
+            placeholder="${cp.trend?money(cp.trend):"—"}"
+            style="width:84px;background:var(--panel2);border:1px solid var(--line);
+              color:var(--text);padding:4px 6px;border-radius:4px;font-family:var(--mono)"></span>
+        <span class="mt" style="flex:0 0 78px;text-align:right;color:var(--dim)">${
+          cp.trend?money(cp.trend):"—"}</span>
+      </div>`).join("");
+    bindTiles($("#copiesBody"));
+    document.querySelectorAll("#copiesBody .priceIn").forEach(inp=>{
+      const commit=async()=>{
+        const val=inp.value.trim();
+        const r=await fetch("/api/purchase-price",{method:"POST",
+          body:JSON.stringify({id:+inp.dataset.copyid, price:val===""?null:val})}).then(r=>r.json());
+        if(r.copies){d.copies=r.copies;renderCopies();}
+      };
+      inp.onclick=e=>e.stopPropagation();
+      inp.onchange=commit;
+    });
+  };
+  renderPrints();renderCopies();
+  if($("#printsQ"))$("#printsQ").oninput=renderPrints;
+  $("#copiesQ").oninput=renderCopies;
   const renderCardPh=h=>{
     const g=$("#cardPhGraph"),chg=$("#cardPhChg");if(!g)return;
     g.innerHTML=priceGraph(h,{h:260});bindPriceGraph(g);
@@ -5946,11 +6596,11 @@ async function cardPage(sc,nr){
   document.querySelectorAll("[data-adj]").forEach(b=>b.onclick=async()=>{
     const [foilKey,op]=b.dataset.adj.split("|");
     const body={set:d.set,number:d.number,name:d.name,foil:foilKey==="foil"};
-    if(op==="set4")Object.assign(body,{action:"set",qty:4});
-    else Object.assign(body,{action:"delta",delta:parseInt(op,10)});
+    Object.assign(body,{action:"delta",delta:op==="set4"?4:parseInt(op,10)});
     const nd=await fetch("/api/collection-adjust",{method:"POST",
       body:JSON.stringify(body)}).then(r=>r.json());
     d.qty=nd.qty;d.qtyNormal=nd.qtyNormal;d.qtyFoil=nd.qtyFoil;
+    d.copies=nd.copies||[];renderCopies();          // the new/changed batch shows up right away
     $("#qtyNormal").textContent=d.qtyNormal;
     $("#qtyFoil").textContent=d.qtyFoil;
     $("#qtyTotal").textContent=d.qty;
@@ -5962,7 +6612,7 @@ async function cardPage(sc,nr){
 /* ---------------- Card browser ---------------- */
 let CF={q:"",text:"",artist:"",type:"",rarity:"",colors:[],colormode:"atleast",
         owned:"all",unique:"0",baseonly:"0",allsets:"0",noprice:"0",minprice:"",maxprice:"",
-        sort:"released",dir:-1,page:1,per:60,view:"grid"};
+        sort:"released",dir:-1,page:1,per:loadPer("cards",48),view:"grid"};
 async function cardsPane(){
   const box=$("#cardsOut");
   if(!box)return;
@@ -5982,6 +6632,8 @@ async function cardsPane(){
         ["cmc",t("browse.sortManaValue")],["qty",t("browse.sortCopiesOwned")]].map(([v,l])=>
         `<option value="${v}" ${CF.sort===v?"selected":""}>${l}</option>`).join("")}</select>
       <button id="cdir2">${CF.dir<0?"▼":"▲"}</button>
+      ${perPageHTML("perSel2",CF.per)}
+      ${gridColsHTML(CF.view)}
       <span class="pill">${t("buyPage.cardsCount",{n:num(r.total)})}</span></div>
     ${CF.view==="grid"
       ? `<div class="cgrid">${r.cards.map(cardTile).join("")}</div>`
@@ -5992,7 +6644,7 @@ async function cardsPane(){
          <td><span class="nmline"><span class="setlink"
            data-card="${c.set}|${c.number}" data-pop="${c.img||""}">${cardName(c)}</span>${VAR(c)}</span></td>
          <td><span class="setlink" data-set="${c.set}">${c.setName}</span></td>
-         <td class="num">${c.number}</td><td>${c.type||""}</td>
+         <td class="num">${c.number}</td><td>${cardType(c)}</td>
          <td>${RAR[c.rarity]?rarLabel(c.rarity):"?"}</td>
          <td class="num">${c.eur?money(c.eur):"—"}</td>
          <td class="num">${c.foil?money(c.foil):"—"}</td>
@@ -6004,10 +6656,11 @@ async function cardsPane(){
     <div class="pager">${pages>1?`<button ${CF.page<=1?"disabled":""} id="cpv">${t("collection.previous")}</button>
       <span>${t("missing.pagerPageOfN",{p:CF.page,n:num(pages)})}</span>
       <button ${CF.page>=pages?"disabled":""} id="cnx">${t("collection.next")}</button>`:""}</div>`;
-  bindTiles();bindCartButtons();bindSetLinks();
+  bindTiles();bindCartButtons();bindSetLinks();bindGridCols();
   document.querySelectorAll("[data-cv]").forEach(b=>b.onclick=()=>{CF.view=b.dataset.cv;cardsPane();});
   $("#csort2").onchange=e=>{CF.sort=e.target.value;CF.page=1;cardsPane();};
   $("#cdir2").onclick=()=>{CF.dir=-CF.dir;CF.page=1;cardsPane();};
+  $("#perSel2").onchange=e=>{CF.per=+e.target.value;savePer("cards",CF.per);CF.page=1;cardsPane();};
   if($("#cpv"))$("#cpv").onclick=()=>{CF.page--;cardsPane();scrollTo(0,0);};
   if($("#cnx"))$("#cnx").onclick=()=>{CF.page++;cardsPane();scrollTo(0,0);};
 }
@@ -6869,7 +7522,7 @@ async function saveGoal(patch){
 function goalPresetCards(onPick){
   const g=(window.HAS&&window.HAS.goal)||{scope:"names",extras:"exclude",serialized:"exclude"};
   return `<div class="cards" style="grid-template-columns:repeat(auto-fit,minmax(184px,1fr))">${
-    GOAL_PRESETS.map(([id,p])=>`<div class="card" data-goalp="${id}" style="cursor:pointer;${
+    GOAL_PRESETS.map(([id,p])=>`<div class="card clickable" data-goalp="${id}" style="cursor:pointer;${
       goalMatchesPreset(g,p)?"border-color:var(--gold)":""}">
       <div class="k">${goalMatchesPreset(g,p)?t("lang.current"):""}</div>
       <div class="v" style="font-size:15px">${t("goal.preset."+id)}</div>
@@ -6909,7 +7562,7 @@ function languagePane(sel){
   <h2>${t("lang.cardSetNames")}</h2>
   <p class="sub">${t("lang.cardSetNamesDesc")}</p>
   <div class="cards" style="grid-template-columns:repeat(auto-fit,minmax(220px,1fr))">${
-    CARD_LANGS.map(([id,label,desc])=>`<div class="card" data-cl="${id}"
+    CARD_LANGS.map(([id,label,desc])=>`<div class="card clickable" data-cl="${id}"
       style="cursor:pointer;${CARDLANG===id?"border-color:var(--gold)":""}">
       <div class="k">${CARDLANG===id?t("lang.current"):""}</div>
       <div class="v" style="font-size:16px">${label}</div>
@@ -6926,7 +7579,7 @@ function designPane(sel){
   $(sel||"#sub").innerHTML=`<h2 style="margin-top:0">${t("design.theme")}</h2>
   <p class="sub">${t("design.themeDesc")}</p>
   <div class="cards" style="grid-template-columns:repeat(auto-fit,minmax(220px,1fr))">${
-    THEMES.map(([id,label,desc])=>`<div class="card" data-th="${id}"
+    THEMES.map(([id,label,desc])=>`<div class="card clickable" data-th="${id}"
       style="cursor:pointer;${THEME===id?"border-color:var(--gold)":""}">
       <div class="k">${THEME===id?t("lang.current"):""}</div>
       <div class="v" style="font-size:16px">${label}</div>
@@ -6947,7 +7600,7 @@ function shippingPane(sel){
   <h2>${t("shipPref.title")}</h2>
   <p class="sub">${t("shipPref.desc")}</p>
   <div class="cards" style="grid-template-columns:repeat(auto-fit,minmax(220px,1fr))">${
-    OPTS.map(([id,label,desc])=>`<div class="card" data-sp="${id}"
+    OPTS.map(([id,label,desc])=>`<div class="card clickable" data-sp="${id}"
       style="cursor:pointer;${(TRACKED_SHIP?"1":"0")===id?"border-color:var(--gold)":""}">
       <div class="k">${(TRACKED_SHIP?"1":"0")===id?t("lang.current"):""}</div>
       <div class="v" style="font-size:16px">${label}</div>
@@ -6979,6 +7632,9 @@ function updatePane(){
     <label><input type="radio" name="m" value="add">
       <span>${t("manageUpdate.add")}<span class="d">${t("manageUpdate.addDesc")}</span></span></label>
   </div>
+  <label class="chk" id="keepPricesRow" style="margin:10px 0 2px"><input type="checkbox" id="keepPrices" checked>
+    ${t("manageUpdate.keepPrices")}</label>
+  <p class="sub" id="keepPricesDesc" style="max-width:640px">${t("manageUpdate.keepPricesDesc")}</p>
   <button id="imp" class="pri" disabled>${t("manageUpdate.importBtn")}</button>
   <div id="impMsg"></div>
   <h2>${t("manageUpdate.cardDataTitle")}</h2>
@@ -7011,9 +7667,15 @@ function updatePane(){
       $("#drop").classList.add("ok");};
     rd.readAsText(f);
   };
+  const syncKeepPrices=()=>{
+    const replace=document.querySelector("input[name=m]:checked").value==="replace";
+    $("#keepPricesRow").style.display=replace?"":"none";
+    $("#keepPricesDesc").style.display=replace?"":"none";
+  };
   document.querySelectorAll("#mode label").forEach(l=>l.onclick=()=>{
     document.querySelectorAll("#mode label").forEach(x=>x.classList.remove("on"));
-    l.classList.add("on");});
+    l.classList.add("on");syncKeepPrices();});
+  syncKeepPrices();
   $("#imp").onclick=async()=>{
     const mode=document.querySelector("input[name=m]:checked").value;
     $("#imp").disabled=true;$("#imp").textContent=t("manageUpdate.importing");
@@ -7021,7 +7683,8 @@ function updatePane(){
     let r;
     try{
       r=await fetch("/api/import",{method:"POST",
-        body:JSON.stringify({csv:text,mode,format:($("#fmt")&&$("#fmt").value)||"auto"})}).then(r=>r.json());
+        body:JSON.stringify({csv:text,mode,format:($("#fmt")&&$("#fmt").value)||"auto",
+          keepExistingPrices:$("#keepPrices").checked})}).then(r=>r.json());
       if(r.ok){busyStep(t("busy.recount"));FORCE_RELOAD=true;await load();}
     }catch(e){ r={ok:false,error:String(e)}; }
     await busyDone();
@@ -7094,6 +7757,12 @@ function updatePane(){
 // setsPane() call rebuilds `groups` from the latest SETS but keeps whichever
 // categories the user had opened) and the live search text.
 let SETS_EXPANDED=new Set(),SETS_Q="";
+// s.kind is "Category — Label" (e.g. "Special Set — Token") — kept in that
+// order everywhere else (kindClass() on the Collection page matches it by
+// its Category prefix), but scanning a list of ~20 of these for one label
+// is easier when the distinguishing word (Token, Commander, Core, …) leads.
+// Display-only flip, just for this page.
+const kindFlip=k=>{const i=k.indexOf(" — ");return i<0?k:k.slice(i+3)+" — "+k.slice(0,i);};
 function setsPane(sel){
   const groups={};
   SETS.forEach(s=>{(groups[s.kind]=groups[s.kind]||[]).push(s);});
@@ -7118,7 +7787,7 @@ function setsPane(sel){
       return `<div class="list" style="margin-bottom:10px">
         <div class="li" style="background:var(--panel2);cursor:pointer" data-grptoggle="${k}">
           <span class="mt" style="flex:0 0 14px">${open?"▾":"▸"}</span>
-          <span class="nm"><b>${k}</b></span><span class="mt">${t("manageSets.ofCounted",{on,total:g.length})}</span>
+          <span class="nm"><b>${kindFlip(k)}</b></span><span class="mt">${t("manageSets.ofCounted",{on,total:g.length})}</span>
           <button data-grp="${k}" data-m="exclude">${t("manageSets.excludeAll")}</button>
           <button data-grp="${k}" data-m="include">${t("manageSets.includeAll")}</button></div>
         ${rows.map(s=>`<div class="li srow">
@@ -7473,7 +8142,8 @@ function helpPane(sel){
         Schätzung: dünn besetzte alte Sets brauchen mehr Verkäufer, umfangreiche moderne Sets
         weniger.</p>
      <p>Jede goldene „bis zur Fertigstellung“-Zahl <b>enthält</b> diese geschätzten
-        Versandkosten. Hover zeigt die Aufteilung zwischen Karten und Porto. Die Tarife stammen
+        Versandkosten. Fährst du mit der Maus darüber, siehst du die Aufteilung zwischen
+        Karten und Porto. Die Tarife stammen
         direkt von <a href="https://www.cardmarket.com/de/Magic/Help/ShippingCosts"
         target="_blank" rel="noopener">Cardmarkets eigener Versandkosten-Seite</a>, die auch
         jedes andere Land und jede Versandart im Detail auflistet.</p>`,
@@ -7644,6 +8314,8 @@ async function doRoute(){
       await cardPage(sc,decodeURIComponent(nr));
     }else if(p==="deck"){
       deckPage();
+    }else if(p==="value"){
+      await valuePage();
     }else{
       if(p==="collection")CRUMBS=[{label:t("nav.collection"),hash:"collection"}];
       if(p==="missing"){CRUMBS=[{label:t("nav.collection"),hash:"collection"}];CMODE="missing";}
@@ -7723,6 +8395,7 @@ function paintNav(){
   $("#brand").title=t("nav.homeTitle");
 }
 paintNav();
+applyGridCols();
 fetch("/api/ui-lang",{method:"POST",body:JSON.stringify({lang:LANG})}).catch(()=>{});
 route();
 </script></body></html>"""
@@ -8892,6 +9565,12 @@ def _price_gap_check():
 
 def auto_sync_loop():
     time.sleep(5)                  # let the server finish starting up first
+    try:
+        # Precompute the collection value history now, in the background, so
+        # the first click on the value page never has to wait for it.
+        cached_value_history(connect())
+    except Exception as e:                              # noqa: BLE001
+        REFRESH["error"] = str(e)
     while True:
         try:
             _auto_sync_check()
@@ -8998,7 +9677,14 @@ def run_tray(url, autoopen=False):
                 except Exception:                             # noqa: BLE001
                     pass
             try:
-                Foundation.NSTimer.scheduledTimerWithTimeInterval_repeats_block_(
+                # Stored on ic (kept alive by TRAY_ICON + the blocking icon.run()
+                # below for as long as the app runs) — an unreferenced NSTimer/
+                # observer is fair game for Python's own GC even though the ObjC
+                # side would normally keep a repeating timer alive by itself.
+                # That's almost certainly why this net worked (fires in 1.5s,
+                # too fast to get collected first) while the 45s heartbeat and
+                # the wake observer below quietly stopped firing after a while.
+                ic._settle_timer = Foundation.NSTimer.scheduledTimerWithTimeInterval_repeats_block_(
                     1.5, False, lambda _t: _reassert())
             except Exception:                                 # noqa: BLE001
                 pass
@@ -9011,14 +9697,14 @@ def run_tray(url, autoopen=False):
             # goes missing. Two nets: react to wake immediately, and a slow
             # heartbeat as a catch-all for whatever else causes it.
             try:
-                AppKit.NSWorkspace.sharedWorkspace().notificationCenter() \
+                ic._wake_observer = AppKit.NSWorkspace.sharedWorkspace().notificationCenter() \
                     .addObserverForName_object_queue_usingBlock_(
                         AppKit.NSWorkspaceDidWakeNotification, None, None,
                         lambda _n: _reassert())
             except Exception:                                 # noqa: BLE001
                 pass
             try:
-                Foundation.NSTimer.scheduledTimerWithTimeInterval_repeats_block_(
+                ic._heartbeat_timer = Foundation.NSTimer.scheduledTimerWithTimeInterval_repeats_block_(
                     45.0, True, lambda _t: _reassert())
             except Exception:                                 # noqa: BLE001
                 pass
