@@ -16,7 +16,7 @@ import urllib.request
 from datetime import datetime, timedelta
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-VERSION = "6.32"
+VERSION = "6.33"
 SCHEMA = 19
 
 
@@ -807,13 +807,16 @@ def _resumable_download(url, dest, on_progress=None):
     big Scryfall and MTGJSON bulks, especially behind Windows AV/firewalls).
     Both CDNs honour Range; if a server ignores it and replies 200 we restart
     from scratch. Keeps retrying as long as each attempt downloads *some* more
-    bytes; gives up only after 6 attempts in a row that made no progress."""
+    bytes; gives up only after 20 attempts in a row that made no progress at
+    all (a reset right at connect time, before any Range-resume is even
+    possible - about 5 minutes of patience, since a real-world sustained
+    disruption has been observed to sometimes outlast a much shorter budget)."""
     import http.client
     retriable = (urllib.error.URLError, ConnectionError, TimeoutError,
                  http.client.IncompleteRead, OSError)
     total = 0
     stalls = 0
-    for _ in range(60):
+    for _ in range(100):
         start_size = os.path.getsize(dest) if os.path.exists(dest) else 0
         got = start_size
         headers = dict(UA)
@@ -847,16 +850,24 @@ def _resumable_download(url, dest, on_progress=None):
             if e.code in (400, 401, 403, 404, 410):       # permanent — no point retrying
                 raise
             stalls += 1
-            if stalls >= 6:
+            if stalls >= 20:
                 raise
-            time.sleep(min(2 * (stalls + 1), 15))
+            time.sleep(min(2 * (stalls + 1), 20))
         except retriable:
+            # A reset right at connect time (before a single byte lands on
+            # disk) never lets `grew` become True, so this is the path a
+            # sustained-but-not-permanent disruption actually takes - and it
+            # used to give up after just ~6 attempts/~40s total, far short of
+            # the 60-iteration budget the docstring promises. Real-world
+            # report: manual retries eventually succeeded, but not
+            # reliably within that ~40s window. 20 stalls / 20s cap gives
+            # ~5 minutes of patience before giving up for good.
             grew = (os.path.getsize(dest) if os.path.exists(dest) else 0) > start_size
             stalls = 0 if grew else stalls + 1
-            if stalls >= 6:
+            if stalls >= 20:
                 raise
-            time.sleep(min(2 * (stalls + 1), 15))
-    raise OSError("download did not finish after 60 attempts")
+            time.sleep(min(2 * (stalls + 1), 20))
+    raise OSError("download did not finish after 100 attempts")
 
 
 def find_bulk_url(entry):
