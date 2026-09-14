@@ -16,7 +16,7 @@ import urllib.request
 from datetime import datetime, timedelta
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-VERSION = "6.35"
+VERSION = "6.36"
 SCHEMA = 19
 
 
@@ -3970,8 +3970,8 @@ nav a.tab.on{color:var(--gold);border-color:var(--gold)}
 footer{max-width:1240px;margin:0 auto;padding:18px 22px 26px;color:var(--dim);
   font-size:12px;line-height:1.6;border-top:1px solid var(--line)}
 footer .footlinks{display:flex;flex-wrap:wrap;gap:8px 18px;margin-top:10px}
-footer .footlinks a{color:var(--muted)}
-footer .footlinks a:hover{color:var(--gold)}
+footer .footlinks a{color:var(--gold);text-decoration:none}
+footer .footlinks a:hover{text-decoration:underline}
 h1{font-family:var(--serif);font-weight:400;font-size:30px;margin:0 0 4px}
 h2{font-family:var(--serif);font-weight:400;font-size:20px;margin:34px 0 12px}
 .sub{color:var(--muted);font-size:14px;margin:0 0 20px}
