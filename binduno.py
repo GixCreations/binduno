@@ -16,7 +16,7 @@ import urllib.request
 from datetime import datetime, timedelta
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-VERSION = "6.27"
+VERSION = "6.28"
 SCHEMA = 19
 
 
@@ -623,10 +623,15 @@ def fetch(url):
     return urllib.request.urlopen(urllib.request.Request(url, headers=UA), timeout=240)
 
 
-def _fetch_json(url, tries=5):
+def _fetch_json(url, tries=12):
     """fetch() + json.load with retries. The small Scryfall API calls
     (/sets, /bulk-data) also hit immediate connection resets on some
-    networks (VPN / AV with HTTPS scanning), so one attempt isn't enough."""
+    networks (VPN / AV with HTTPS scanning), so one attempt isn't enough.
+    Needs a much more patient budget than it first looks like: unlike the
+    big bulk file (_resumable_download, 60 attempts with Range-resume),
+    a single failure here throws away the whole call, so a short run of
+    bad luck used to exhaust the old 5-try/8s-cap budget (~30s total)
+    well before an intermittent reset on the user's machine cleared up."""
     import http.client
     last = None
     for i in range(tries):
@@ -636,7 +641,7 @@ def _fetch_json(url, tries=5):
         except (urllib.error.URLError, ConnectionError, TimeoutError,
                 http.client.IncompleteRead, OSError, ValueError) as e:
             last = e
-            time.sleep(min(2 * (i + 1), 8))
+            time.sleep(min(2 * (i + 1), 10))
     raise last
 
 
