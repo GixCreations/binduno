@@ -21,13 +21,47 @@ keep in sync:
 4. Exports just the `price_history` table as a small gzipped SQLite file
    to `/var/www/binduno-pricedata/history.sqlite.gz`.
 
+The same `/pricedata/` location also serves `sl-expansions.json` (see
+below) - a second, unrelated file that happens to live in the same nginx
+`alias` since both are small, publicly-fetchable, best-effort files the
+app tries before falling back to something baked in.
+
 ## Server layout
 
 - `/opt/binduno-pricelogger/` — `binduno.py` + `sync.py`, owned by a
   dedicated system user `binduno-price` (no login shell).
 - `/opt/binduno-pricelogger/data/` — this instance's own SQLite DB
   (`BINDUNO_DATA`), entirely separate from anyone's real collection.
-- `/var/www/binduno-pricedata/` — the published export, served by nginx.
+- `/var/www/binduno-pricedata/` — `history.sqlite.gz` (the published
+  export, rebuilt daily by `sync.py`) and `sl-expansions.json` (hand-
+  maintained, see below) — both served by nginx.
+
+## Secret Lair Cardmarket-expansion names (`sl-expansions.json`)
+
+Cardmarket splits Secret Lair into one expansion per (super)drop, but
+never exposes the id -> name mapping machine-readably (see the comment on
+`CM_SLD_EXPANSIONS` in `binduno.py`). That map used to be baked into
+`binduno.py` only, so a newly announced drop stayed unresolved until every
+install updated to a new release. `sl-expansions.json` here is the exact
+same map, just also servable independently of an app release —
+`refresh_cards()` merges it in (`_fetch_live_sl_expansions()`) on top of
+the baked-in one whenever there's a Secret Lair card to resolve.
+
+**Not auto-generated** - unlike `history.sqlite.gz`, `sync.py` never
+touches this file. To add a newly discovered drop:
+
+```bash
+# edit a local copy, then:
+scp sl-expansions.json admin@<vps>:/tmp/
+ssh admin@<vps> "sudo cp /tmp/sl-expansions.json /var/www/binduno-pricedata/ \
+  && sudo chown binduno-price:binduno-price /var/www/binduno-pricedata/sl-expansions.json \
+  && rm /tmp/sl-expansions.json"
+```
+
+Live immediately for every install on their next card-data refresh — no
+release needed. Still worth folding the same entry into `CM_SLD_EXPANSIONS`
+in `binduno.py` on the next real release anyway, so a fresh install (or one
+with no network path to binduno.com) isn't missing it either.
 
 ## Deployment (already set up on the VPS, kept here for reference)
 

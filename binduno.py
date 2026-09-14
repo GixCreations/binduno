@@ -16,7 +16,7 @@ import urllib.request
 from datetime import datetime, timedelta
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-VERSION = "6.43"
+VERSION = "6.44"
 SCHEMA = 19
 
 
@@ -986,6 +986,26 @@ CM_SLD_EXPANSIONS = {
     6753: "Secret Lair Drop Series: A Perfectly Normal Superdrop",
     6757: "Secret Lair Drop Series: Secret Lair x MSCHF: The Zeta Set",
 }
+# The map above only ever grows on a binduno.py release - a newly announced
+# drop stays unresolved (falls back to the plain "Secret Lair Drop Series")
+# until every existing install updates, which can take a while. This mirrors
+# the same map on the project's own server, refreshable independently of an
+# app release: the maintainer edits one small file there and it's live for
+# every install immediately, no update required. Best-effort like the price
+# server (_backfill_from_binduno_server) - any failure just means today's
+# baked-in map is used alone, exactly as before this existed.
+BINDUNO_SL_EXPANSIONS_URL = _env("SL_EXPANSIONS_URL", "MTG_TRACKER_SL_EXPANSIONS_URL") or \
+    "https://binduno.com/pricedata/sl-expansions.json"
+
+
+def _fetch_live_sl_expansions():
+    try:
+        data = _fetch_json(BINDUNO_SL_EXPANSIONS_URL, tries=2)
+        return {int(k): v for k, v in data.items()}
+    except Exception:                                          # noqa: BLE001
+        return {}
+
+
 CM_PRODUCTLIST_URL = _env("BINDUNO_CM_PRODUCTLIST", "MTG_TRACKER_CM_PRODUCTLIST") or \
     "https://downloads.s3.cardmarket.com/productCatalog/productList/products_singles_1.json"
 _CM_PID_RE = re.compile(r"[?&]idProduct=(\d+)")
@@ -1411,6 +1431,8 @@ def refresh_cards(bulk_type="all_cards"):
                 if r[0] in sl_codes and cm_pids[i]}
         pid2exp = _cm_product_expansions(want, c)
         exp_map = dict(CM_SLD_EXPANSIONS)                        # baked
+        if want:
+            exp_map.update(_fetch_live_sl_expansions())          # + the project's own live-maintained list
         try:                                                     # + anything the helper has scraped
             for k, v in json.loads(meta_get(c, "cm_expansions", "{}")).items():
                 exp_map[int(k)] = v
