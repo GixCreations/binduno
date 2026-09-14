@@ -16,7 +16,7 @@ import urllib.request
 from datetime import datetime, timedelta
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-VERSION = "6.31"
+VERSION = "6.32"
 SCHEMA = 19
 
 
@@ -383,6 +383,38 @@ def log(c, action, detail):
     c.execute("DELETE FROM history WHERE id NOT IN "
               "(SELECT id FROM history ORDER BY id DESC LIMIT 100)")
     c.commit()
+
+
+def _peak_rss_mb():
+    """Best-effort peak resident memory of this process, in MB, measured the
+    same way (a real OS-reported peak, not an eyeballed Task
+    Manager/Activity Monitor snapshot) on every platform - stdlib only:
+    ctypes + GetProcessMemoryInfo on Windows (no `resource` module there),
+    `resource.getrusage` on macOS/Linux (note ru_maxrss is bytes on macOS,
+    kilobytes on Linux). Used only for the Windows-performance diagnostic
+    logging in refresh_cards(); returns None if unavailable."""
+    try:
+        if sys.platform == "win32":
+            import ctypes
+
+            class _PMC(ctypes.Structure):
+                _fields_ = [("cb", ctypes.c_ulong), ("PageFaultCount", ctypes.c_ulong),
+                            ("PeakWorkingSetSize", ctypes.c_size_t), ("WorkingSetSize", ctypes.c_size_t),
+                            ("QuotaPeakPagedPoolUsage", ctypes.c_size_t), ("QuotaPagedPoolUsage", ctypes.c_size_t),
+                            ("QuotaPeakNonPagedPoolUsage", ctypes.c_size_t), ("QuotaNonPagedPoolUsage", ctypes.c_size_t),
+                            ("PagefileUsage", ctypes.c_size_t), ("PeakPagefileUsage", ctypes.c_size_t)]
+            pmc = _PMC()
+            pmc.cb = ctypes.sizeof(_PMC)
+            h = ctypes.windll.kernel32.GetCurrentProcess()
+            if ctypes.windll.psapi.GetProcessMemoryInfo(h, ctypes.byref(pmc), pmc.cb):
+                return pmc.PeakWorkingSetSize / 1e6
+        else:
+            import resource
+            ru = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
+            return ru / 1e6 if sys.platform == "darwin" else ru / 1e3
+    except Exception:                                          # noqa: BLE001
+        pass
+    return None
 
 
 # Everything the user built up by hand — NOT the regenerable Scryfall catalog
@@ -1311,6 +1343,9 @@ def refresh_cards(bulk_type="all_cards"):
                      de_types.get((r[0], r[1]), ""), de_oracle.get((r[0], r[1]), ""))
                 for i, r in enumerate(rows)]
 
+        _peak = _peak_rss_mb()
+        log(c, "Card data", f"Diagnostics: peak memory ~{_peak:.0f} MB" if _peak
+                            else "Diagnostics: peak memory unavailable")
         REFRESH.update(step="Saving to database", pct=88)
         for code, lg in set_lang_pick.items():
             if code in sets:
