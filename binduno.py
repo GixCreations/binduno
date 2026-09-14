@@ -16,7 +16,7 @@ import urllib.request
 from datetime import datetime, timedelta
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-VERSION = "6.37"
+VERSION = "6.38"
 SCHEMA = 19
 
 
@@ -1188,7 +1188,20 @@ def refresh_cards(bulk_type="all_cards"):
                               for code, cnt in set_lang.items()}
 
             seen_alt = set()
-            for k in it:
+            # This is the last pass that needs the raw card objects - every
+            # earlier pass above (en_sets/en_cn/de_*/alt_lang) only pulled a
+            # few scalar values out and never held onto `k`/`x` itself, so
+            # this is also the earliest point any single object can be
+            # freed. Indexing + nulling out `it[i]` (instead of `for k in
+            # it:`) lets each raw object be garbage-collected right after
+            # its row is built, so `it` and the growing `rows` list never
+            # BOTH sit fully in memory at once - the actual peak-memory
+            # moment this used to hit (freeing `it` only after this whole
+            # loop, tried first, measured no improvement: the peak had
+            # already happened by then).
+            for _i in range(len(it)):
+                k = it[_i]
+                it[_i] = None
                 code = k.get("set", "")
                 cn = k.get("collector_number", "")
                 lang = k.get("lang")
@@ -1264,6 +1277,20 @@ def refresh_cards(bulk_type="all_cards"):
                              (k.get("purchase_uris") or {}).get("cardmarket", "") or "",
                              k.get("scryfall_uri", "") or "", legal,
                              variant, ",".join(fin)))
+
+        # Free the raw parsed bulk data and the per-language lookups that are
+        # fully consumed by this point (de_names/de_types/de_oracle are still
+        # needed a bit further down, for the German card-name merge). `it`
+        # alone holds every field of 500k+ raw Scryfall card objects - full
+        # oracle text, every image/purchase/legality URI, all of it - and
+        # Python does NOT drop a local variable just because the `with`
+        # block it was read inside of has ended, so this used to sit in
+        # memory completely unused for the rest of the function (every
+        # remaining pass below, plus the SQL insert). Part of the fix for
+        # the Windows-performance investigation that measured ~9.9GB peak
+        # RSS on the reported machine - `it` was very likely the single
+        # biggest contributor.
+        del it, en_sets, en_cn, alt_lang, alt_pick, set_lang, seen_alt
 
         # Numeric extras backstop: a printing whose number exceeds the set's
         # declared size (psize) is only a meaningful "this is bonus content"
@@ -1381,6 +1408,7 @@ def refresh_cards(bulk_type="all_cards"):
                      _norm_name(de_names.get((r[0], r[1]), "")),
                      de_types.get((r[0], r[1]), ""), de_oracle.get((r[0], r[1]), ""))
                 for i, r in enumerate(rows)]
+        del de_names, de_types, de_oracle
 
         _peak, _peak_err = _peak_rss_mb()
         log(c, "Card data", f"Diagnostics: peak memory ~{_peak:.0f} MB" if _peak
