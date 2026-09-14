@@ -9,14 +9,14 @@ in your user folder (or a "binduno_data" folder next to this script), so your
 progress is kept between sessions. Python 3.9+ only, no third-party packages.
 """
 
-import base64, csv, io, json, gzip, os, platform, re, shutil, socket, socketserver, sqlite3, sys, tarfile, tempfile, threading, time, webbrowser
+import base64, csv, gc, io, json, gzip, os, platform, re, shutil, socket, socketserver, sqlite3, sys, tarfile, tempfile, threading, time, webbrowser
 import urllib.error
 import urllib.parse
 import urllib.request
 from datetime import datetime, timedelta
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-VERSION = "6.38"
+VERSION = "6.39"
 SCHEMA = 19
 
 
@@ -1109,6 +1109,18 @@ def refresh_cards(bulk_type="all_cards"):
                             f"{sys.platform}, frozen={getattr(sys, 'frozen', False)}, "
                             f"json C-accelerator={'yes' if _c_json else 'NO (pure-Python fallback - much slower)'}, "
                             f"GIL={_gil}")
+        # The real fix: measured 4.7x faster at 300k objects (growing with
+        # scale) just from turning the cyclic GC off for this section. JSON
+        # data is a strict tree - the objects json.load()/json.loads() build
+        # here can never contain a reference cycle, so the generational
+        # collector's periodic scans (which get more frequent AND more
+        # expensive as more objects pile up, explaining why parsing scaled
+        # worse than linearly with card count) never find anything to
+        # collect here; refcounting alone already frees everything
+        # correctly the moment it's unreferenced. Re-enabled unconditionally
+        # in this function's `finally` below, so it can't stay off for the
+        # rest of the process if something raises partway through.
+        gc.disable()
         _t_parse = time.time()
         rows = []
         alt_pick = {}
@@ -1444,6 +1456,7 @@ def refresh_cards(bulk_type="all_cards"):
                    "network. (%s)" % e)
         REFRESH.update(running=False, step="Failed", error=msg)
     finally:
+        gc.enable()  # guaranteed even if something above raised mid-parse
         c.close()
 
 
