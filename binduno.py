@@ -16,7 +16,7 @@ import urllib.request
 from datetime import datetime, timedelta
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-VERSION = "6.34"
+VERSION = "6.35"
 SCHEMA = 19
 
 
@@ -4436,6 +4436,7 @@ non-commercial reference only.
   <a href="#manage" id="ftPhone" onclick="openManage('about','phone');return false;">Connect phone</a>
   <a href="#manage" id="ftContact" onclick="openManage('contact');return false;">Contact</a>
   <a href="https://github.com/GixCreations/binduno" id="ftGh" target="_blank" rel="noopener">GitHub</a>
+  <a href="https://ko-fi.com/K1C126ZN12" id="ftKofi" target="_blank" rel="noopener">Support ☕</a>
 </div>
 <div style="margin-top:8px">Made with &#10084;&#65039; in Odenwald</div></footer>
 <div id="tipbox" role="tooltip"></div>
@@ -4662,7 +4663,7 @@ en:{
   "contact.title":"Contact",
   "contact.body":"Feedback, questions and bug reports are very welcome — email me at",
   "contact.ghLine":"Source code and issue tracker:",
-  "foot.connectPhone":"Connect phone","foot.contact":"Contact",
+  "foot.connectPhone":"Connect phone","foot.contact":"Contact","foot.support":"Support ☕",
   "cm.title":"Cardmarket helper",
   "cm.desc":"A small script that runs on cardmarket.com and marks each single offer by whether the card is already in your collection — handy for topping up a seller's order with cheap missing cards at no extra shipping.",
   "cm.step1":"Install a free, open-source userscript manager: <a href='https://violentmonkey.github.io/' target='_blank' rel='noopener'>Violentmonkey</a> (Chrome / Firefox / Edge) or <a href='https://apps.apple.com/app/userscripts/id1463298887' target='_blank' rel='noopener'>Userscripts</a> by Quoid (Safari, from the Mac App Store).",
@@ -5137,7 +5138,7 @@ de:{
   "contact.title":"Kontakt",
   "contact.body":"Feedback, Fragen und Fehlermeldungen sind sehr willkommen — schreib mir an",
   "contact.ghLine":"Quellcode und Issue-Tracker:",
-  "foot.connectPhone":"Handy verbinden","foot.contact":"Kontakt",
+  "foot.connectPhone":"Handy verbinden","foot.contact":"Kontakt","foot.support":"Unterstützen ☕",
   "cm.title":"Cardmarket-Helfer",
   "cm.desc":"Ein kleines Script, das auf cardmarket.com läuft und jedes Single-Angebot danach markiert, ob die Karte schon in deiner Sammlung ist — praktisch, um eine Händler-Bestellung mit günstigen fehlenden Karten ohne Zusatzversand aufzufüllen.",
   "cm.step1":"Einen kostenlosen, quelloffenen Userscript-Manager installieren: <a href='https://violentmonkey.github.io/' target='_blank' rel='noopener'>Violentmonkey</a> (Chrome / Firefox / Edge) oder <a href='https://apps.apple.com/app/userscripts/id1463298887' target='_blank' rel='noopener'>Userscripts</a> von Quoid (Safari, aus dem Mac App Store).",
@@ -8513,6 +8514,7 @@ async function doRoute(){
     if($("#ver"))$("#ver").textContent="v"+(window.HAS.version||"");
     if($("#ftPhone"))$("#ftPhone").textContent=t("foot.connectPhone");
     if($("#ftContact"))$("#ftContact").textContent=t("foot.contact");
+    if($("#ftKofi"))$("#ftKofi").textContent=t("foot.support");
     if($("#ftGh")&&window.HAS&&window.HAS.githubRepo)$("#ftGh").href="https://github.com/"+window.HAS.githubRepo;
     paintCartBadge();
     if(!ONBOARDING_DONE&&p!=="wizard"){
