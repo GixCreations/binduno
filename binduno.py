@@ -9,14 +9,14 @@ in your user folder (or a "binduno_data" folder next to this script), so your
 progress is kept between sessions. Python 3.9+ only, no third-party packages.
 """
 
-import base64, csv, gc, io, json, gzip, os, platform, re, shutil, socket, socketserver, sqlite3, sys, tarfile, tempfile, threading, time, webbrowser
+import base64, csv, gc, io, json, gzip, multiprocessing, os, platform, queue, re, shutil, socket, socketserver, sqlite3, sys, tarfile, tempfile, threading, time, webbrowser
 import urllib.error
 import urllib.parse
 import urllib.request
 from datetime import datetime, timedelta
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-VERSION = "6.40"
+VERSION = "6.41"
 SCHEMA = 19
 
 
@@ -1458,6 +1458,92 @@ def refresh_cards(bulk_type="all_cards"):
     finally:
         gc.enable()  # guaranteed even if something above raised mid-parse
         c.close()
+
+
+def _refresh_subprocess_main(bulk_type, q):
+    """Entry point for the refresh subprocess (see _run_refresh_in_subprocess
+    below for why this exists at all). Runs in a freshly spawned interpreter,
+    completely separate from the main process's GIL - the CPU-heavy JSON
+    parsing/object-building inside refresh_cards() can no longer starve the
+    HTTP server's own request-handling threads the way it did when this ran
+    in a background *thread* of the same process (reported: navigating the
+    app while a refresh was in progress could stall several seconds per
+    click, worse on slower machines - confirmed by measuring concurrent
+    request latency during a real refresh: 0.3-0.5s spikes even on fast
+    hardware).
+
+    refresh_cards() itself is completely unchanged by any of this - it still
+    just does REFRESH.update(...) / REFRESH["x"]=y like always. What changes
+    is what REFRESH *is* in this process: swapped for a dict subclass that
+    mirrors every write onto `q`, so _run_refresh_in_subprocess() (running in
+    the real process, draining this same queue) can replay each update onto
+    the *actual* REFRESH global that /api/refresh-status reads. BASE and
+    every env var (BINDUNO_DATA etc.) need no special handling - a spawned
+    child inherits the parent's environment automatically, so it resolves
+    the same data directory without being told."""
+    global REFRESH
+
+    class _Watched(dict):
+        def update(self, *a, **kw):
+            super().update(*a, **kw)
+            q.put(dict(self))
+        def __setitem__(self, k, v):
+            super().__setitem__(k, v)
+            q.put(dict(self))
+
+    REFRESH = _Watched(running=False, step="", pct=0, error="")
+    try:
+        refresh_cards(bulk_type)
+    finally:
+        q.put(None)   # sentinel: the parent's drain loop can stop waiting
+
+
+def _run_refresh_in_subprocess(bulk_type="all_cards"):
+    """Runs refresh_cards() in a separate process instead of a thread of this
+    one, so the HTTP server stays fully responsive throughout - see
+    _refresh_subprocess_main's docstring for why a thread wasn't enough.
+    Blocks the calling thread until the subprocess finishes (same contract
+    refresh_cards() itself had - callers already run this off their own
+    thread), draining its progress onto the real REFRESH global as it goes.
+
+    Always uses the "spawn" start method explicitly, never whatever the
+    platform default happens to be: "fork" is unsafe here since this process
+    already has several background threads running (tray icon, auto-sync,
+    the HTTP server itself) by the time a refresh can start, and spawn is
+    the only option on Windows anyway - one code path for every platform
+    instead of two untested ones.
+
+    On the packaged Windows .exe, mp.freeze_support() (called at the very
+    top of __main__, before anything else) is what stops a spawned child
+    from recursively relaunching the *whole app* instead of just running
+    this one function - required reading before touching either of these
+    two functions or moving that call."""
+    ctx = multiprocessing.get_context("spawn")
+    q = ctx.Queue()
+    REFRESH.update(running=True, step="Starting…", pct=0, error="")
+    p = ctx.Process(target=_refresh_subprocess_main, args=(bulk_type, q), daemon=True)
+    p.start()
+    try:
+        while True:
+            try:
+                item = q.get(timeout=2)
+            except queue.Empty:
+                if not p.is_alive():
+                    # Died without ever reaching the sentinel in its own
+                    # finally block - OOM kill, forced termination, a crash
+                    # severe enough to take the interpreter down with it.
+                    REFRESH.update(running=False, step="Failed",
+                                   error="The card-data process stopped unexpectedly.")
+                    break
+                continue
+            if item is None:
+                break
+            REFRESH.update(item)
+    finally:
+        p.join(timeout=10)
+        if p.is_alive():                 # shouldn't happen - belt and braces
+            p.terminate()
+            p.join(timeout=5)
 
 
 def price_logging_enabled(c):
@@ -3671,7 +3757,7 @@ class Handler(BaseHTTPRequestHandler):
             if REFRESH["running"]:
                 self.send_json({"ok": False, "error": "already running"}, 409)
                 return
-            threading.Thread(target=lambda: (refresh_cards(), bust()), daemon=True).start()
+            threading.Thread(target=lambda: (_run_refresh_in_subprocess(), bust()), daemon=True).start()
             self.send_json({"ok": True})
         elif self.path == "/api/backfill-price-history":
             if REFRESH["running"]:
@@ -9842,7 +9928,7 @@ def _auto_sync_check():
             stale = True
     if stale:
         log(c, "App", "Automatic daily card data sync started")
-        refresh_cards()
+        _run_refresh_in_subprocess()
         bust()
 
 
@@ -10108,4 +10194,14 @@ def main():
 
 
 if __name__ == "__main__":
+    # Must be the very first thing that runs. On the packaged Windows .exe,
+    # a spawned multiprocessing child (see _run_refresh_in_subprocess) tries
+    # to re-launch the .exe itself with special bootstrap arguments, since
+    # sys.executable IS the .exe there (no separate python.exe to spawn
+    # instead). freeze_support() recognizes that pattern and runs just the
+    # target function, then exits immediately - without it, every refresh
+    # would recursively relaunch the whole app (new browser tab, new tray
+    # icon, the works) instead of just parsing card data in the background.
+    # A no-op everywhere else (source runs, macOS/Linux).
+    multiprocessing.freeze_support()
     main()
