@@ -8,7 +8,7 @@
 
 One Python file, standard library only. No account, no cloud, nothing to sign up for — your collection never leaves your computer.
 
-![version](https://img.shields.io/badge/version-6.09-d4a629)
+![version](https://img.shields.io/badge/version-6.29-d4a629)
 ![python](https://img.shields.io/badge/python-3.9%2B-4a90c4)
 ![status](https://img.shields.io/badge/status-early%20beta-e0692c)
 ![platform](https://img.shields.io/badge/platform-macOS%20%C2%B7%20Windows%20%C2%B7%20Linux-8d98a7)
@@ -177,7 +177,12 @@ Produces `dist\Binduno.exe`.
 
 ## Updating
 
-Open **Settings → Update & Help → Update App → "Update from GitHub"** and click **Check for updates**. Binduno downloads the newest `binduno.py` from this repository, checks it, backs up the old one and restarts itself. No re‑download, no reinstall.
+Open **Settings → Update & Help → Update App → "Update from GitHub"** and click **Check for updates**.
+
+- **Running from source (macOS, Linux, Windows‑from‑source):** Binduno downloads the newest `binduno.py`, checks it, backs up the old one (`binduno_previous.py`) and restarts itself. It checks both the latest Release *and* the `main` branch and takes whichever is newer, so a plain source fix doesn't have to wait for a Release.
+- **The packaged `Binduno.exe`:** downloads the newest `Binduno.exe` from the latest GitHub Release, backs up the old one (`binduno_previous.exe`) and swaps itself in on restart. This only works once a Release with a built `Binduno.exe` exists — a bare `main`‑branch fix isn't installable this way, since there's no compiled binary for it yet; Binduno tells you so if you check for updates in between.
+
+No re‑download, no reinstall either way.
 
 ---
 

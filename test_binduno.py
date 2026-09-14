@@ -68,6 +68,34 @@ class VerTuple(unittest.TestCase):
         self.assertEqual(b._ver_tuple("6.06"), (6, 6))
 
 
+class LooksLikeWindowsExe(unittest.TestCase):
+    def _write(self, tmp_path, data):
+        p = tmp_path / "candidate"
+        p.write_bytes(data)
+        return str(p)
+
+    def test_accepts_pe_header_over_min_size(self):
+        import tempfile, pathlib
+        with tempfile.TemporaryDirectory() as d:
+            p = self._write(pathlib.Path(d), b"MZ" + b"\0" * 2_000_000)
+            self.assertTrue(b._looks_like_windows_exe(p))
+
+    def test_rejects_wrong_magic_bytes(self):
+        import tempfile, pathlib
+        with tempfile.TemporaryDirectory() as d:
+            p = self._write(pathlib.Path(d), b"<h" + b"\0" * 2_000_000)   # e.g. an HTML error page
+            self.assertFalse(b._looks_like_windows_exe(p))
+
+    def test_rejects_too_small(self):
+        import tempfile, pathlib
+        with tempfile.TemporaryDirectory() as d:
+            p = self._write(pathlib.Path(d), b"MZ" + b"\0" * 100)
+            self.assertFalse(b._looks_like_windows_exe(p))
+
+    def test_rejects_missing_file(self):
+        self.assertFalse(b._looks_like_windows_exe("/no/such/file/here"))
+
+
 class CmProductRe(unittest.TestCase):
     def test_extract(self):
         m = b._CM_PID_RE.search(

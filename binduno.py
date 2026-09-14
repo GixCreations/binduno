@@ -16,7 +16,7 @@ import urllib.request
 from datetime import datetime, timedelta
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-VERSION = "6.28"
+VERSION = "6.29"
 SCHEMA = 19
 
 
@@ -518,28 +518,51 @@ def _gh_json(path, timeout=10):
 
 
 def github_latest(repo):
-    """Newest binduno.py for `repo`: prefer the latest Release, fall back to
-    the raw file on the default branch. Returns dict with srcUrl/latest/…"""
-    info = {"repo": repo, "current": VERSION}
+    """Newest binduno.py for `repo`. Checks the latest GitHub Release *and*
+    the default branch directly, and returns whichever has the higher
+    VERSION. A Release is a deliberate checkpoint — it's also the only way
+    the packaged Windows .exe ever changes — but a source/macOS install
+    shouldn't have to wait for one just to pick up a plain binduno.py fix
+    that's already sitting on the branch. Returns dict with srcUrl/latest/…"""
+    info = {"repo": repo, "current": VERSION, "exeUrl": None}
     try:
+        rel = None
         try:
             rel = _gh_json(f"/repos/{repo}/releases/latest")
-            tag = rel.get("tag_name") or ""
-            src = next((a["browser_download_url"] for a in rel.get("assets", [])
-                        if a.get("name") == "binduno.py"), None) \
-                or f"https://raw.githubusercontent.com/{repo}/{tag}/binduno.py"
-            info.update(tag=tag, title=rel.get("name") or tag, srcUrl=src,
-                        notes=(rel.get("body") or "")[:4000],
-                        htmlUrl=rel.get("html_url"), latest=re.sub(r"^v", "", tag))
         except urllib.error.HTTPError as e:
             if e.code != 404:
                 raise
+        if rel:
+            assets = rel.get("assets", [])
+            tag = rel.get("tag_name") or ""
+            src = next((a["browser_download_url"] for a in assets
+                        if a.get("name") == "binduno.py"), None) \
+                or f"https://raw.githubusercontent.com/{repo}/{tag}/binduno.py"
+            exe = next((a["browser_download_url"] for a in assets
+                        if a.get("name") == "Binduno.exe"), None)
+            info.update(tag=tag, title=rel.get("name") or tag, srcUrl=src, exeUrl=exe,
+                        notes=(rel.get("body") or "")[:4000],
+                        htmlUrl=rel.get("html_url"), latest=re.sub(r"^v", "", tag))
+
+        # If this part fails but a Release was already found above, keep that
+        # result rather than losing it — only re-raise when there's nothing
+        # to fall back on (a repo with zero Releases, the pre-existing case).
+        try:
             br = _gh_json(f"/repos/{repo}").get("default_branch") or "main"
-            src = f"https://raw.githubusercontent.com/{repo}/{br}/binduno.py"
-            mv = re.search(r'VERSION\s*=\s*"([^"]+)"', _http_text(src))
-            info.update(tag=br, title=f"{br} branch", srcUrl=src, notes="",
-                        htmlUrl=f"https://github.com/{repo}",
-                        latest=mv.group(1) if mv else "?")
+            bsrc = f"https://raw.githubusercontent.com/{repo}/{br}/binduno.py"
+            mv = re.search(r'VERSION\s*=\s*"([^"]+)"', _http_text(bsrc))
+            bver = mv.group(1) if mv else None
+        except (urllib.error.HTTPError, urllib.error.URLError, OSError):
+            if rel is None:
+                raise
+            bver = None
+        if bver and (not rel or _ver_tuple(bver) > _ver_tuple(info.get("latest"))):
+            # A plain branch commit never comes with a built .exe asset - only
+            # a Release does. If the branch is what wins here, the Windows
+            # .exe update path has nothing to install yet (see apply_new_exe
+            # callers below), even though source/macOS installs can update.
+            info.update(tag=br, title=f"{br} branch", srcUrl=bsrc, notes="", exeUrl=None,
+                        htmlUrl=f"https://github.com/{repo}", latest=bver)
     except urllib.error.HTTPError as e:
         raise RuntimeError("GitHub returned HTTP %s. %s" % (
             e.code, "Rate limit — try again in a few minutes."
@@ -553,7 +576,20 @@ def github_latest(repo):
 
 def apply_new_source(c, src, note):
     """Shared by the file-upload and GitHub update paths: validate, back up
-    the running file, overwrite it, and schedule a restart."""
+    the running file, overwrite it, and schedule a restart.
+
+    Only valid for a plain source install (macOS/Linux via `python3
+    binduno.py`, or a source checkout on Windows) - never for the packaged
+    Windows .exe. In a PyInstaller --onefile build, `__file__` is the
+    throwaway per-launch extraction copy, not the .exe itself: overwriting
+    it would silently do nothing (the next launch re-extracts the *old*
+    version straight from the .exe), while logging a false "updated"
+    success. See apply_new_exe() for the .exe's real update path."""
+    if getattr(sys, "frozen", False):
+        raise RuntimeError("This is the packaged Binduno.exe - a .py file "
+                            "can't update it. Use \"Update from GitHub\" "
+                            "instead (it swaps the .exe itself), or download "
+                            "a fresh Binduno.exe by hand.")
     if "Binduno" not in src or "def main()" not in src:
         raise ValueError("This does not look like a Binduno script.")
     m = re.search(r'VERSION\s*=\s*"([^"]+)"', src)
@@ -567,6 +603,84 @@ def apply_new_source(c, src, note):
     threading.Timer(0.6, lambda: os.execv(sys.executable,
                                           [sys.executable, target])).start()
     return {"ok": True, "from": VERSION, "to": newver}
+
+
+def _looks_like_windows_exe(path, min_size=1_000_000):
+    """Sanity-check a downloaded file before installing it as Binduno.exe:
+    the "MZ" magic bytes every Windows PE executable starts with, and a
+    minimum size (a real onefile build is tens of MB - a truncated or wrong
+    download would be far smaller)."""
+    try:
+        size = os.path.getsize(path)
+    except OSError:
+        return False
+    if size < min_size:
+        return False
+    with open(path, "rb") as f:
+        return f.read(2) == b"MZ"
+
+
+def apply_new_exe(c, exe_url, newver, note):
+    """Windows-.exe counterpart to apply_new_source(): downloads the new
+    Binduno.exe from a GitHub Release asset and swaps it in.
+
+    A running .exe's own file is locked on Windows while it executes, so it
+    can't overwrite itself the way apply_new_source() overwrites a plain
+    .py file. Standard workaround: download the new .exe alongside the old
+    one, then hand off to a tiny detached helper script that waits for this
+    process to actually exit, moves the old .exe aside (kept as
+    binduno_previous.exe, mirroring the source update's backup file), moves
+    the new one into place, and relaunches it - all after we're gone, since
+    Windows won't let the helper rename a file *this* process still has
+    open. This process then just exits; there's no execv-in-place here like
+    apply_new_source() does, because the new .exe doesn't exist at the old
+    path until the helper has run."""
+    if not (sys.platform == "win32" and getattr(sys, "frozen", False)):
+        raise RuntimeError("Not running as the packaged Windows .exe.")
+    if not exe_url:
+        raise RuntimeError("No packaged .exe is published for the newest "
+                           "version yet - only a source fix on GitHub so "
+                           "far. Wait for the next Release, or download "
+                           "binduno.py and run it from source instead.")
+    cur = os.path.abspath(sys.executable)
+    folder = os.path.dirname(cur)
+    new_exe = os.path.join(folder, "Binduno.new.exe")
+    prev = os.path.join(folder, "binduno_previous.exe")
+    req = urllib.request.Request(exe_url, headers=UA)
+    with urllib.request.urlopen(req, timeout=180) as r, open(new_exe, "wb") as f:
+        shutil.copyfileobj(r, f)
+    if not _looks_like_windows_exe(new_exe):
+        try:
+            os.remove(new_exe)
+        except OSError:
+            pass
+        raise RuntimeError("Downloaded file doesn't look like a valid "
+                           "Binduno.exe - refusing to install it.")
+    bat = os.path.join(folder, "_binduno_update.bat")
+    # %1 = this process's PID, passed on launch below. Poll tasklist until it
+    # is gone, then swap the files and relaunch - self-deletes last.
+    with open(bat, "w", encoding="utf-8") as f:
+        f.write(
+            "@echo off\r\n"
+            ":wait\r\n"
+            "tasklist /fi \"PID eq %1\" | find \"%1\" >nul\r\n"
+            "if not errorlevel 1 (\r\n"
+            "  timeout /t 1 /nobreak >nul\r\n"
+            "  goto wait\r\n"
+            ")\r\n"
+            f"move /y \"{new_exe}\" \"{cur}.pending\" >nul\r\n"
+            f"move /y \"{cur}\" \"{prev}\" >nul\r\n"
+            f"move /y \"{cur}.pending\" \"{cur}\" >nul\r\n"
+            f"start \"\" \"{cur}\"\r\n"
+            "del \"%~f0\"\r\n"
+        )
+    import subprocess
+    log(c, "App", f"{note}: {VERSION} -> {newver} (restarting to swap the .exe)")
+    subprocess.Popen(["cmd", "/c", bat, str(os.getpid())],
+                     creationflags=subprocess.CREATE_NO_WINDOW | subprocess.DETACHED_PROCESS,
+                     close_fds=True, cwd=folder)
+    threading.Timer(0.6, lambda: os._exit(0)).start()
+    return {"ok": True, "from": VERSION, "to": newver, "restarting": True}
 
 
 def _startup_update_check():
@@ -590,11 +704,21 @@ def _startup_update_check():
         return
     UPDATE.update(checked=True, error="", current=VERSION,
                   available=bool(info.get("newer")), latest=info.get("latest", ""),
-                  srcUrl=info.get("srcUrl", ""), htmlUrl=info.get("htmlUrl", ""),
+                  srcUrl=info.get("srcUrl", ""), exeUrl=info.get("exeUrl"),
+                  htmlUrl=info.get("htmlUrl", ""),
                   notes=(info.get("notes") or "")[:2000])
     if UPDATE["available"] and meta_get(c, "auto_update_install") == "1":
         try:
-            apply_new_source(c, _http_text(info["srcUrl"]), "Auto-updated from GitHub")
+            if sys.platform == "win32" and getattr(sys, "frozen", False):
+                if info.get("exeUrl"):
+                    apply_new_exe(c, info["exeUrl"], info.get("latest", "?"),
+                                 "Auto-updated from GitHub")
+                else:
+                    log(c, "App", "Auto-update: a newer version is on GitHub but "
+                                  "no Binduno.exe has been published for it yet - "
+                                  "skipping until the next Release.")
+            else:
+                apply_new_source(c, _http_text(info["srcUrl"]), "Auto-updated from GitHub")
         except Exception as e:                                  # noqa: BLE001
             log(c, "App", f"Auto-update failed: {e}")
 
@@ -605,7 +729,7 @@ REFRESH = {"running": False, "step": "", "pct": 0, "error": ""}
 # Filled in once on startup by _startup_update_check() when the GitHub check is
 # enabled; the Home page reads it to show an "update available" hint.
 UPDATE = {"checked": False, "available": False, "latest": "", "current": VERSION,
-          "srcUrl": "", "notes": "", "htmlUrl": "", "error": ""}
+          "srcUrl": "", "exeUrl": None, "notes": "", "htmlUrl": "", "error": ""}
 
 # The browser UI tells the server to stop when its tab goes away (beforeunload).
 # A plain page reload — and the launch-time auto-open landing on a stale tab —
@@ -3476,10 +3600,19 @@ class Handler(BaseHTTPRequestHandler):
                 repo = github_repo(c)
                 if not repo:
                     raise ValueError("No GitHub repo configured.")
-                url = json.loads(raw or "{}").get("srcUrl") or github_latest(repo)["srcUrl"]
-                if "githubusercontent.com" not in url and "github.com" not in url:
-                    raise ValueError("Refusing to fetch source from a non-GitHub URL.")
-                self.send_json(apply_new_source(c, _http_text(url), "Updated from GitHub"))
+                if sys.platform == "win32" and getattr(sys, "frozen", False):
+                    # Always re-derive exeUrl from GitHub ourselves rather than
+                    # trusting a client-supplied one - this downloads and runs
+                    # an executable, unlike the source path below.
+                    info = github_latest(repo)
+                    self.send_json(apply_new_exe(c, info.get("exeUrl"),
+                                                 info.get("latest", "?"),
+                                                 "Updated from GitHub"))
+                else:
+                    url = json.loads(raw or "{}").get("srcUrl") or github_latest(repo)["srcUrl"]
+                    if "githubusercontent.com" not in url and "github.com" not in url:
+                        raise ValueError("Refusing to fetch source from a non-GitHub URL.")
+                    self.send_json(apply_new_source(c, _http_text(url), "Updated from GitHub"))
             except Exception as e:                            # noqa: BLE001
                 self.send_json({"ok": False, "error": str(e)}, 400)
         elif self.path == "/api/quit":
