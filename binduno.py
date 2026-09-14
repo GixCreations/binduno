@@ -16,7 +16,7 @@ import urllib.request
 from datetime import datetime, timedelta
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-VERSION = "6.33"
+VERSION = "6.34"
 SCHEMA = 19
 
 
@@ -392,29 +392,46 @@ def _peak_rss_mb():
     ctypes + GetProcessMemoryInfo on Windows (no `resource` module there),
     `resource.getrusage` on macOS/Linux (note ru_maxrss is bytes on macOS,
     kilobytes on Linux). Used only for the Windows-performance diagnostic
-    logging in refresh_cards(); returns None if unavailable."""
+    logging in refresh_cards().
+
+    Returns (value_or_None, error_or_None) rather than just a value: a first
+    version of this without explicit ctypes argtypes/restype came back
+    "unavailable" on the actual Windows machine under investigation with no
+    way to tell why (likely GetCurrentProcess()'s HANDLE getting silently
+    truncated to a 32-bit c_int on a 64-bit process, the classic ctypes
+    Windows-API pitfall) - worth surfacing the real reason if it happens
+    again instead of a second silent failure."""
     try:
         if sys.platform == "win32":
             import ctypes
+            from ctypes import wintypes
 
             class _PMC(ctypes.Structure):
-                _fields_ = [("cb", ctypes.c_ulong), ("PageFaultCount", ctypes.c_ulong),
+                _fields_ = [("cb", wintypes.DWORD), ("PageFaultCount", wintypes.DWORD),
                             ("PeakWorkingSetSize", ctypes.c_size_t), ("WorkingSetSize", ctypes.c_size_t),
                             ("QuotaPeakPagedPoolUsage", ctypes.c_size_t), ("QuotaPagedPoolUsage", ctypes.c_size_t),
                             ("QuotaPeakNonPagedPoolUsage", ctypes.c_size_t), ("QuotaNonPagedPoolUsage", ctypes.c_size_t),
                             ("PagefileUsage", ctypes.c_size_t), ("PeakPagefileUsage", ctypes.c_size_t)]
+
+            kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+            psapi = ctypes.WinDLL("psapi", use_last_error=True)
+            kernel32.GetCurrentProcess.restype = wintypes.HANDLE
+            kernel32.GetCurrentProcess.argtypes = []
+            psapi.GetProcessMemoryInfo.restype = wintypes.BOOL
+            psapi.GetProcessMemoryInfo.argtypes = [wintypes.HANDLE, ctypes.POINTER(_PMC), wintypes.DWORD]
+
             pmc = _PMC()
             pmc.cb = ctypes.sizeof(_PMC)
-            h = ctypes.windll.kernel32.GetCurrentProcess()
-            if ctypes.windll.psapi.GetProcessMemoryInfo(h, ctypes.byref(pmc), pmc.cb):
-                return pmc.PeakWorkingSetSize / 1e6
+            h = kernel32.GetCurrentProcess()
+            if psapi.GetProcessMemoryInfo(h, ctypes.byref(pmc), pmc.cb):
+                return pmc.PeakWorkingSetSize / 1e6, None
+            return None, f"GetProcessMemoryInfo failed, GetLastError={ctypes.get_last_error()}"
         else:
             import resource
             ru = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
-            return ru / 1e6 if sys.platform == "darwin" else ru / 1e3
-    except Exception:                                          # noqa: BLE001
-        pass
-    return None
+            return (ru / 1e6 if sys.platform == "darwin" else ru / 1e3), None
+    except Exception as e:                                      # noqa: BLE001
+        return None, f"{type(e).__name__}: {e}"
 
 
 # Everything the user built up by hand — NOT the regenerable Scryfall catalog
@@ -1354,9 +1371,9 @@ def refresh_cards(bulk_type="all_cards"):
                      de_types.get((r[0], r[1]), ""), de_oracle.get((r[0], r[1]), ""))
                 for i, r in enumerate(rows)]
 
-        _peak = _peak_rss_mb()
+        _peak, _peak_err = _peak_rss_mb()
         log(c, "Card data", f"Diagnostics: peak memory ~{_peak:.0f} MB" if _peak
-                            else "Diagnostics: peak memory unavailable")
+                            else f"Diagnostics: peak memory unavailable ({_peak_err})")
         REFRESH.update(step="Saving to database", pct=88)
         for code, lg in set_lang_pick.items():
             if code in sets:
