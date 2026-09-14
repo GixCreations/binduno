@@ -16,7 +16,7 @@ import urllib.request
 from datetime import datetime, timedelta
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-VERSION = "6.41"
+VERSION = "6.42"
 SCHEMA = 19
 
 
@@ -1128,6 +1128,23 @@ def refresh_cards(bulk_type="all_cards"):
             first = f.read(1); f.seek(0)
             it = json.load(f) if first == "[" else None
             if it is None:
+                # This is the path actually taken today - Scryfall serves
+                # all_cards as JSONL (one card per line), not a JSON array
+                # (confirmed 2026-09; a bulk single-call json.loads() was
+                # measured against this per-line approach and wasn't
+                # meaningfully faster, so it stayed). It can run for a
+                # couple of minutes on slower hardware with the progress bar
+                # just sitting still at pct=68 the whole time, easy to
+                # mistake for a hang - so report a live count as we go,
+                # against last run's count as a rough (usually close, since
+                # Scryfall's card count only grows slowly) estimate of the
+                # total. No estimate on the very first-ever run - counts up
+                # without a denominator instead of guessing.
+                _prev_n = None
+                try:
+                    _prev_n = int(meta_get(c, "last_bulk_count") or 0) or None
+                except (TypeError, ValueError):
+                    _prev_n = None
                 it = []
                 for line in f:
                     line = line.strip().rstrip(",")
@@ -1136,6 +1153,15 @@ def refresh_cards(bulk_type="all_cards"):
                             it.append(json.loads(line))
                         except json.JSONDecodeError:
                             pass
+                        n = len(it)
+                        if n % 20000 == 0:
+                            if _prev_n:
+                                pct = 68 + min(17, int(n / _prev_n * 17))
+                                REFRESH.update(
+                                    step=f"Reading cards — {n:,} / ~{_prev_n:,}", pct=pct)
+                            else:
+                                REFRESH["step"] = f"Reading cards — {n:,} read so far"
+                meta_set(c, "last_bulk_count", str(len(it)))
             log(c, "Card data", f"Diagnostics: JSON parse took {time.time() - _t_parse:.1f}s "
                                 f"for {len(it):,} objects")
             # Some sets never had an English printing (Renaissance, FBB, ...).
@@ -3757,6 +3783,20 @@ class Handler(BaseHTTPRequestHandler):
             if REFRESH["running"]:
                 self.send_json({"ok": False, "error": "already running"}, 409)
                 return
+            # Set running=True here, synchronously, before the response even
+            # goes out - not inside the thread/subprocess we're about to
+            # start. Spawning a whole new process (6.41) takes measurably
+            # longer than starting a thread used to, so a client that polls
+            # /api/refresh-status immediately after seeing {"ok":true} back
+            # (the manage page's own poll() does exactly that) could catch
+            # REFRESH["running"] still False and wrongly report "card data
+            # up to date" - while the refresh was, in fact, only just about
+            # to start. Reported: first click showed the "up to date"
+            # message immediately, yet the (correctly page-independent)
+            # floating popup from 6.40 showed it actively working right
+            # after - both were reading the same state, just at different
+            # moments either side of this exact race.
+            REFRESH.update(running=True, step="Starting…", pct=0, error="")
             threading.Thread(target=lambda: (_run_refresh_in_subprocess(), bust()), daemon=True).start()
             self.send_json({"ok": True})
         elif self.path == "/api/backfill-price-history":
