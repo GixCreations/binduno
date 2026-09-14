@@ -16,7 +16,7 @@ import urllib.request
 from datetime import datetime, timedelta
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-VERSION = "6.42"
+VERSION = "6.43"
 SCHEMA = 19
 
 
@@ -1135,11 +1135,12 @@ def refresh_cards(bulk_type="all_cards"):
                 # meaningfully faster, so it stayed). It can run for a
                 # couple of minutes on slower hardware with the progress bar
                 # just sitting still at pct=68 the whole time, easy to
-                # mistake for a hang - so report a live count as we go,
+                # mistake for a hang - so report a live percentage as we go,
                 # against last run's count as a rough (usually close, since
                 # Scryfall's card count only grows slowly) estimate of the
-                # total. No estimate on the very first-ever run - counts up
-                # without a denominator instead of guessing.
+                # total. No estimate on the very first-ever run - the step
+                # just stays "Reading cards" with no percentage rather than
+                # guessing a total out of nowhere; the run right after has one.
                 _prev_n = None
                 try:
                     _prev_n = int(meta_get(c, "last_bulk_count") or 0) or None
@@ -1154,13 +1155,10 @@ def refresh_cards(bulk_type="all_cards"):
                         except json.JSONDecodeError:
                             pass
                         n = len(it)
-                        if n % 20000 == 0:
-                            if _prev_n:
-                                pct = 68 + min(17, int(n / _prev_n * 17))
-                                REFRESH.update(
-                                    step=f"Reading cards — {n:,} / ~{_prev_n:,}", pct=pct)
-                            else:
-                                REFRESH["step"] = f"Reading cards — {n:,} read so far"
+                        if n % 20000 == 0 and _prev_n:
+                            frac = min(1.0, n / _prev_n)
+                            REFRESH.update(step=f"Reading cards — {int(frac * 100)}%",
+                                          pct=68 + int(frac * 17))
                 meta_set(c, "last_bulk_count", str(len(it)))
             log(c, "Card data", f"Diagnostics: JSON parse took {time.time() - _t_parse:.1f}s "
                                 f"for {len(it):,} objects")
