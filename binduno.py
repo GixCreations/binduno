@@ -16,7 +16,7 @@ import urllib.request
 from datetime import datetime, timedelta
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-VERSION = "6.36"
+VERSION = "6.37"
 SCHEMA = 19
 
 
@@ -1095,9 +1095,20 @@ def refresh_cards(bulk_type="all_cards"):
         # (cheap) so it's visible in Settings -> History without needing
         # remote access to the machine that's slow.
         _c_json = json.decoder.scanstring is not json.decoder.py_scanstring
+        # Python 3.13+ can be built "free-threaded" (GIL removable at
+        # runtime) - that build is documented to be measurably slower for
+        # ordinary single-threaded code like this JSON parse, since the
+        # interpreter loses some GIL-era optimizations. Cheap to check and
+        # directly tests whether a Windows build accidentally picked up that
+        # variant instead of the normal one.
+        _gil = "n/a (Python <3.13)"
+        if hasattr(sys, "_is_gil_enabled"):
+            _gil = "enabled" if sys._is_gil_enabled() else \
+                "DISABLED (free-threaded build - known to be slower here)"
         log(c, "Card data", f"Diagnostics: Python {sys.version.split()[0]} on "
                             f"{sys.platform}, frozen={getattr(sys, 'frozen', False)}, "
-                            f"json C-accelerator={'yes' if _c_json else 'NO (pure-Python fallback - much slower)'}")
+                            f"json C-accelerator={'yes' if _c_json else 'NO (pure-Python fallback - much slower)'}, "
+                            f"GIL={_gil}")
         _t_parse = time.time()
         rows = []
         alt_pick = {}
