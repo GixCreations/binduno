@@ -16,7 +16,7 @@ import urllib.request
 from datetime import datetime, timedelta
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-VERSION = "6.44"
+VERSION = "6.68"
 SCHEMA = 19
 
 
@@ -728,7 +728,7 @@ def apply_new_exe(c, exe_url, newver, note):
     subprocess.Popen(["cmd", "/c", bat, str(os.getpid())],
                      creationflags=subprocess.CREATE_NO_WINDOW | subprocess.DETACHED_PROCESS,
                      close_fds=True, cwd=folder)
-    threading.Timer(0.6, lambda: os._exit(0)).start()
+    threading.Timer(0.6, lambda: (_kill_refresh_subprocess(), os._exit(0))).start()
     return {"ok": True, "from": VERSION, "to": newver, "restarting": True}
 
 
@@ -790,6 +790,8 @@ QUIT_TIMER = None
 QUIT_GRACE = 2.5
 TRAY_ACTIVE = False        # set once a menu-bar / tray icon is up
 TRAY_ICON = None           # the pystray Icon, so an explicit Quit can remove it
+REFRESH_PROC = None        # the running card-data refresh subprocess, if any -
+                           # see _kill_refresh_subprocess()
 
 
 def fetch(url):
@@ -1564,10 +1566,12 @@ def _run_refresh_in_subprocess(bulk_type="all_cards"):
     from recursively relaunching the *whole app* instead of just running
     this one function - required reading before touching either of these
     two functions or moving that call."""
+    global REFRESH_PROC
     ctx = multiprocessing.get_context("spawn")
     q = ctx.Queue()
     REFRESH.update(running=True, step="Starting…", pct=0, error="")
     p = ctx.Process(target=_refresh_subprocess_main, args=(bulk_type, q), daemon=True)
+    REFRESH_PROC = p
     p.start()
     try:
         while True:
@@ -1590,6 +1594,25 @@ def _run_refresh_in_subprocess(bulk_type="all_cards"):
         if p.is_alive():                 # shouldn't happen - belt and braces
             p.terminate()
             p.join(timeout=5)
+        REFRESH_PROC = None
+
+
+def _kill_refresh_subprocess():
+    """Best-effort: if a card-data refresh is running in its own subprocess
+    (see _run_refresh_in_subprocess above), terminate it before the app
+    exits. daemon=True alone does not do this - Python only cleans up
+    daemonic children through an atexit hook, and every quit path below
+    calls os._exit() specifically to skip Python's normal shutdown (so a
+    reloading tab or a race between two quit requests can't kill the
+    server early). That skips the atexit hook too, so without this the
+    refresh subprocess kept running to completion as an orphan, fully
+    invisible, after the user had already quit the app."""
+    p = REFRESH_PROC
+    if p is not None and p.is_alive():
+        try:
+            p.terminate()
+        except Exception:                                     # noqa: BLE001
+            pass
 
 
 def price_logging_enabled(c):
@@ -1714,6 +1737,153 @@ def _window_series(series, days):
     return out or series[-1:]
 
 
+def _series_drawdown(series, key="eur"):
+    """Biggest peak-to-trough decline within a {d,<key>} series, as a percent
+    of the peak. None if the series never dips below its running high (a
+    collection that has only ever gone up has no drawdown to report)."""
+    peak = peak_d = None
+    worst = 0.0
+    worst_peak_d = worst_trough_d = None
+    for p in series:
+        v = p[key]
+        if peak is None or v > peak:
+            peak, peak_d = v, p["d"]
+        elif peak:
+            dd = (peak - v) / peak * 100
+            if dd > worst:
+                worst, worst_peak_d, worst_trough_d = dd, peak_d, p["d"]
+    if worst <= 0:
+        return None
+    return {"pct": round(worst, 1), "peakDate": worst_peak_d, "troughDate": worst_trough_d}
+
+
+def compute_movers(c, days):
+    """Biggest € and % gainers/losers among owned printings over the window -
+    same price_history data the card page's own graph reads from, batched
+    into two queries instead of one round-trip per owned printing."""
+    owned = c.execute("""
+        SELECT o.set_code, o.number, SUM(o.qty) qty
+        FROM collection o GROUP BY o.set_code, o.number""").fetchall()
+    keys = {(r["set_code"], r["number"]) for r in owned}
+    if not keys:
+        return []
+    qty_by_key = {(r["set_code"], r["number"]): r["qty"] for r in owned}
+
+    cutoff = (datetime.now().date() - timedelta(days=days)).isoformat() if days else None
+    # Join against the (small) set of owned keys instead of scanning all of
+    # price_history and filtering in Python - price_history's primary key is
+    # (set_code, number, date), so this drives an index lookup per owned
+    # printing rather than reading every row of a many-million-row table on
+    # every call. compute_value_history does the full-scan-then-filter thing
+    # too, but only once per cache refresh; this used to redo it from
+    # scratch on every request (see cached_movers below for why that stopped
+    # mattering, but the query itself still shouldn't be this wasteful).
+    hist = {}
+    for r in c.execute("""
+            SELECT ph.set_code, ph.number, ph.date, ph.eur_cents
+            FROM price_history ph
+            JOIN (SELECT DISTINCT set_code, number FROM collection) o
+              ON o.set_code=ph.set_code AND o.number=ph.number
+            WHERE ph.eur_cents > 0 ORDER BY ph.date"""):
+        k = (r["set_code"], r["number"])
+        hist.setdefault(k, []).append((r["date"], r["eur_cents"] / 100))
+
+    out = []
+    for r in c.execute("""
+            SELECT DISTINCT k.set_code, k.number, k.name, k.name_de, k.img, k.eur,
+                   s.name set_name
+            FROM collection o
+            JOIN cards k ON k.set_code=o.set_code AND k.number=o.number
+            JOIN sets s ON s.code=k.set_code
+            WHERE k.eur IS NOT NULL AND k.eur > 0"""):
+        k = (r["set_code"], r["number"])
+        cur = r["eur"]
+        pts = hist.get(k) or []
+        then = None
+        if cutoff:
+            # last known price at or before the cutoff
+            for d, eur in pts:
+                if d <= cutoff:
+                    then = eur
+                else:
+                    break
+        if then is None:
+            then = pts[0][1] if pts else cur      # no history yet - flat, no mover
+        if then <= 0 or then == cur:
+            continue
+        qty = qty_by_key[k]
+        out.append({"set": r["set_code"], "setName": r["set_name"], "number": r["number"],
+                    "name": r["name"], "nameDe": r["name_de"] or "", "img": r["img"] or "",
+                    "qty": qty, "price": round(cur, 2),
+                    "changeEur": round((cur - then) * qty, 2),
+                    "changePct": round((cur - then) / then * 100, 1)})
+    return out
+
+
+# Standard MTG color-identity buckets - a card counts as Multicolor once it
+# has more than one color, regardless of which ones, same convention most
+# collection trackers and Cardmarket's own filters use.
+_COLOR_BUCKETS = ["W", "U", "B", "R", "G"]
+
+
+def _color_bucket(colors):
+    if not colors:
+        return "C"
+    return colors if len(colors) == 1 and colors in _COLOR_BUCKETS else "M"
+
+
+# Order matters - a card can have several of these words in its type line
+# (e.g. "Artifact Creature", "Legendary Enchantment Creature"); the first
+# match wins. Land and Creature take priority since they are the two most
+# distinct gameplay categories collectors think in.
+_TYPE_BUCKETS = ["Land", "Creature", "Planeswalker", "Battle", "Artifact",
+                 "Enchantment", "Instant", "Sorcery"]
+
+
+def _type_bucket(type_line):
+    tl = type_line or ""
+    for t in _TYPE_BUCKETS:
+        if t in tl:
+            return t
+    return "Other"
+
+
+def value_breakdown(c, dim):
+    """Current collection value grouped by set / color identity / rarity /
+    primary card type - a snapshot, not a time series. `dim` is one of
+    "set", "color", "rarity", "type"."""
+    rows = c.execute("""
+        SELECT k.set_code, s.name set_name, k.colors, k.rarity, k.type_line,
+               SUM(o.qty) qty,
+               SUM(o.qty * (CASE WHEN o.foil='foil' THEN COALESCE(k.eur_foil,0)
+                                  ELSE COALESCE(k.eur,0) END)) value
+        FROM collection o
+        JOIN cards k ON k.set_code=o.set_code AND k.number=o.number
+        JOIN sets s ON s.code=o.set_code
+        GROUP BY o.set_code, o.number, o.foil""").fetchall()
+    groups = {}
+    for r in rows:
+        if dim == "set":
+            key, label = r["set_code"], r["set_name"]
+        elif dim == "color":
+            b = _color_bucket(r["colors"] or "")
+            key = label = b
+        elif dim == "rarity":
+            key = label = r["rarity"] or "?"
+        else:                                              # "type"
+            key = label = _type_bucket(r["type_line"])
+        g = groups.setdefault(key, {"label": label, "value": 0.0, "qty": 0})
+        g["value"] += r["value"] or 0
+        g["qty"] += r["qty"] or 0
+    total = sum(g["value"] for g in groups.values())
+    out = [{"key": k, "label": g["label"], "value": round(g["value"], 2), "qty": g["qty"],
+            "pct": round(g["value"] / total * 100, 1) if total else 0}
+           for k, g in groups.items() if g["value"] > 0]
+    out.sort(key=lambda x: -x["value"])
+    return {"total": round(total, 2), "groups": out}
+
+
+
 def compute_value_history(c):
     """Total Cardmarket trend value of the whole collection over time, plus
     the currently most valuable holdings. Reconstructed from the daily
@@ -1727,7 +1897,8 @@ def compute_value_history(c):
     an approximation, but MTGJSON's initial 90-day backfill means it rarely
     matters in practice. Expensive on a large collection (open one SQLite
     connection's worth of work) - always call through cached_value_history()."""
-    rows = c.execute("SELECT set_code, number, foil, qty, purchase_date FROM collection").fetchall()
+    rows = c.execute("""SELECT set_code, number, foil, qty, purchase_date, purchase_price
+                        FROM collection""").fetchall()
     keys = {(r["set_code"], r["number"]) for r in rows}
     if not keys:
         return {"series": [], "top": []}
@@ -1759,12 +1930,32 @@ def compute_value_history(c):
     for k in keys:
         pts = price_hist.get(k)
         price_state[k] = (pts[0][1], pts[0][2]) if pts else cur_price.get(k, (0, 0))
+    # Invested capital (qty * purchase_price) tracks alongside the market-value
+    # total, but on its own clock: it only moves on a batch's purchase_date,
+    # never on a price-log date. Batches with no recorded purchase_price (older
+    # imports, or a bulk import nobody priced by hand) contribute 0 - they still
+    # count toward the market value above, just not toward what was "spent".
+    invested = sum((r["qty"] or 0) * r["purchase_price"] for r in rows
+                   if r["purchase_price"] is not None
+                   and (not r["purchase_date"] or r["purchase_date"] <= start))
+    # Equal-weighted price index across the same owned printings - one price
+    # per printing regardless of copies owned or purchase date, so it isolates
+    # pure price movement from "you bought more stuff" (that's what the eur/
+    # invested lines above are for). A naive AVG(eur_cents) GROUP BY date over
+    # price_history would be wrong here: that table only logs a row on days a
+    # price actually changed, so each day's average would run over a different,
+    # non-representative subset of printings. Riding the same price_state
+    # carry-forward as the value total avoids that trap for free.
+    _eff = lambda pair: pair[0] or pair[1]
+    idx_sum = sum(_eff(price_state[k]) for k in keys)
+    n_keys = len(keys)
 
     events = []
     for r in rows:
         if r["purchase_date"] and r["purchase_date"] > start:
             idx = 1 if r["foil"] == "foil" else 0
-            events.append((r["purchase_date"], (r["set_code"], r["number"]), "qty", idx, r["qty"]))
+            events.append((r["purchase_date"], (r["set_code"], r["number"]), "qty",
+                           (idx, r["purchase_price"]), r["qty"]))
     for k, pts in price_hist.items():
         for d, eur, foil in pts:
             if d > start:
@@ -1777,23 +1968,28 @@ def compute_value_history(c):
 
     total = sum(qty_state[k][0] * price_state[k][0] + qty_state[k][1] * price_state[k][1]
                 for k in keys)
-    series = [{"d": start, "eur": round(total, 2)}]
+    series = [{"d": start, "eur": round(total, 2), "invested": round(invested, 2),
+              "idx": round(idx_sum / n_keys, 4) if n_keys else 0}]
     i = 0
     while i < len(events):
         d = events[i][0]
         while i < len(events) and events[i][0] == d:
             _, k, kind, a, b = events[i]
             if kind == "qty":
-                idx, qty = a, b
+                (idx, pprice), qty = a, b
                 total += qty * price_state[k][idx]
                 qty_state[k][idx] += qty
+                if pprice is not None:
+                    invested += qty * pprice
             else:
                 eur, foil = a, b
+                idx_sum += _eff((eur, foil)) - _eff(price_state[k])
                 total += qty_state[k][0] * (eur - price_state[k][0])
                 total += qty_state[k][1] * (foil - price_state[k][1])
                 price_state[k] = (eur, foil)
             i += 1
-        series.append({"d": d, "eur": round(total, 2)})
+        series.append({"d": d, "eur": round(total, 2), "invested": round(invested, 2),
+                       "idx": round(idx_sum / n_keys, 4) if n_keys else 0})
 
     top = []
     for r in c.execute("""
@@ -1821,7 +2017,9 @@ def watchlist_rows(c, days=7):
     for w in watched:
         k = (w["set_code"], w["number"])
         m = c.execute(
-            """SELECT k.name, k.name_de, k.img, k.rarity, s.name set_name
+            """SELECT k.name, k.name_de, k.img, k.rarity, s.name set_name,
+                      (SELECT SUM(qty) FROM collection o
+                       WHERE o.set_code=k.set_code AND o.number=k.number) qty
                FROM cards k JOIN sets s ON s.code=k.set_code
                WHERE k.set_code=? AND k.number=?""", k).fetchone()
         if not m:
@@ -1829,7 +2027,8 @@ def watchlist_rows(c, days=7):
         h = price_history_series(c, k[0], k[1], days)
         out.append({"set": k[0], "number": k[1], "name": m["name"],
                     "nameDe": m["name_de"] or "", "setName": m["set_name"],
-                    "img": m["img"], "rarity": m["rarity"], "eur": h["eur"],
+                    "img": m["img"], "rarity": m["rarity"], "qty": m["qty"] or 0,
+                    "eur": h["eur"], "lo": h["lo"], "hi": h["hi"],
                     "series": [p["eur"] for p in h["series"]],
                     "changePct": h["changePct"], "changeEur": h["changeEur"]})
     return out
@@ -1912,6 +2111,7 @@ def backfill_price_history(auto=False):
     if n is not None:
         downsample_price_history(c)
         meta_set(c, "price_backfill_done", "1")
+        meta_set(c, "price_backfill_source", "server")
         log(c, "Price history",
             f"Backfilled {n:,} price point(s) from the Binduno price server")
         _p(running=False, step="Done", pct=100)
@@ -1977,6 +2177,7 @@ def backfill_price_history(auto=False):
             c.commit()
         downsample_price_history(c)
         meta_set(c, "price_backfill_done", "1")
+        meta_set(c, "price_backfill_source", "mtgjson")
         log(c, "Price history", f"Backfilled {len(rows):,} price point(s) from MTGJSON (90 days)")
         _p(running=False, step="Done", pct=100)
     except Exception as e:                                   # noqa: BLE001
@@ -2739,11 +2940,17 @@ def home_stats(c, sets):
         "shipping": round(sum(s["shipping"] for s in open_sets), 2),
         "rarity": rar,
         "rarityNames": rar_names,
-        "setsComplete": sum(1 for s in counted if s["missing"] == 0),
+        # total==0 means every card in the set is currently off-goal (e.g. a
+        # masterpiece set like Multiverse Legends under "extras excluded" -
+        # its ~260 printings are all Showcase/Borderless, nothing left to
+        # even be missing). missing==0 is vacuously true there, which used
+        # to count it as "complete" despite pct reading 0% - the two
+        # disagreed. Require total>0 too, matching how pct already guards
+        # against a zero denominator just below.
+        "setsComplete": sum(1 for s in counted if s["total"] > 0 and s["missing"] == 0),
         "setsTotal": len(counted),
         "nearest": sorted([s for s in open_sets if s["pct"] < 1],
-                          key=lambda s: -s["pct"])[:6],
-        "cheapest": sorted(open_sets, key=lambda s: s["totalCost"])[:6],
+                          key=lambda s: -s["pct"])[:10],
         "cardsUpdated": meta_get(c, "cards_updated", ""),
         "collectionUpdated": meta_get(c, "collection_updated", ""),
     }
@@ -3450,7 +3657,8 @@ def export_collection(c):
 
 
 # --------------------------------------------------------------------- server
-CACHE = {"stamp": None, "sets": None, "home": None, "vh": None}
+CACHE = {"stamp": None, "sets": None, "home": None, "vh": None,
+         "movers": {}, "vbd": {}}      # keyed by (stamp, days) / (stamp, dim)
 SETS_CACHE_FILE = os.path.join(BASE, "sets_cache.pkl")
 
 
@@ -3536,8 +3744,40 @@ def cached_value_history(c):
     return CACHE["vh"]
 
 
+def cached_movers(c, days):
+    """Movers (see compute_movers) for one range, cached in memory only - not
+    persisted to disk like the other CACHE entries, since the query itself
+    is cheap enough now (indexed join, not a full price_history scan) that a
+    cold cache after a restart is a non-issue. One cache dict shared by all
+    four range buttons (each its own entry, invalidated together whenever
+    the stamp changes) - this used to redo a several-million-row scan on
+    every single call, range switch or not, and became the whole page's
+    bottleneck."""
+    stamp = _sets_stamp(c)
+    cache = CACHE["movers"]
+    if cache.get("_stamp") != stamp:
+        cache.clear()
+        cache["_stamp"] = stamp
+    if days not in cache:
+        cache[days] = compute_movers(c, days)
+    return cache[days]
+
+
+def cached_value_breakdown(c, dim):
+    """Value breakdown (see value_breakdown) for one dimension, cached like
+    cached_movers above."""
+    stamp = _sets_stamp(c)
+    cache = CACHE["vbd"]
+    if cache.get("_stamp") != stamp:
+        cache.clear()
+        cache["_stamp"] = stamp
+    if dim not in cache:
+        cache[dim] = value_breakdown(c, dim)
+    return cache[dim]
+
+
 def bust():
-    CACHE.update(stamp=None, sets=None, home=None, vh=None)
+    CACHE.update(stamp=None, sets=None, home=None, vh=None, movers={}, vbd={})
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -3705,13 +3945,25 @@ class Handler(BaseHTTPRequestHandler):
             series = _window_series(vh["series"], _range_days(qs.get("range", "30")))
             first = series[0]["eur"] if series else 0
             last = series[-1]["eur"] if series else 0
+            idx0 = series[0]["idx"] if series else 0
+            for pt in series:
+                pt["perfPct"] = (round((pt["eur"] - pt["invested"]) / pt["invested"] * 100, 1)
+                                 if pt["invested"] else None)
+                pt["idxPct"] = round((pt["idx"] - idx0) / idx0 * 100, 1) if idx0 else None
+            top10 = sum(x["value"] for x in vh["top"][:10])
             self.send_json({"series": series, "top": vh["top"],
                             "lo": min((pt["eur"] for pt in series), default=0),
                             "hi": max((pt["eur"] for pt in series), default=0),
                             "changeEur": round(last - first, 2),
                             "changePct": round((last - first) / first * 100, 1) if first else None,
                             "start": series[0]["d"] if series else None,
-                            "end": series[-1]["d"] if series else None})
+                            "end": series[-1]["d"] if series else None,
+                            "drawdown": _series_drawdown(series),
+                            "top10Pct": round(top10 / last * 100, 1) if last else None})
+        elif p == "/api/movers":
+            self.send_json({"items": cached_movers(c, _range_days(qs.get("range", "30")))})
+        elif p == "/api/value-breakdown":
+            self.send_json(cached_value_breakdown(c, qs.get("dim") or "set"))
         elif p == "/api/export":
             body = export_collection(c).encode()
             self.send_response(200)
@@ -3907,6 +4159,7 @@ class Handler(BaseHTTPRequestHandler):
                             TRAY_ICON.stop()
                         except Exception:                    # noqa: BLE001
                             pass
+                    _kill_refresh_subprocess()
                     os._exit(0)
                 t = threading.Timer(0.25, _die)
                 t.daemon = True
@@ -3919,7 +4172,7 @@ class Handler(BaseHTTPRequestHandler):
             global QUIT_TIMER
             if QUIT_TIMER is not None:
                 QUIT_TIMER.cancel()
-            QUIT_TIMER = threading.Timer(QUIT_GRACE, lambda: os._exit(0))
+            QUIT_TIMER = threading.Timer(QUIT_GRACE, lambda: (_kill_refresh_subprocess(), os._exit(0)))
             QUIT_TIMER.daemon = True
             QUIT_TIMER.start()
         elif self.path == "/api/cart":
@@ -4078,11 +4331,20 @@ class Handler(BaseHTTPRequestHandler):
                 price = round(float(price), 2) if price not in (None, "") else None
             except (ValueError, TypeError):
                 price = None
+            # purchase_date is deliberately left alone here (not stamped with
+            # today) unless the request explicitly names one. Typing in what
+            # you paid for a card you've owned for years is not the same as
+            # buying it today - stamping "today" made every retroactively-
+            # priced card look like it was bought this instant, which badly
+            # distorts anything reconstructing collection value over time
+            # (see compute_value_history). No date given -> stays NULL,
+            # already handled there as "always owned".
+            pdate = d.get("date") or None
             c.execute("""UPDATE collection SET purchase_price=?, price_source=?,
-                                purchase_date=COALESCE(purchase_date, ?)
+                                purchase_date=COALESCE(?, purchase_date)
                          WHERE id=?""",
                       (price, "manual" if price is not None else None,
-                       datetime.now().strftime("%Y-%m-%d"), d.get("id")))
+                       pdate, d.get("id")))
             c.commit(); bust()
             shown = f"{price:.2f} €" if price is not None else "unset"
             log(c, "Collection", f"Purchase price for collection row {d.get('id')} -> {shown}")
@@ -4153,7 +4415,7 @@ a{color:inherit}
    --text/--muted/--gold/--line tokens everything else uses. */
 nav{position:sticky;top:0;z-index:30;background:var(--nav-bg);backdrop-filter:blur(9px);
     border-bottom:1px solid var(--line);color:var(--text)}
-.navin{max-width:1240px;margin:0 auto;padding:0 22px;display:flex;align-items:center;gap:28px;height:60px}
+.navin{max-width:1800px;margin:0 auto;padding:0 22px;display:flex;align-items:center;gap:28px;height:60px}
 .brand{font-family:var(--mono);font-size:19px;color:var(--text);
   display:inline-flex;align-items:center;gap:9px}
 .brandicon{width:30px;height:30px;display:block}
@@ -4164,8 +4426,8 @@ nav a.tab{color:var(--muted);text-decoration:none;font-size:14px;padding:19px 2p
   border-bottom:2px solid transparent;cursor:pointer}
 nav a.tab:hover{color:var(--text)}
 nav a.tab.on{color:var(--gold);border-color:var(--gold)}
-.wrap{max-width:1240px;margin:0 auto;padding:26px 22px 80px}
-footer{max-width:1240px;margin:0 auto;padding:18px 22px 26px;color:var(--dim);
+.wrap{max-width:1800px;margin:0 auto;padding:26px 22px 80px}
+footer{max-width:1800px;margin:0 auto;padding:18px 22px 26px;color:var(--dim);
   font-size:12px;line-height:1.6;border-top:1px solid var(--line)}
 footer .footlinks{display:flex;flex-wrap:wrap;gap:8px 18px;margin-top:10px}
 footer .footlinks a{color:var(--gold);text-decoration:none}
@@ -4173,8 +4435,9 @@ footer .footlinks a:hover{text-decoration:underline}
 h1{font-family:var(--serif);font-weight:400;font-size:30px;margin:0 0 4px}
 h2{font-family:var(--serif);font-weight:400;font-size:20px;margin:34px 0 12px}
 .sub{color:var(--muted);font-size:14px;margin:0 0 20px}
-.cards{display:grid;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));gap:12px}
-.card{background:var(--panel);border:1px solid var(--line);border-radius:6px;padding:16px}
+.cards{display:grid;grid-template-columns:repeat(auto-fit,minmax(180px,280px));gap:12px}
+.card{background:var(--panel);border:1px solid var(--line);border-radius:6px;padding:16px;
+  display:flex;flex-direction:column;justify-content:center}
 .card .k{font-size:10.5px;letter-spacing:.14em;text-transform:uppercase;color:var(--muted);
   min-height:13px;line-height:13px}
 .card .v{font-family:var(--serif);font-size:28px;margin-top:6px}
@@ -4183,15 +4446,18 @@ h2{font-family:var(--serif);font-weight:400;font-size:20px;margin:34px 0 12px}
 .clickable:hover{transform:translateY(-3px);border-color:var(--gold);
   box-shadow:0 8px 18px rgba(0,0,0,.28)}
 .clickable:active{transform:translateY(-1px)}
-.donuts{display:grid;grid-template-columns:repeat(auto-fit,minmax(230px,1fr));gap:12px;margin-top:12px}
+.donuts{display:grid;grid-template-columns:repeat(auto-fit,minmax(230px,340px));gap:12px;margin-top:12px}
 .donut{background:var(--panel);border:1px solid var(--line);border-radius:6px;padding:18px;
   display:flex;gap:16px;align-items:center}
 .donut svg{flex:0 0 96px}
 .donut .t{font-size:11px;letter-spacing:.13em;text-transform:uppercase;color:var(--muted)}
 .donut .p{font-family:var(--serif);font-size:26px;margin:3px 0}
 .donut .s{font-family:var(--mono);font-size:11.5px;color:var(--dim)}
+.rarcols{display:grid;grid-template-columns:1fr 1fr;gap:16px}
+.rarcols h3{font-family:var(--sans);font-size:12px;color:var(--muted);text-transform:uppercase;
+  letter-spacing:.1em;margin:0 0 8px}
 .rarbars{background:var(--panel);border:1px solid var(--line);border-radius:6px;padding:16px}
-.rarrow{display:grid;grid-template-columns:92px 1fr 128px;gap:12px;align-items:center;margin:9px 0}
+.rarrow{display:grid;grid-template-columns:92px 1fr 108px;gap:10px;align-items:center;margin:9px 0}
 .rarrow .lb{font-size:13px;color:var(--muted)}
 .rarrow .track{height:9px;background:var(--track);border-radius:5px;overflow:hidden}
 .rarrow .fill{height:100%;border-radius:5px}
@@ -4205,7 +4471,7 @@ h2{font-family:var(--serif);font-weight:400;font-size:20px;margin:34px 0 12px}
 .li img{width:19px;height:19px}
 .li .nm{flex:1;font-size:14px}
 .li .mt{font-family:var(--mono);font-size:12px;color:var(--muted)}
-.bar{flex:0 0 92px;height:6px;background:var(--track);border-radius:4px;overflow:hidden}
+.bar{flex:1 1 92px;height:6px;background:var(--track);border-radius:4px;overflow:hidden}
 .bar span{display:block;height:100%;background:var(--gold)}
 /* inside a set card (.set is a flex column) flex-basis controls height, so the
    shared .bar would be 92px tall — pin it back to a thin full-width bar */
@@ -4229,7 +4495,15 @@ button:focus-visible,input:focus-visible,select:focus-visible{outline:2px solid 
 .gridcols{display:inline-flex;align-items:center;gap:7px;font-size:12.5px;color:var(--muted)}
 .gridcols .gcVal{font-family:var(--mono);color:var(--text);min-width:1.2em;text-align:center}
 .gridcols .gcRange{width:90px;accent-color:var(--gold)}
-.grid{display:grid;grid-template-columns:repeat(var(--grid-cols,4),1fr);gap:12px}
+/* minmax(0,1fr), not bare 1fr: a bare 1fr track's automatic minimum size is
+   its content's min-content width, and a long one-line set name (e.g.
+   "Global Series Jiang Yanggu & Mu Yanling") reports its full unwrapped
+   width as min-content despite the 2-line clamp/ellipsis truncating it
+   visually - so at some viewport/"per row" combinations every column got
+   forced that wide, overflowing the grid and clipping trailing cards off
+   the right edge of the page. minmax(0,1fr) lets a column shrink past that
+   and leaves the truncation to do its job instead. */
+.grid{display:grid;grid-template-columns:repeat(var(--grid-cols,4),minmax(0,1fr));gap:12px}
 .set{background:var(--panel);border:1px solid var(--line);border-radius:6px;padding:15px;
   display:flex;flex-direction:column;gap:9px}
 .set.done{border-color:var(--ok);background:linear-gradient(180deg,var(--good-bg),var(--panel))}
@@ -4250,12 +4524,30 @@ button:focus-visible,input:focus-visible,select:focus-visible{outline:2px solid 
   font-family:var(--mono);font-size:11.5px;color:var(--muted)}
 .set .st span{white-space:nowrap}
 .set .acts{display:flex;gap:7px;margin-top:2px}
-.set .acts button{flex:1 1 auto;padding:7px 8px;font-size:12.5px;white-space:nowrap}
+/* min-width:0 so these can actually shrink below "View set"/"Buy missing"'s
+   own text width at a narrow grid column - same overflow class of bug as
+   .grid above, just one level down in the flex row - falling back to an
+   ellipsis instead of pushing the card (and the whole grid column) wider
+   than the page. */
+.set .acts button{flex:1 1 auto;min-width:0;padding:7px 8px;font-size:12.5px;
+  white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 .tscroll{max-width:100%;overflow-x:auto;-webkit-overflow-scrolling:touch}
 /* a horizontal-scroll wrapper is its own scroll container, so sticky headers
    inside it stick to the wrapper (60px down, over the first row) instead of
    the page — pin them normally instead */
 .tscroll th{position:static;top:auto}
+/* #setBody's table (and the others below) isn't wrapped in .tscroll - give
+   it the same "scroll internally, don't blow out the page" behaviour
+   directly. Used to be mobile-only (see the media query further down),
+   which left every width from the 680px breakpoint up to wherever the
+   table's own columns finally fit (~1150px for the set-detail table)
+   pushing the whole page wider than the viewport instead of just scrolling
+   the table. */
+#out,#setBody,#watchlistOut,#deckListWrap,.dbody{overflow-x:auto;-webkit-overflow-scrolling:touch}
+/* same reason as .tscroll th above - now that these are always their own
+   horizontal-scroll container (not just under the mobile breakpoint), their
+   sticky headers need the same always-on opt-out */
+#out th,#setBody th,#watchlistOut th,#deckListWrap th{position:static;top:auto}
 table{width:100%;border-collapse:collapse;font-size:13.5px;font-family:var(--sans)}
 table td,table td span,table td a{font-family:var(--sans);font-size:13.5px;font-weight:400}
 table td.num,table td.num span{font-family:var(--mono);font-size:12.5px}
@@ -4300,6 +4592,35 @@ table.setcards tr.miss{background:var(--row-miss-bg)}
 table.setcards td{border-bottom-color:var(--line)}
 table.setcards tr.notgoal td{opacity:.5}
 table.setcards tr.notgoal td .badge{opacity:1}
+/* Column alignment, all data tables in the app: center a column under its
+   header when the cell content is about the same length as the header
+   (or shorter), left-align it when the content runs noticeably longer -
+   free-text columns (card/set names, type lines, category badges) vs.
+   short numbers, codes, dates, statuses and single-icon action buttons. */
+#setBody table.setcards th:not(:nth-child(2)):not(:nth-child(3)),
+#setBody table.setcards td:not(:nth-child(2)):not(:nth-child(3)){text-align:center}
+#out table th:not(:nth-child(1)):not(:nth-child(4)),
+#out table td:not(:nth-child(1)):not(:nth-child(4)){text-align:center}
+#cardsOut table th:not(:nth-child(1)):not(:nth-child(2)):not(:nth-child(4)),
+#cardsOut table td:not(:nth-child(1)):not(:nth-child(2)):not(:nth-child(4)){text-align:center}
+#mOut table th:not(:nth-child(1)):not(:nth-child(2)),
+#mOut table td:not(:nth-child(1)):not(:nth-child(2)){text-align:center}
+#vhTopOut table th:not(:nth-child(1)):not(:nth-child(2)),
+#vhTopOut table td:not(:nth-child(1)):not(:nth-child(2)){text-align:center}
+.help table td:not(:first-child),.help table th:not(:first-child){text-align:center}
+#deckListWrap table.setcards th.dcSec,#deckListWrap table.setcards td.dcSec,
+#deckListWrap table.setcards th.dcColl,#deckListWrap table.setcards td.dcColl,
+#deckListWrap table.setcards th.dcQty,#deckListWrap table.setcards td.dcQty,
+#deckListWrap table.setcards th.dcPrice,#deckListWrap table.setcards td.dcPrice,
+#deckListWrap table.setcards th.dcRm,#deckListWrap table.setcards td.dcRm{text-align:center}
+/* Watchlist: Change (7th) runs a full "+X € (+Y%)" line plus a second
+   "low A - high B" line under it - much longer than the "Change" header,
+   so it's the one column here that stays left instead of centering. */
+table.wltable th:nth-child(3),table.wltable td:nth-child(3),
+table.wltable th:nth-child(4),table.wltable td:nth-child(4),
+table.wltable th:nth-child(5),table.wltable td:nth-child(5),
+table.wltable th:nth-child(8),table.wltable td:nth-child(8){text-align:center}
+table.wltable th:nth-child(7),table.wltable td:nth-child(7){text-align:left}
 .seg.deckseg button{padding:5px 6px;text-align:center}
 table.setcards .seg.deckseg button{min-width:60px}
 /* deck review: freeze column widths so toggling "any set" <-> "keep deck set"
@@ -4329,13 +4650,37 @@ table.setcards thead th[data-sk]:hover{color:var(--gold)}
 .phcur circle{fill:var(--gold)}
 .phcur .phtbg{fill:var(--bg);stroke:var(--line)}
 .phcur .phtt{fill:var(--text);font-size:11px;font-family:var(--mono)}
+.phlegend{display:flex;gap:18px;flex-wrap:wrap;margin-top:8px}
+.phlegend span{display:inline-flex;align-items:center;font-size:12.5px;color:var(--muted)}
+.phlegend i{display:inline-block;width:14px;height:2px;margin-right:6px;border-radius:1px}
+.navtabs{display:flex;gap:22px;border-bottom:1px solid var(--line);flex-wrap:wrap}
+#vhBody{margin-top:18px}
+.navtabs a.tab{color:var(--muted);text-decoration:none;font-size:14px;padding:0 0 10px;
+  border-bottom:2px solid transparent;cursor:pointer}
+.navtabs a.tab:hover{color:var(--text)}
+.navtabs a.tab.on{color:var(--gold);border-color:var(--gold)}
+.movtable{width:100%;border-collapse:collapse}
+.movtable td{padding:5px 8px;border-bottom:1px solid var(--line);font-size:13px}
+.movtable tr:last-child td{border-bottom:0}
 .seg.phrangeseg button{padding:5px 11px;font-size:12px}
-table.wltable{table-layout:fixed;width:100%}
+/* auto, not fixed: at viewport widths between the phone breakpoint and
+   roughly 1150px, the six fixed-px columns alone (680px) already exceed the
+   available table width - table-layout:fixed then has no choice but to
+   squeeze the two content columns (Card/Set) down to 0px, which with
+   overflow-wrap:anywhere below wraps every single letter onto its own line.
+   table-layout:auto still starts from these widths as hints, but instead of
+   forcing a fit it lets the table grow past its container - .tscroll (see
+   above) already scrolls that overflow horizontally, same as it does on
+   phones - so cards keep a readable minimum width instead of collapsing. */
+table.wltable{table-layout:auto;width:100%}
 table.wltable th:nth-child(1){width:24%}
 table.wltable th:nth-child(2){width:15%}
-table.wltable th:nth-child(3){width:88px}
-table.wltable th:nth-child(5){width:168px}
-table.wltable th:nth-child(6){width:46px}
+table.wltable th:nth-child(3){width:90px}
+table.wltable th:nth-child(4){width:84px}
+table.wltable th:nth-child(5){width:80px}
+table.wltable th:nth-child(6){width:210px}
+table.wltable th:nth-child(7){width:170px}
+table.wltable th:nth-child(8){width:46px}
 table.wltable td:nth-child(1),table.wltable td:nth-child(2){white-space:normal;overflow-wrap:anywhere}
 table.wltable td.wlsparkcell{padding-right:18px}
 .wlspark{width:100%;height:38px;display:block}
@@ -4383,7 +4728,7 @@ textarea{width:100%;height:130px;background:var(--panel2);color:var(--text);bord
 .msg.ok{background:#152a1e;border:1px solid #2c5a3e;color:#8fd6a8}
 .msg.err{background:#2a1616;border:1px solid #5c2c2c;color:#e0a0a0}
 .msg.warn{background:#2a2413;border:1px solid #5c4f2c;color:#d8c48f}
-.cgrid{display:grid;grid-template-columns:repeat(var(--grid-cols,4),1fr);gap:16px}
+.cgrid{display:grid;grid-template-columns:repeat(var(--grid-cols,4),minmax(0,1fr));gap:16px}
 .cc{background:var(--panel);border:1px solid var(--line);border-radius:7px;overflow:hidden;
   display:flex;flex-direction:column;cursor:pointer;
   transition:border-color .15s ease,transform .15s ease,box-shadow .15s ease}
@@ -4406,6 +4751,11 @@ textarea{width:100%;height:130px;background:var(--panel2);color:var(--text);bord
   border:1px solid var(--line);color:var(--muted);border-radius:11px;padding:1px 8px;
   font-family:var(--mono);font-size:11px}
 .cc .meta{padding:8px 10px;display:flex;flex-direction:column;gap:3px}
+.tileadd{display:flex;gap:5px;margin-top:2px}
+.tileadd button{flex:1 1 0;min-width:0;padding:3px 4px;font-size:11px;
+  white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+table.setcards td.quickadd{white-space:nowrap}
+table.setcards td.quickadd button{padding:3px 9px;font-size:12px}
 .cc .cn{font-size:13px;line-height:1.25;overflow-wrap:anywhere}
 .cc .cset{font-family:var(--mono);font-size:10.5px;color:var(--dim);
   white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
@@ -4535,6 +4885,7 @@ tr.child2 td:first-child::before{left:36px}
 @media(max-width:680px){
   body{font-size:14px}
   .gridcols{display:none}     /* mobile forces its own fixed grid columns - the slider has no effect here */
+  .rarcols{grid-template-columns:1fr}
   /* one compact nav row: icon + tabs + a power button pinned right */
   .navin{gap:11px;padding:9px 12px;height:auto;flex-wrap:wrap;align-items:center}
   .brand{font-size:0}                 /* keep the icon, drop the wordmark */
@@ -4554,19 +4905,18 @@ tr.child2 td:first-child::before{left:36px}
   h2{font-size:18px;margin:24px 0 10px}
   .sub{margin-bottom:14px}
   th{top:54px}
-  /* let wide tables scroll inside their own box instead of the whole page */
-  #out,#setBody,#watchlistOut,.dbody{overflow-x:auto;-webkit-overflow-scrolling:touch}
-  #out th,#setBody th,#watchlistOut th,#deckListWrap th{position:static;top:auto}
   #out>table,#setBody>table{min-width:560px}
-  /* watchlist: drop the sparkline column, size columns to content, clip the set
-     name (tap the card for the full name) so it never wraps letter by letter */
-  #watchlistOut tr>*:nth-child(4){display:none}
+  /* watchlist: drop rarity and the sparkline column (no room on a phone),
+     size columns to content, clip the set name (tap the card for the full
+     name) so it never wraps letter by letter */
+  #watchlistOut tr>*:nth-child(3){display:none}
+  #watchlistOut tr>*:nth-child(6){display:none}
   #watchlistOut table.wltable{table-layout:auto;min-width:0}
   #watchlistOut td,#watchlistOut th{padding:7px 6px}
   #watchlistOut td:nth-child(1){white-space:normal;overflow-wrap:normal;word-break:normal}
   #watchlistOut td:nth-child(2){white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:30vw}
   #watchlistOut td:nth-child(2) span{overflow-wrap:normal}
-  #watchlistOut td:nth-child(5),#watchlistOut th:nth-child(5){width:auto;white-space:nowrap}
+  #watchlistOut td:nth-child(7),#watchlistOut th:nth-child(7){width:auto;white-space:nowrap}
   .tscroll>table{min-width:480px}
   #view{overflow-x:hidden}
   table{font-size:13px}
@@ -4606,10 +4956,9 @@ tr.child2 td:first-child::before{left:36px}
   .psep{margin:22px 0}
   dialog{width:100vw;height:100vh;max-height:100vh;border-radius:0;border:0}
   .dh{padding:14px 15px}.dbody{padding:0 15px 18px}
-  /* deck review + price graph: scroll wide content in its own box, shrink chrome */
-  #deckListWrap{overflow-x:auto;-webkit-overflow-scrolling:touch}
-  /* on the phone the table already scrolls sideways — let columns size to their
-     content instead of the fixed desktop widths, which crushed the name column */
+  /* on the phone the table already scrolls sideways (see the always-on
+     #deckListWrap rule above) — let columns size to their content instead
+     of the fixed desktop widths, which crushed the name column */
   #deckListWrap table.setcards{table-layout:auto;min-width:560px}
   #deckListWrap table.setcards th{width:auto}
   .seg.deckseg{flex-wrap:nowrap}
@@ -4638,8 +4987,9 @@ tr.child2 td:first-child::before{left:36px}
 <footer>This is an unofficial fan-made project and is not affiliated with, endorsed, sponsored,
 or approved by Wizards of the Coast. Magic: The Gathering, all card names, images and
 related assets are trademarks and/or copyrights of Wizards of the Coast LLC and Hasbro,
-Inc. All prices are sourced from Scryfall and Cardmarket and shown for personal,
-non-commercial reference only.
+Inc. Card prices are estimates provided by affiliates (Scryfall and Cardmarket) for
+personal, non-commercial reference only — absolutely no guarantee is made for any price,
+collection value estimate, or purchase recommendation.
 <div class="footlinks">
   <a href="#manage" id="ftPhone" onclick="openManage('about','phone');return false;">Connect phone</a>
   <a href="#manage" id="ftContact" onclick="openManage('contact');return false;">Contact</a>
@@ -4710,23 +5060,31 @@ en:{
   "home.setsCompleted":"Sets completed","home.ofCountedSets":"of {n} counted sets",
   "home.xOfY":"{a} of {b}","home.physicalCards":"Physical cards",
   "home.duplicatesIncluded":"duplicates included","home.collectionValue":"Collection value",
+  "home.details":"Details",
   "home.cardmarketTrend":"Cardmarket trend","home.remainingCost":"Remaining cost",
   "home.inclShipping":"incl. {n} shipping","home.cardsOver300":"Cards over 300 €","home.cardsOver":"Cards over {eur}",
   "home.showTheseCards":"Show these cards","home.leftOutOfRemaining":"{n} — left out of remaining cost",
-  "home.namesStillMissing":"Names still missing","home.acrossCountedSets":"across all counted sets",
   "home.byRarity":"By rarity","home.closestToCompletion":"Closest to completion",
-  "home.nothingOpen":"Nothing open.","home.cheapestToFinish":"Cheapest to finish",
-  "home.cheapestDesc":"Sets you could close out for the least money, shipping included.",
+  "home.nothingOpen":"Nothing open.","home.costToFinish":"Cost to finish (cards + shipping)",
   "home.shopByName":"Or shop by card name instead →","home.nothingLoaded":"Nothing loaded yet",
   "home.watchlist":"Watchlist","home.watchlistDesc":"Cards you're keeping an eye on, with "+
     "their Cardmarket price trend. Add cards from any card page.",
   "home.watchlistEmpty":"No cards on the watchlist yet — open a card and click "+
     "\"Add to Watchlist\".",
   "home.watchlist7d":"Last 7 days","home.watchlistChange":"Change","home.watchlistTrend":"Trend",
+  "home.watchlistOwned":"Owned",
   "range.d7":"7 D","range.d30":"30 D","range.y1":"1 Y","range.max":"Max",
   "valuePage.title":"Value over time","valuePage.desc":"How your whole collection's Cardmarket trend value has moved, based on the daily price log.",
   "valuePage.mostValuable":"Most valuable cards","valuePage.mostValuableDesc":"Your holdings ranked by total value (price × copies owned).",
   "valuePage.none":"Nothing owned with a known price yet.","valuePage.thValue":"Total value",
+  "valuePage.tabPerformance":"Performance","valuePage.tabValue":"Value","valuePage.tabBySet":"Breakdown",
+  "valuePage.dimSet":"Set","valuePage.dimColor":"Color","valuePage.dimRarity":"Rarity","valuePage.dimType":"Card type",
+  "valuePage.statValue":"Collection value","valuePage.statInvested":"Invested",
+  "valuePage.statPerf":"Performance","valuePage.statDrawdown":"Biggest drop","valuePage.statConcentration":"Top 10 cards",
+  "valuePage.legendValue":"Collection value","valuePage.legendInvested":"Invested (cards with a known purchase price)",
+  "valuePage.legendYou":"Your collection","valuePage.legendMarket":"Market index (same printings, equal-weighted)",
+  "valuePage.movers":"Movers","valuePage.moversDesc":"Your biggest gainers and losers in the selected time range.",
+  "valuePage.gainers":"Gainers","valuePage.losers":"Losers","valuePage.other":"Other",
   "ph.title":"Price history","ph.none":"No price history logged yet.",
   "ph.lohi":"low {lo} · high {hi}","ph.since":"history since {d}",
   "home.watchlistRemove":"Remove from watchlist",
@@ -4889,14 +5247,14 @@ en:{
   "cm.updateNote":"The script does not auto-update. After a Binduno update, open the URL above again and reinstall to get the matching helper version.",
   "goal.title":"What counts as a complete set",
   "goal.desc":"These rules decide when a set reads 100%. They apply everywhere — set pages, the home dashboard and the buy lists.",
-  "goal.presetTitle":"Quick pick",
+  "goal.presetTitle":"Collector profile",
   "goal.presetDesc":"Sets all three options at once. Fine-tune below afterwards if you like.",
-  "goal.preset.oneEach":"One of every card","goal.preset.oneEachDesc":"Any single printing of each card name finishes the set.",
-  "goal.preset.baseSet":"Base set","goal.preset.baseSetDesc":"Every plain base-frame printing on its own — including every basic-land art, and any card that only ever got a foil printing.",
-  "goal.preset.everything":"Everything","goal.preset.everythingDesc":"Every collector number counts on its own — showcase, borderless, extended art and special foils all count. Numbered limited prints (serialized cards) still excluded.",
+  "goal.preset.oneEach":"Name Collector","goal.preset.oneEachDesc":"Any single printing of a card completes it — you're filling in every name, not chasing specific art.",
+  "goal.preset.baseSet":"Base Set Collector","goal.preset.baseSetDesc":"Every plain base-frame printing on its own — including every basic-land art, and any card that only ever got a foil printing.",
+  "goal.preset.everything":"Master Set Collector","goal.preset.everythingDesc":"Every collector number counts on its own — showcase, borderless, extended art and special foils all count too. Numbered limited prints (serialized cards) still excluded.",
   "goal.scope":"Counting","goal.scopeNames":"One printing per card name is enough","goal.scopePrintings":"Every collector number counts on its own",
   "goal.extras":"Special printings (Showcase, Borderless, Extended Art, special foils)","goal.extrasInclude":"Add to the goal","goal.extrasExclude":"Don't add to the goal",
-  "goal.extrasNote":"Under \"one printing per card name\", this barely matters: any version you own already completes that name either way — it only decides whether the set page quietly flags names you own solely as a special printing. Under \"every collector number\" it matters fully: turned on, each special printing (Showcase, Borderless, Extended Art, special foil) becomes its own separate target you need to own.",
+  "goal.extrasNote":"Already-owned special printings always complete a card name, no matter this setting. It only controls whether they also count as their own separate targets — which only matters under \"every collector number\".",
   "goal.serialized":"Serialized cards (numbered limited prints)","goal.serializedInclude":"Count toward 100%","goal.serializedExclude":"Don't count","goal.serializedNote":"Only relevant while special printings count.",
   "endgame.title":"Very expensive cards",
   "endgame.desc":"Cards whose cheapest printing is at or above the threshold are set aside: they don't count toward a set's missing cards or its cost, and are shown on their own on the home page instead. Turn this off to treat them like any other missing card.",
@@ -5039,6 +5397,8 @@ en:{
   "setPage.addAllMissing":"Add all missing to Wants-List Cart",
   "setPage.buyMissingDots":"Buy missing…",
   "setPage.thType":"Type","setPage.thFoil":"Foil","setPage.thCopies":"Copies",
+  "setPage.addRegular":"Add 1 regular copy to your collection",
+  "setPage.addFoil":"Add 1 foil copy to your collection",
   "setPage.thOwned":"Owned","setPage.thNote":"Note","setPage.yes":"yes","setPage.no":"no",
   "buyPage.title":"Buy missing cards",
   "buyPage.desc":"{setName} — {n} {cards} whose name you own in no printing of this set.",
@@ -5065,7 +5425,7 @@ en:{
     "grouped by when/what you paid, not blended into one quantity. Purchase price is "+
     "editable; leave it blank to fall back to the current trend price.",
   "setPage.noteEndgame":"Endgame","setPage.noteOtherPrinting":"Other printing",
-  "setPage.notInGoal":"off-goal","setPage.baseMissing":"base missing",
+  "setPage.notInGoal":"off-goal","setPage.baseMissing":"Owned (other printing)",
   "setPage.hideOffGoal":"Hide off‑goal cards",
   "setPage.onlyExtra":"{n} card(s) owned only as a special printing — base printing still missing",
   "cardPage.added":"Added",
@@ -5183,23 +5543,31 @@ de:{
   "home.setsCompleted":"Sets vollständig","home.ofCountedSets":"von {n} gezählten Sets",
   "home.xOfY":"{a} von {b}","home.physicalCards":"Physische Karten",
   "home.duplicatesIncluded":"inkl. Duplikate","home.collectionValue":"Sammlungswert",
+  "home.details":"Details",
   "home.cardmarketTrend":"Cardmarket-Trend","home.remainingCost":"Restkosten",
   "home.inclShipping":"inkl. {n} Versand","home.cardsOver300":"Karten über 300 €","home.cardsOver":"Karten über {eur}",
   "home.showTheseCards":"Diese Karten anzeigen","home.leftOutOfRemaining":"{n} — nicht in Restkosten",
-  "home.namesStillMissing":"Noch fehlende Namen","home.acrossCountedSets":"über alle gezählten Sets",
   "home.byRarity":"Nach Seltenheit","home.closestToCompletion":"Kurz vor Fertigstellung",
-  "home.nothingOpen":"Nichts offen.","home.cheapestToFinish":"Günstigste Fertigstellung",
-  "home.cheapestDesc":"Sets, die du mit dem geringsten Geldeinsatz abschließen könntest, Versand inklusive.",
+  "home.nothingOpen":"Nichts offen.","home.costToFinish":"Restkosten (Karten + Versand)",
   "home.shopByName":"Oder nach Kartennamen einkaufen →","home.nothingLoaded":"Noch nichts geladen",
   "home.watchlist":"Watchlist","home.watchlistDesc":"Karten, die du im Blick behältst, mit "+
     "ihrem Cardmarket-Preisverlauf. Karten über eine beliebige Kartenseite hinzufügen.",
   "home.watchlistEmpty":"Noch keine Karten auf der Watchlist — auf einer Kartenseite auf "+
     "„Zur Watchlist hinzufügen“ klicken.",
   "home.watchlist7d":"Letzte 7 Tage","home.watchlistChange":"Änderung","home.watchlistTrend":"Trend",
+  "home.watchlistOwned":"Besitz",
   "range.d7":"7 T","range.d30":"30 T","range.y1":"1 J","range.max":"Max",
   "valuePage.title":"Wertverlauf","valuePage.desc":"Wie sich der Cardmarket-Trendwert deiner gesamten Sammlung entwickelt hat, basierend auf dem täglichen Preis-Log.",
   "valuePage.mostValuable":"Wertvollste Karten","valuePage.mostValuableDesc":"Deine Karten in Besitz, sortiert nach Gesamtwert (Preis × Kopien in Besitz).",
   "valuePage.none":"Noch nichts mit bekanntem Preis in Besitz.","valuePage.thValue":"Gesamtwert",
+  "valuePage.tabPerformance":"Performance","valuePage.tabValue":"Wert","valuePage.tabBySet":"Verteilung",
+  "valuePage.dimSet":"Set","valuePage.dimColor":"Farbe","valuePage.dimRarity":"Seltenheit","valuePage.dimType":"Kartentyp",
+  "valuePage.statValue":"Sammlungswert","valuePage.statInvested":"Investiert",
+  "valuePage.statPerf":"Performance","valuePage.statDrawdown":"Größter Rückgang","valuePage.statConcentration":"Top-10-Karten",
+  "valuePage.legendValue":"Sammlungswert","valuePage.legendInvested":"Investiert (Karten mit bekanntem Kaufpreis)",
+  "valuePage.legendYou":"Deine Sammlung","valuePage.legendMarket":"Marktindex (dieselben Drucke, gleichgewichtet)",
+  "valuePage.movers":"Bewegungen","valuePage.moversDesc":"Deine größten Gewinner und Verlierer im gewählten Zeitraum.",
+  "valuePage.gainers":"Gewinner","valuePage.losers":"Verlierer","valuePage.other":"Sonstige",
   "ph.title":"Preisverlauf","ph.none":"Noch kein Preisverlauf aufgezeichnet.",
   "ph.lohi":"Tief {lo} · Hoch {hi}","ph.since":"Verlauf ab {d}",
   "home.watchlistRemove":"Von Watchlist entfernen",
@@ -5364,14 +5732,14 @@ de:{
   "cm.updateNote":"Das Script aktualisiert sich nicht selbst. Nach einem Binduno-Update die URL oben erneut öffnen und neu installieren, damit die Helfer-Version passt.",
   "goal.title":"Wann gilt ein Set als vollständig",
   "goal.desc":"Diese Regeln bestimmen, wann ein Set 100 % erreicht. Sie gelten überall — Set-Seiten, Startseite und Kauflisten.",
-  "goal.presetTitle":"Schnellauswahl",
+  "goal.presetTitle":"Sammler-Profil",
   "goal.presetDesc":"Setzt alle drei Optionen auf einmal. Danach unten bei Bedarf feinjustieren.",
-  "goal.preset.oneEach":"Ein Exemplar pro Karte","goal.preset.oneEachDesc":"Irgendein Druck jedes Kartennamens vervollständigt das Set.",
-  "goal.preset.baseSet":"Basis-Set","goal.preset.baseSetDesc":"Jeder normale Basis-Frame-Druck einzeln — auch jede Illustration der Basisländer, und Karten, die es nur als Foil gab.",
-  "goal.preset.everything":"Alles","goal.preset.everythingDesc":"Jede Sammlernummer zählt einzeln — Showcase, Borderless, Extended Art und Spezial-Foils zählen alle mit. Nummerierte limitierte Drucke (serialisierte Karten) bleiben ausgeschlossen.",
+  "goal.preset.oneEach":"Name-Sammler","goal.preset.oneEachDesc":"Irgendein Druck reicht pro Karte — dir geht es um jeden Namen, nicht um eine bestimmte Illustration.",
+  "goal.preset.baseSet":"Basis-Set-Sammler","goal.preset.baseSetDesc":"Jeder normale Basis-Frame-Druck einzeln — auch jede Illustration der Basisländer, und Karten, die es nur als Foil gab.",
+  "goal.preset.everything":"Master-Set-Sammler","goal.preset.everythingDesc":"Jede Sammlernummer zählt einzeln — Showcase, Borderless, Extended Art und Spezial-Foils zählen auch mit. Serialisierte Karten bleiben ausgeschlossen.",
   "goal.scope":"Zählweise","goal.scopeNames":"Ein Druck pro Kartenname reicht","goal.scopePrintings":"Jede Sammlernummer zählt einzeln",
   "goal.extras":"Sonderdrucke (Showcase, Borderless, Extended Art, Spezial-Foils)","goal.extrasInclude":"Ins Ziel aufnehmen","goal.extrasExclude":"Nicht ins Ziel aufnehmen",
-  "goal.extrasNote":"Bei „ein Druck pro Kartenname“ macht das kaum einen Unterschied: jede Version, die du besitzt, erfüllt den Namen so oder so — es entscheidet nur, ob die Set-Seite Namen markiert, die du nur als Sonderdruck besitzt. Bei „jede Sammlernummer“ wirkt es voll: eingeschaltet wird jeder Sonderdruck (Showcase, Borderless, Extended Art, Spezial-Foil) zu einem eigenen Ziel, das du besitzen musst.",
+  "goal.extrasNote":"Bereits besessene Sonderdrucke erfüllen einen Kartennamen immer, unabhängig von dieser Einstellung. Sie legt nur fest, ob sie zusätzlich als eigene Ziele zählen — relevant nur bei „jede Sammlernummer“.",
   "goal.serialized":"Serialisierte Karten (nummerierte limitierte Prints)","goal.serializedInclude":"Zählen zur 100 %","goal.serializedExclude":"Zählen nicht","goal.serializedNote":"Nur relevant, solange Sonderdrucke mitzählen.",
   "endgame.title":"Sehr teure Karten",
   "endgame.desc":"Karten, deren günstigster Druck den Schwellwert erreicht oder überschreitet, werden zurückgestellt: sie zählen nicht zu den fehlenden Karten eines Sets und nicht zu dessen Kosten, sondern werden separat auf der Startseite gezeigt. Aus = sie zählen wie jede andere fehlende Karte.",
@@ -5517,6 +5885,8 @@ de:{
   "setPage.addAllMissing":"Alle fehlenden zum Wants-Liste-Cart hinzufügen",
   "setPage.buyMissingDots":"Fehlende kaufen…",
   "setPage.thType":"Typ","setPage.thFoil":"Foil","setPage.thCopies":"Kopien",
+  "setPage.addRegular":"1 normale Kopie zur Sammlung hinzufügen",
+  "setPage.addFoil":"1 Foil-Kopie zur Sammlung hinzufügen",
   "setPage.thOwned":"In Besitz","setPage.thNote":"Notiz","setPage.yes":"ja","setPage.no":"nein",
   "buyPage.title":"Fehlende Karten kaufen",
   "buyPage.desc":"{setName} — {n} {cards}, die du in keinem Druck dieses Sets besitzt.",
@@ -5543,7 +5913,7 @@ de:{
     "hinweg — nach Kauf getrennt, nicht zu einer Menge verschmolzen. Kaufpreis ist "+
     "editierbar; leer lassen, um auf den aktuellen Trendpreis zurückzufallen.",
   "setPage.noteEndgame":"Endgame","setPage.noteOtherPrinting":"Anderer Druck",
-  "setPage.notInGoal":"zählt nicht","setPage.baseMissing":"Basis fehlt",
+  "setPage.notInGoal":"zählt nicht","setPage.baseMissing":"Besessen (anderer Druck)",
   "setPage.hideOffGoal":"Off‑Goal-Karten ausblenden",
   "setPage.onlyExtra":"{n} Karte(n) nur als Sonderdruck vorhanden — Basis-Druck fehlt noch",
   "cardPage.added":"Hinzugefügt",
@@ -5708,7 +6078,6 @@ function updateDismissed(v){try{return localStorage.getItem("bnd_upd_dismiss")==
 function dismissUpdate(v){try{localStorage.setItem("bnd_upd_dismiss",v);}catch(e){}}
 let SHOW_COSTS=false;
 let HIDE_OFFGOAL=false;   // set page: hide printings that don't count toward the goal
-let RARMODE="names";   // "By rarity" on Home: card-name counts vs. every printing
 let FORCE_RELOAD=false;   // set after an import so the next route re-fetches
 let SETS=[],STATS=null,PAGE=1,PER=loadPer("sets",24),VIEW="grid",SORT="totalCost",DIR=1,
     Q="",FLABELS=null,FSTAT="started";
@@ -5722,6 +6091,27 @@ function donut(p,color,size=96){
       transform="rotate(-90 50 50)"/>
     <text x="50" y="55" text-anchor="middle" fill="var(--text)"
       style="font:600 19px var(--sans)">${(p*100).toFixed(0)}%</text></svg>`;
+}
+// One ring, one arc per group (Value-page "by set/color/rarity/type" tab) -
+// same stroke-dasharray trick as donut() above, just walked around the
+// circle once per group instead of drawing one fraction against a track.
+const DONUT_PALETTE=["#d4a629","#4a90c4","#4f9d69","#b1548c","#c0605a",
+  "#7a6fc4","#5aa6a0","#c4914a","#8a8f98"];
+function donutMulti(groups,size=180){
+  const R=70,C=2*Math.PI*R,SW=26,CX=90,CY=90;
+  let off=0;
+  const arcs=groups.map((g,i)=>{
+    const len=Math.max(0,C*(g.pct/100));
+    const seg=`<circle cx="${CX}" cy="${CY}" r="${R}" fill="none"
+      stroke="${g.color||DONUT_PALETTE[i%DONUT_PALETTE.length]}" stroke-width="${SW}"
+      stroke-dasharray="${len.toFixed(1)} ${(C-len).toFixed(1)}"
+      stroke-dashoffset="${(-off).toFixed(1)}" transform="rotate(-90 ${CX} ${CY})"/>`;
+    off+=len;
+    return seg;
+  }).join("");
+  return `<svg viewBox="0 0 ${CX*2} ${CY*2}" width="${size}" height="${size}">
+    <circle cx="${CX}" cy="${CY}" r="${R}" fill="none" stroke="var(--track)" stroke-width="${SW}"/>
+    ${arcs}</svg>`;
 }
 const icon=(s,sz=26)=>s.icon?`<img class="seticon" src="${s.icon}" alt="" width="${sz}" height="${sz}" loading="lazy">`
   :`<span style="width:${sz}px;display:inline-block"></span>`;
@@ -5799,14 +6189,13 @@ function home(){
     <div class="donut clickable" id="tileSetsComplete" style="cursor:pointer">${donut(s.setsComplete/Math.max(1,s.setsTotal),"#4f9d69")}
       <div><div class="t">${t("home.setsCompleted")}</div><div class="p">${s.setsComplete}</div>
       <div class="s">${t("home.ofCountedSets",{n:s.setsTotal})}</div></div></div>
-  </div>
-  <div class="cards" style="margin-top:12px">
     <div class="card clickable" id="tilePhysical" style="cursor:pointer"><div class="k">${t("home.physicalCards")}</div><div class="v">${num(s.physical)}</div>
       <div class="n">${t("home.duplicatesIncluded")}</div></div>
     <div class="card clickable" id="tileValue" style="cursor:pointer">
       <div class="k">${t("home.collectionValue")}</div>
       <div class="v" style="color:var(--gold)">${money(s.value)}</div>
-      <div class="n">${t("home.cardmarketTrend")}</div></div>
+      <div class="n">${t("home.cardmarketTrend")} · <a id="tileValueDetails"
+        style="cursor:pointer;color:var(--gold);border-bottom:1px dotted">${t("home.details")}</a></div></div>
     ${SHOW_COSTS?`<div class="card"><div class="k">${t("home.remainingCost")}</div><div class="v">${money(s.remaining)}</div>
       <div class="n">${t("home.inclShipping",{n:money(s.shipping)})}</div></div>`:""}
     ${(SHOW_COSTS&&window.HAS.endgame&&window.HAS.endgame.on!==false)?`<div class="card clickable" id="bigTicket" style="cursor:pointer"
@@ -5814,24 +6203,23 @@ function home(){
       <div class="k">${t("home.cardsOver",{eur:Math.round((window.HAS.endgame&&window.HAS.endgame.eur)||300)+" €"})}</div>
       <div class="v" style="color:var(--mythic)">${num(s.endgameCount)}</div>
       <div class="n">${t("home.leftOutOfRemaining",{n:money(s.endgameValue)})}</div></div>`:""}
-    <div class="card clickable" id="tileMissing" style="cursor:pointer"><div class="k">${t("home.namesStillMissing")}</div>
-      <div class="v">${num(s.names.total-s.names.owned)}</div>
-      <div class="n">${t("home.acrossCountedSets")}</div></div>
   </div>
 
-  <h2 style="display:flex;align-items:center;gap:12px;flex-wrap:wrap">${t("home.byRarity")}
-    <span class="seg" id="rarMode" style="font-family:var(--sans)">
-      <button data-rm="names" class="${RARMODE==="names"?"on":""}">${t("home.cardNames")}</button>
-      <button data-rm="printings" class="${RARMODE==="printings"?"on":""}">${t("home.printings")}</button>
-    </span></h2>
-  <div class="rarbars" id="rarBars"></div>
+  <h2>${t("home.byRarity")}</h2>
+  <div class="rarcols">
+    <div><h3>${t("home.cardNames")}</h3><div class="rarbars" id="rarBarsNames"></div></div>
+    <div><h3>${t("home.printings")}</h3><div class="rarbars" id="rarBarsPrintings"></div></div>
+  </div>
 
   <h2>${t("home.closestToCompletion")}</h2>
-  <div class="list">${s.nearest.map(x=>row(x)).join("")||`<div class="li">${t("home.nothingOpen")}</div>`}</div>
-
-  ${SHOW_COSTS?`<h2>${t("home.cheapestToFinish")}</h2>
-  <p class="sub">${t("home.cheapestDesc")}</p>
-  <div class="list">${s.cheapest.map(x=>row(x,true)).join("")}</div>`:""}
+  ${s.nearest.length?(()=>{
+    const items=s.nearest.map(x=>row(x));
+    const half=Math.ceil(items.length/2);
+    return `<div class="rarcols">
+      <div class="list">${items.slice(0,half).join("")}</div>
+      <div class="list">${items.slice(half).join("")}</div>
+    </div>`;
+  })():`<div class="list"><div class="li">${t("home.nothingOpen")}</div></div>`}
   <p class="sub" style="margin-top:10px"><a data-go="missing" style="cursor:pointer;
     color:var(--gold);border-bottom:1px dotted">${t("home.shopByName")}</a></p>
 
@@ -5839,7 +6227,6 @@ function home(){
   <p class="sub">${t("home.watchlistDesc")}</p>
   <div id="watchlistOut"><p class="sub">${t("missing.loading")}</p></div>`;
   renderRarBars();
-  document.querySelectorAll("[data-rm]").forEach(b=>b.onclick=()=>{RARMODE=b.dataset.rm;renderRarBars();});
   if($("#updGo"))$("#updGo").onclick=()=>{SUB="about";ABOUT_SUB="app";go("manage");};
   if($("#updHide"))$("#updHide").onclick=()=>{dismissUpdate(upd.latest);const b=$("#updBanner");if(b)b.remove();};
   const seeStart=()=>{try{localStorage.setItem("bnd_start_seen","1");}catch(e){}};
@@ -5859,7 +6246,6 @@ function home(){
     go("collection");
   };
   if($("#tileNames"))$("#tileNames").onclick=()=>go("missing");
-  if($("#tileMissing"))$("#tileMissing").onclick=()=>go("missing");
   if($("#tilePrintings"))$("#tilePrintings").onclick=()=>{
     CMODE="cards";
     CF={...CF,q:"",text:"",artist:"",type:"",rarity:"",colors:[],owned:"missing",
@@ -5879,17 +6265,21 @@ function home(){
     go("collection");
   };
   if($("#tileValue"))$("#tileValue").onclick=()=>go("value");
+  if($("#tileValueDetails"))$("#tileValueDetails").onclick=e=>{e.stopPropagation();go("value");};
   drawWatchlist();
 }
-function renderRarBars(){
-  const el=$("#rarBars");if(!el||!STATS)return;
-  const s=STATS,RD=(RARMODE==="names"?s.rarityNames:s.rarity)||{};
+function renderRarBarsInto(el,RD){
+  if(!el)return;
   el.innerHTML=Object.entries(RAR).filter(([k])=>RD[k]).map(([k,[,col]])=>{
     const d=RD[k],p=d.owned/Math.max(1,d.total);
     return `<div class="rarrow"><div class="lb">${rarLabel(k)}</div>
       <div class="track"><div class="fill" style="width:${p*100}%;background:${col}"></div></div>
       <div class="nm">${num(d.owned)} / ${num(d.total)}</div></div>`;}).join("");
-  document.querySelectorAll("#rarMode [data-rm]").forEach(b=>b.classList.toggle("on",b.dataset.rm===RARMODE));
+}
+function renderRarBars(){
+  if(!STATS)return;
+  renderRarBarsInto($("#rarBarsNames"),STATS.rarityNames||{});
+  renderRarBarsInto($("#rarBarsPrintings"),STATS.rarity||{});
 }
 function sparkline(vals){
   const w=100,h=28,pad=3;
@@ -5980,47 +6370,70 @@ function priceGraph(h,opt){
   opt=opt||{};
   const S=(h&&h.series)||[];
   if(S.length<2)return `<p class="sub">${t("ph.none")}</p>`;
-  const key=opt.foil?"foil":"eur";
+  const fmt=opt.fmt||money;
+  // opt.lines draws several keys of the same series as separate lines (the
+  // Value tab: market value vs invested capital; Performance: your % vs the
+  // market index) - each its own color/dash, no area fill or min/max dots
+  // (those read fine for one line, cluttered for two). Single-line callers
+  // (card page, watchlist) are untouched: same one-key/area/dots shape as
+  // before, just routed through the same axis math.
+  const lines=opt.lines||[{key:opt.foil?"foil":"eur"}];
+  const multi=!!opt.lines;
   const W=opt.w||960,H=opt.h||260,PR=16,PT=14,PB=28;
   const t0=Date.parse(S[0].d),t1=Date.parse(S[S.length-1].d),span=(t1-t0)||1;
-  let lo=Math.min(...S.map(p=>p[key])),hi=Math.max(...S.map(p=>p[key]));
-  if(lo===hi){lo=Math.max(0,lo*0.9);hi=hi*1.1||1;}
-  const gap=(hi-lo)*0.14;lo=Math.max(0,lo-gap);hi=hi+gap;
+  const allVals=S.flatMap(p=>lines.map(ln=>p[ln.key]).filter(v=>v!=null));
+  let lo=Math.min(...allVals),hi=Math.max(...allVals);
+  if(lo===hi){lo=lo-Math.abs(lo*0.1)-1;hi=hi+Math.abs(hi*0.1)+1;}
+  const gap=(hi-lo)*0.14;
+  if(!multi||lo>=0)lo=Math.max(0,lo-gap);else lo=lo-gap;   // % lines can go negative
+  hi=hi+gap;
   // Left padding has to fit the widest y-axis label - a card's own price
   // history never needs more than ~52px, but the whole-collection value
   // graph can run into the thousands and got clipped at a fixed width.
   // .phlbl is monospace, so a char-count estimate is exact enough.
-  const widest=Math.max(...[0,.25,.5,.75,1].map(f=>money(hi-(hi-lo)*f).length));
+  const widest=Math.max(...[0,.25,.5,.75,1].map(f=>fmt(hi-(hi-lo)*f).length));
   const PL=Math.max(52,widest*6.2+14);
   const X=d=>PL+(Date.parse(d)-t0)/span*(W-PL-PR);
   const Y=v=>PT+(1-(v-lo)/((hi-lo)||1))*(H-PT-PB);
-  const P=S.map(p=>[X(p.d),Y(p[key])]);
-  const line=P.map((q,i)=>(i?"L":"M")+q[0].toFixed(1)+" "+q[1].toFixed(1)).join(" ");
-  const area=`M${P[0][0].toFixed(1)} ${(H-PB).toFixed(1)} `+
-    P.map(q=>"L"+q[0].toFixed(1)+" "+q[1].toFixed(1)).join(" ")+
-    ` L${P[P.length-1][0].toFixed(1)} ${(H-PB).toFixed(1)} Z`;
-  const up=S[S.length-1][key]>=S[0][key];
-  const col=up?"var(--ok)":"var(--bad)";
+  const zeroY=lo<0&&hi>0?`<line x1="${PL}" y1="${Y(0).toFixed(1)}" x2="${W-PR}" y2="${Y(0).toFixed(1)}" class="phgrid" stroke-dasharray="2 3"/>`:"";
   const grid=[0,.25,.5,.75,1].map(f=>{
     const y=PT+f*(H-PT-PB),v=hi-(hi-lo)*f;
     return `<line x1="${PL}" y1="${y.toFixed(1)}" x2="${W-PR}" y2="${y.toFixed(1)}" class="phgrid"/>`+
-      `<text x="${PL-7}" y="${(y+3).toFixed(1)}" text-anchor="end" class="phlbl">${money(v)}</text>`;
+      `<text x="${PL-7}" y="${(y+3).toFixed(1)}" text-anchor="end" class="phlbl">${fmt(v)}</text>`;
   }).join("");
   const xl=[0,.5,1].map(f=>{const d=S[Math.round(f*(S.length-1))].d;
     return `<text x="${X(d).toFixed(1)}" y="${H-9}" text-anchor="${f?f<1?"middle":"end":"start"}" class="phlbl">${phDate(d)}</text>`;
   }).join("");
-  const iMin=S.reduce((a,p,i)=>p[key]<S[a][key]?i:a,0);
-  const iMax=S.reduce((a,p,i)=>p[key]>S[a][key]?i:a,0);
-  const dot=i=>`<circle cx="${X(S[i].d).toFixed(1)}" cy="${Y(S[i][key]).toFixed(1)}" r="3.2" fill="${col}"/>`;
-  const meta=JSON.stringify({W,H,PL,PR,PT,PB,lo,hi,t0,span,key,
-    S:S.map(p=>[p.d,p[key]])});
+  const primary=lines[0].key;
+  const up=S[S.length-1][primary]>=S[0][primary];
+  const defCol=up?"var(--ok)":"var(--bad)";
+  const paths=lines.map((ln,li)=>{
+    const col=ln.color||defCol;
+    const pts=S.map(p=>[X(p.d),p[ln.key]==null?null:Y(p[ln.key])]).filter(q=>q[1]!=null);
+    if(pts.length<2)return "";
+    const d=pts.map((q,i)=>(i?"L":"M")+q[0].toFixed(1)+" "+q[1].toFixed(1)).join(" ");
+    const dash=ln.dash?`stroke-dasharray="${ln.dash}"`:"";
+    let area="",dots="";
+    if(!multi){
+      const areaD=`M${pts[0][0].toFixed(1)} ${(H-PB).toFixed(1)} `+
+        pts.map(q=>"L"+q[0].toFixed(1)+" "+q[1].toFixed(1)).join(" ")+
+        ` L${pts[pts.length-1][0].toFixed(1)} ${(H-PB).toFixed(1)} Z`;
+      const iMin=S.reduce((a,p,i)=>p[ln.key]<S[a][ln.key]?i:a,0);
+      const iMax=S.reduce((a,p,i)=>p[ln.key]>S[a][ln.key]?i:a,0);
+      const dot=i=>`<circle cx="${X(S[i].d).toFixed(1)}" cy="${Y(S[i][ln.key]).toFixed(1)}" r="3.2" fill="${col}"/>`;
+      area=`<path d="${areaD}" fill="${col}" opacity=".13"/>`;
+      dots=`${dot(iMin)}${dot(iMax)}`;
+    }
+    return `${area}<path d="${d}" fill="none" stroke="${col}" stroke-width="2.4" ${dash}
+      vector-effect="non-scaling-stroke" stroke-linejoin="round"/>${dots}`;
+  }).join("");
+  const meta=JSON.stringify({W,H,PL,PR,PT,PB,lo,hi,t0,span,fmt:opt.pct?"pct":"money",
+    keys:lines.map(l=>l.key),labels:lines.map(l=>l.label||""),
+    S:S.map(p=>[p.d,...lines.map(l=>p[l.key])])});
   return `<svg class="phsvg" viewBox="0 0 ${W} ${H}" preserveAspectRatio="none"
       data-ph='${esc(meta)}'>
-    ${grid}
-    <path d="${area}" fill="${col}" opacity=".13"/>
-    <path d="${line}" fill="none" stroke="${col}" stroke-width="2.4"
-      vector-effect="non-scaling-stroke" stroke-linejoin="round"/>
-    ${dot(iMin)}${dot(iMax)}${xl}
+    ${grid}${zeroY}
+    ${paths}${xl}
     <g class="phcur" style="display:none">
       <line class="phvl" y1="${PT}" y2="${H-PB}"/><circle r="4"/>
       <rect class="phtbg" rx="3"/><text class="phtt"></text></g>
@@ -6032,6 +6445,7 @@ function bindPriceGraph(root){
   const svg=(root||document).querySelector(".phsvg");if(!svg)return;
   const m=JSON.parse(svg.dataset.ph),hit=svg.querySelector(".phhit"),cur=svg.querySelector(".phcur");
   if(!hit)return;
+  const fmt=m.fmt==="pct"?(v=>(v>0?"+":"")+v.toFixed(1)+" %"):money;
   const X=d=>m.PL+(Date.parse(d)-m.t0)/m.span*(m.W-m.PL-m.PR);
   const Y=v=>m.PT+(1-(v-m.lo)/((m.hi-m.lo)||1))*(m.H-m.PT-m.PB);
   const move=ev=>{
@@ -6044,7 +6458,10 @@ function bindPriceGraph(root){
     cur.querySelector(".phvl").setAttribute("x1",x.toFixed(1));
     cur.querySelector(".phvl").setAttribute("x2",x.toFixed(1));
     const cc=cur.querySelector("circle");cc.setAttribute("cx",x.toFixed(1));cc.setAttribute("cy",y.toFixed(1));
-    const label=phDate(p[0])+"  "+money(p[1]);
+    // p = [date, v1, v2, ...] - one value per configured line, oldest-first
+    const parts=m.keys.map((k,i)=>(m.labels[i]?m.labels[i]+" ":"")+
+      (p[i+1]==null?"—":fmt(p[i+1])));
+    const label=phDate(p[0])+"  "+parts.join("   ");
     const tt=cur.querySelector(".phtt"),bg=cur.querySelector(".phtbg");
     tt.textContent=label;
     const w=label.length*6.6+12,left=x+10+w>m.W-m.PR?x-10-w:x+10;
@@ -6066,16 +6483,20 @@ async function drawWatchlist(){
     return;
   }
   out.innerHTML=rangeUI+`<div class="tscroll"><table class="wltable"><thead><tr><th>${t("missing.thCard")}</th><th>${t("cardPage.set")}</th>
-      <th class="num">${t("missing.thPrice")}</th><th class="wlsparkcell">${t("home.watchlistTrend")}</th>
+      <th>${t("missing.thRarity")}</th><th class="num">${t("missing.thPrice")}</th>
+      <th class="num">${t("home.watchlistOwned")}</th><th class="wlsparkcell">${t("home.watchlistTrend")}</th>
       <th class="num">${t("home.watchlistChange")}</th><th></th></tr></thead>
     <tbody>${r.items.map(c=>`<tr>
       <td><span class="setlink" data-card="${c.set}|${c.number}" data-pop="${c.img||""}">${cardName(c)}</span></td>
       <td><span class="setlink" data-set="${c.set}">${c.setName}</span></td>
+      <td>${RAR[c.rarity]?rarLabel(c.rarity):"?"}</td>
       <td class="num" style="color:var(--gold)">${c.eur?money(c.eur):"—"}</td>
+      <td class="num">${c.qty||""}</td>
       <td class="wlsparkcell">${wlSpark(c.series)}</td>
       <td class="num" style="color:${c.changeEur>0?"var(--ok)":c.changeEur<0?"var(--bad)":"var(--muted)"}">${c.changePct==null?"—":
         `${c.changeEur>0?"+":""}${money(c.changeEur)} <span class="mt">(${
-          c.changePct>0?"+":""}${c.changePct.toFixed(1)}%)</span>`}</td>
+          c.changePct>0?"+":""}${c.changePct.toFixed(1)}%)</span><br><span class="mt">${
+          t("ph.lohi",{lo:money(c.lo),hi:money(c.hi)})}</span>`}</td>
       <td class="num"><button data-unwatch="${c.set}|${c.number}"
         title="${t("home.watchlistRemove")}" style="padding:3px 9px;font-size:12px">✕</button></td>
     </tr>`).join("")}</tbody></table></div>
@@ -6093,12 +6514,14 @@ function bindPhRange(sel,cb){
   const box=$(sel);if(!box)return;
   box.querySelectorAll("[data-phr]").forEach(b=>b.onclick=()=>cb(b.dataset.phr));
 }
-const row=(x,cost)=>`<div class="li" data-code="${x.code}">${icon(x,19)}
-  <span class="nm">${x.name}</span>
+const row=x=>`<div class="li" data-code="${x.code}">${icon(x,19)}
+  <span class="nm" style="flex:0 1 180px;white-space:nowrap;overflow:hidden;
+    text-overflow:ellipsis" title="${x.name}">${x.name}</span>
   <span class="bar"><span style="width:${x.pct*100}%"></span></span>
-  <span class="mt" style="flex:0 0 86px;text-align:right">${x.owned}/${x.total}</span>
-  <span class="mt" style="color:var(--gold);flex:0 0 84px;text-align:right">${
-    cost?money(x.totalCost):pct(x.pct)}</span></div>`;
+  <span class="mt" style="flex:0 0 72px;text-align:right">${x.owned}/${x.total}</span>
+  <span class="mt" style="color:var(--gold);flex:0 0 58px;text-align:right">${pct(x.pct)}</span>${
+    SHOW_COSTS?`<span class="mt" style="flex:0 0 80px;text-align:right" title="${t("home.costToFinish")}">${
+      money(x.totalCost)}</span>`:""}</div>`;
 function bindRows(){document.querySelectorAll(".li[data-code]").forEach(e=>
   e.onclick=()=>openSet(e.dataset.code));bindCrumbs();}
 
@@ -6125,24 +6548,53 @@ function explainPage(){
 const valueTile=x=>`<div class="cc" data-card="${x.set}|${x.number}">
   <div class="imgwrap">${x.img?`<img class="face" src="${x.img}" alt="${cardName(x)}" loading="lazy">`
     :`<div class="noimg">${cardName(x)}</div>`}</div>
-  <div class="meta"><div class="cn">${cardName(x)}${x.foil?` <span class="varlbl">${t("setPage.thFoil")}</span>`:""}</div>
+  <div class="meta"><div class="cn">${cardName(x)} <span class="varlbl">${x.foil?t("setPage.thFoil"):t("cardPage.regular")}</span></div>
     <div class="cset">${x.setName} · ${x.qty}×</div>
     <div class="cp">${money(x.price)} <em>· ${money(x.value)}</em></div>
   </div></div>`;
 let VH_TOP=[],VH_TOP_VIEW="grid",VH_TOP_PAGE=1,VH_TOP_PER=loadPer("valuetop",24);
+let VH_TAB="performance", VBD_DIM="set";
+// Survives leaving and returning to the page (unlike the rest of this
+// page's per-visit state below) so the stat tiles can render immediately
+// with last visit's numbers instead of sitting blank until the fetch
+// completes - matching how VH_TOP above already behaves.
+let VH_DATA=null;
+try{VH_TAB=localStorage.getItem("bnd_vh_tab")||VH_TAB;
+    VBD_DIM=localStorage.getItem("bnd_vbd_dim")||VBD_DIM;}catch(e){}
+const VH_TABS=[["performance","valuePage.tabPerformance"],["value","valuePage.tabValue"],
+  ["byset","valuePage.tabBySet"]];
+const VBD_DIMS=[["set","valuePage.dimSet"],["color","valuePage.dimColor"],
+  ["rarity","valuePage.dimRarity"],["type","valuePage.dimType"]];
 async function valuePage(){
   if(!window.HAS.hasCards||!window.HAS.hasCollection) return setupPrompt();
   CRUMBS=[];
   $("#view").innerHTML=`${crumbs([{label:t("nav.home"),hash:"home"},{label:t("valuePage.title")}])}
     <h1>${t("valuePage.title")}</h1>
     <p class="sub" style="max-width:640px">${t("valuePage.desc")}</p>
-    <div class="tools" style="margin:16px 0 0">${phRangeSeg(VH_RANGE,"vhRange")}</div>
-    <p class="sub" id="vhChg" style="margin:8px 0"></p>
-    <div id="vhGraph"><p class="sub">${t("browse.searching")}</p></div>
+    <div id="vhStats" class="cards" style="grid-template-columns:repeat(auto-fit,minmax(150px,1fr));margin-top:16px"></div>
+    <div class="navtabs" id="vhTabbar" style="margin-top:22px">${VH_TABS.map(([id,lbl])=>
+      `<a class="tab ${VH_TAB===id?"on":""}" data-vt="${id}">${t(lbl)}</a>`).join("")}</div>
+    <div id="vhWrap">
+      <div class="tools" id="vhRangeRow" style="margin-top:18px">${phRangeSeg(VH_RANGE,"vhRange")}</div>
+      <div id="vhBody"></div>
+      <div id="vhMovers" style="margin-top:8px"></div>
+    </div>
     <h2 style="margin-top:24px">${t("valuePage.mostValuable")}</h2>
     <p class="sub" style="max-width:640px">${t("valuePage.mostValuableDesc")}</p>
     <div id="vhTopOut"><p class="sub">${t("browse.searching")}</p></div>`;
   bindCrumbs();
+  // Shared by all three tabs - Movers reads it everywhere, the By-set donut
+  // itself ignores it (a snapshot), Performance/Value use it for the graph.
+  bindPhRange("#vhRange",v=>{
+    VH_RANGE=v;savePhRange();
+    document.querySelectorAll("#vhRange [data-phr]").forEach(b=>b.classList.toggle("on",b.dataset.phr===v));
+    fetchRange(v);
+  });
+  document.querySelectorAll("#vhTabbar [data-vt]").forEach(a=>a.onclick=()=>{
+    VH_TAB=a.dataset.vt;try{localStorage.setItem("bnd_vh_tab",VH_TAB);}catch(e){}
+    document.querySelectorAll("#vhTabbar [data-vt]").forEach(x=>x.classList.toggle("on",x.dataset.vt===VH_TAB));
+    drawBody();
+  });
   const renderTop=()=>{
     const total=VH_TOP.length;
     const pages=Math.max(1,Math.ceil(total/VH_TOP_PER));
@@ -6162,7 +6614,8 @@ async function valuePage(){
            <th class="num">${t("browse.sortCopiesOwned")}</th><th class="num">${t("missing.thPrice")}</th>
            <th class="num">${t("valuePage.thValue")}</th></tr></thead><tbody>${page.map(x=>`<tr>
            <td><span class="nmline"><span class="setlink" data-card="${x.set}|${x.number}"
-             data-pop="${x.img||""}">${cardName(x)}</span>${x.foil?` <span class="varlbl">${t("setPage.thFoil")}</span>`:""}</span></td>
+             data-pop="${x.img||""}">${cardName(x)}</span> <span class="varlbl">${
+               x.foil?t("setPage.thFoil"):t("cardPage.regular")}</span></span></td>
            <td><span class="setlink" data-set="${x.set}">${x.setName}</span></td>
            <td class="num">${x.qty}</td>
            <td class="num">${money(x.price)}</td>
@@ -6177,28 +6630,183 @@ async function valuePage(){
     if($("#vhTopPv"))$("#vhTopPv").onclick=()=>{VH_TOP_PAGE--;renderTop();};
     if($("#vhTopNx"))$("#vhTopNx").onclick=()=>{VH_TOP_PAGE++;renderTop();};
   };
-  const renderGraph=h=>{
-    // Match the SVG's internal coordinate width to its actual rendered pixel
-    // width - viewBox + preserveAspectRatio="none" otherwise stretches
-    // everything (text included) whenever the container is much wider than
-    // the fixed default (this page has no max-width, unlike the card page).
-    const w=Math.max(600,$("#vhGraph").clientWidth||960);
-    $("#vhGraph").innerHTML=priceGraph(h,{w});bindPriceGraph($("#vhGraph"));
+  let VH_MOVERS=null, VBD_DATA=null, VBD_CACHE={};
+  const legend=lines=>`<div class="phlegend">${lines.map(l=>
+    `<span><i style="background:${l.color||'var(--gold)'};${l.dash?'border-bottom:2px dashed '+l.color+";background:none;height:0;width:14px":""}"></i>${l.label}</span>`).join("")}</div>`;
+  const statTile=(label,value,color)=>`<div class="card"><div class="k">${label}</div>
+    <div class="v" style="font-size:20px${color?";color:"+color:""}">${value}</div></div>`;
+  const renderStats=()=>{
+    const h=VH_DATA;
+    if(!h||!h.series.length){$("#vhStats").innerHTML="";return;}
+    const last=h.series[h.series.length-1],perf=last.perfPct;
+    $("#vhStats").innerHTML=
+      statTile(t("valuePage.statValue"),money(last.eur||0))+
+      statTile(t("valuePage.statInvested"),money(last.invested||0))+
+      statTile(t("valuePage.statPerf"),perf==null?"—":(perf>0?"+":"")+perf.toFixed(1)+" %",
+        perf==null?null:perf>=0?"var(--ok)":"var(--bad)")+
+      statTile(t("valuePage.statDrawdown"),h.drawdown?"−"+h.drawdown.pct.toFixed(1)+" %":"—",
+        h.drawdown?"var(--bad)":null)+
+      statTile(t("valuePage.statConcentration"),h.top10Pct!=null?h.top10Pct.toFixed(0)+" %":"—");
+  };
+  const renderMovers=()=>{
+    const out=$("#vhMovers");
+    if(!VH_MOVERS||!VH_MOVERS.length){out.innerHTML="";return;}
+    const sorted=[...VH_MOVERS].sort((a,b)=>b.changeEur-a.changeEur);
+    const gainers=sorted.filter(x=>x.changeEur>0).slice(0,5);
+    const losers=sorted.filter(x=>x.changeEur<0).slice(-5).reverse();
+    const row=x=>`<tr><td><span class="setlink" data-card="${x.set}|${x.number}"
+        data-pop="${x.img||""}">${cardName(x)}</span></td>
+      <td class="num" style="color:var(--dim)">${money(x.price)}</td>
+      <td class="num" style="color:${x.changeEur>=0?'var(--ok)':'var(--bad)'}">${
+        x.changeEur>0?"+":""}${money(x.changeEur)} (${x.changePct>0?"+":""}${x.changePct.toFixed(1)} %)</td></tr>`;
+    out.innerHTML=`<h2 style="margin-top:24px">${t("valuePage.movers")}</h2>
+      <p class="sub" style="max-width:640px">${t("valuePage.moversDesc")}</p>
+      <div class="cards" style="grid-template-columns:1fr 1fr;align-items:start">
+        <div><h3 style="margin:0 0 6px;font-size:14px;color:var(--ok)">${t("valuePage.gainers")}</h3>
+          ${gainers.length?`<table class="movtable"><tbody>${gainers.map(row).join("")}</tbody></table>`
+            :`<p class="sub">${t("valuePage.none")}</p>`}</div>
+        <div><h3 style="margin:0 0 6px;font-size:14px;color:var(--bad)">${t("valuePage.losers")}</h3>
+          ${losers.length?`<table class="movtable"><tbody>${losers.map(row).join("")}</tbody></table>`
+            :`<p class="sub">${t("valuePage.none")}</p>`}</div>
+      </div>`;
+    bindTiles(out);
+  };
+  const renderPerfOrValue=()=>{
+    const h=VH_DATA;
+    const lines=VH_TAB==="value"
+      ?[{key:"eur",label:t("valuePage.legendValue"),color:"var(--gold)"},
+        {key:"invested",label:t("valuePage.legendInvested"),color:"var(--muted)",dash:"4 3"}]
+      :[{key:"perfPct",label:t("valuePage.legendYou"),color:"var(--gold)"},
+        {key:"idxPct",label:t("valuePage.legendMarket"),color:"var(--muted)",dash:"4 3"}];
+    const w=Math.max(600,$("#vhBody").clientWidth||960);
+    const pctFmt=v=>(v>0?"+":"")+v.toFixed(1)+" %";
+    $("#vhBody").innerHTML=`<p class="sub" id="vhChg" style="margin:8px 0"></p>
+      <div id="vhGraph"></div>${legend(lines)}`;
+    if(!h||!h.series.length){$("#vhGraph").innerHTML=`<p class="sub">${t("ph.none")}</p>`;return;}
+    $("#vhGraph").innerHTML=priceGraph(h,{w,lines,pct:VH_TAB==="performance",
+      fmt:VH_TAB==="performance"?pctFmt:money});
+    bindPriceGraph($("#vhGraph"));
     if(h.changePct==null){$("#vhChg").textContent="";return;}
     $("#vhChg").innerHTML=`${h.changeEur>0?"+":""}${money(h.changeEur)} `+
       `(${h.changePct>0?"+":""}${h.changePct.toFixed(1)} %) · ${t("ph.lohi",{lo:money(h.lo),hi:money(h.hi)})}`;
     $("#vhChg").style.color=h.changeEur>0?"var(--ok)":h.changeEur<0?"var(--bad)":"var(--muted)";
   };
-  const fetchVh=async v=>{
-    const h=await getJSON("/api/value-history?range="+v);
-    renderGraph(h);VH_TOP=h.top;VH_TOP_PAGE=1;renderTop();
+  const renderByX=()=>{
+    const bd=VBD_DATA;
+    $("#vhBody").innerHTML=`<div class="seg" id="vbdSeg">${VBD_DIMS.map(([id,lbl])=>
+        `<button data-vd="${id}" class="${VBD_DIM===id?"on":""}">${t(lbl)}</button>`).join("")}</div>
+      <div id="vbdOut" style="margin-top:16px"></div>`;
+    document.querySelectorAll("#vbdSeg [data-vd]").forEach(b=>b.onclick=()=>{
+      VBD_DIM=b.dataset.vd;try{localStorage.setItem("bnd_vbd_dim",VBD_DIM);}catch(e){}
+      VBD_DATA=VBD_CACHE[VBD_DIM];
+      renderByX();renderMovers();pinHeight();
+    });
+    const out=$("#vbdOut");
+    if(!bd||!bd.groups.length){out.innerHTML=`<p class="sub">${t("valuePage.none")}</p>`;return;}
+    // Only "set" ever has enough groups to need trimming (hundreds of sets
+    // vs. at most 7 colors / 5 rarities / 9 card types) - folding those
+    // small, fixed enumerations into a synthetic "rest" bucket risked
+    // colliding with card type's own genuine "Other" category (uncategorized
+    // type lines), showing two identically-labeled rows for different
+    // things. Simplest fix: just show every group for every other dimension.
+    const TOPN=8;
+    const top=VBD_DIM==="set"?bd.groups.slice(0,TOPN):bd.groups;
+    const restVal=VBD_DIM==="set"?bd.groups.slice(TOPN).reduce((s,g)=>s+g.value,0):0;
+    const groups=restVal>0
+      ?[...top,{key:"__other",label:t("valuePage.other"),value:restVal,
+                pct:Math.round(restVal/bd.total*1000)/10,color:"var(--dim)"}]
+      :top;
+    const rarLabel=k=>RAR[k]?RAR[k][0]:k;
+    const label=g=>VBD_DIM==="rarity"?rarLabel(g.key)
+      :VBD_DIM==="color"?({W:"White",U:"Blue",B:"Black",R:"Red",G:"Green",M:"Multicolor",C:"Colorless"}[g.key]||g.key)
+      :g.label;
+    out.innerHTML=`<div style="display:flex;gap:28px;flex-wrap:wrap;align-items:flex-start">
+      ${donutMulti(groups)}
+      <table class="movtable" style="flex:1;min-width:260px"><tbody>${groups.map((g,i)=>
+        `<tr><td><i style="display:inline-block;width:10px;height:10px;border-radius:2px;
+           background:${g.color||DONUT_PALETTE[i%DONUT_PALETTE.length]};margin-right:8px"></i>${label(g)}</td>
+         <td class="num">${money(g.value)}</td>
+         <td class="num" style="color:var(--dim)">${g.pct.toFixed(1)} %</td></tr>`).join("")}
+      </tbody></table></div>`;
   };
-  await fetchVh(VH_RANGE);
-  bindPhRange("#vhRange",v=>{
-    VH_RANGE=v;savePhRange();
-    document.querySelectorAll("#vhRange [data-phr]").forEach(b=>b.classList.toggle("on",b.dataset.phr===v));
-    fetchVh(v);
-  });
+  // Two separate pins, not one: #vhBody's own height varies a lot (a graph
+  // vs. a 5-row vs. a 9-row donut legend) and Movers sits right after it in
+  // the DOM, so pinning only the outer #vhWrap kept "Most valuable cards"
+  // below everything fixed but let Movers itself slide up and down with
+  // #vhBody's actual content. Pinning #vhBody too keeps Movers' position
+  // fixed as well. Neither ever shrinks, only grows to the tallest seen.
+  let VH_MAXBODY=0, VH_MAXWRAP=0;
+  const pinHeight=()=>{
+    // Read both heights before writing either - interleaving a read then a
+    // write then another read forces two separate synchronous layout passes
+    // instead of one.
+    const body=$("#vhBody"),wrap=$("#vhWrap");
+    if(!body||!wrap)return;
+    const bh=body.scrollHeight,wh=wrap.scrollHeight;
+    if(bh>VH_MAXBODY){VH_MAXBODY=bh;body.style.minHeight=VH_MAXBODY+"px";}
+    if(wh>VH_MAXWRAP){VH_MAXWRAP=wh;wrap.style.minHeight=VH_MAXWRAP+"px";}
+  };
+  const drawBody=()=>{
+    renderStats();
+    if(VH_TAB==="byset")renderByX();else renderPerfOrValue();
+    renderMovers();
+    pinHeight();
+  };
+  // Renders every tab - and, for By set, every one of its four dimensions -
+  // once each (off-screen from the user's perspective: all of this happens
+  // synchronously, so the browser never gets a chance to paint the
+  // intermediate states) and grows both pins to whichever combination was
+  // tallest, then puts the actually-selected tab/dimension back. Without
+  // this, the pins only grow as tabs/dimensions get visited one at a time,
+  // so the first-ever switch to a taller one in a session still made
+  // things hop down once - correct after that, but not on the very first
+  // switch, and Card type (9 rows) is reliably the tallest dimension.
+  const pinAllTabsHeight=()=>{
+    const activeTab=VH_TAB,activeDim=VBD_DIM;
+    for (const [id] of VH_TABS) {
+      VH_TAB=id;
+      if(id==="byset"){
+        for (const [dimId] of VBD_DIMS) {
+          VBD_DIM=dimId;VBD_DATA=VBD_CACHE[dimId];
+          renderByX();renderMovers();pinHeight();
+        }
+      } else {
+        renderPerfOrValue();renderMovers();pinHeight();
+      }
+    }
+    VH_TAB=activeTab;VBD_DIM=activeDim;VBD_DATA=VBD_CACHE[activeDim];
+    drawBody();
+  };
+  let vhTopLoaded=false;
+  const fetchRange=async v=>{
+    const [h,m]=await Promise.all([
+      getJSON("/api/value-history?range="+v), getJSON("/api/movers?range="+v)]);
+    VH_DATA=h;VH_MOVERS=m.items;
+    // "Most valuable cards" ranks by current value, not by the selected
+    // time range - h.top is identical no matter which range was asked for.
+    // Re-assigning it and re-running renderTop() on every range click threw
+    // away and rebuilt the whole grid (every card image included) for data
+    // that never actually changed - the flicker was that rebuild, not
+    // anything genuinely re-rendering. Once per page visit is enough.
+    if(!vhTopLoaded){VH_TOP=h.top;VH_TOP_PAGE=1;renderTop();vhTopLoaded=true;}
+    renderStats();
+    if(VH_TAB!=="byset")renderPerfOrValue();
+    renderMovers();pinHeight();
+  };
+  // All four dimensions load once, up front, into VBD_CACHE - cheap
+  // (cached_value_breakdown on the server), and means switching Set/Color/
+  // Rarity/Card type is instant afterwards instead of a fetch per click,
+  // as well as letting pinAllTabsHeight measure every one of them.
+  const fetchAllBreakdowns=async()=>{
+    const results=await Promise.all(VBD_DIMS.map(([id])=>
+      getJSON("/api/value-breakdown?dim="+id).then(d=>[id,d])));
+    for (const [id,d] of results) VBD_CACHE[id]=d;
+    VBD_DATA=VBD_CACHE[VBD_DIM];
+    if(VH_TAB==="byset"){renderByX();pinHeight();}
+  };
+  drawBody();
+  await Promise.all([fetchRange(VH_RANGE),fetchAllBreakdowns()]);
+  pinAllTabsHeight();
 }
 
 /* ---------------- Setup wizard ---------------- */
@@ -6513,7 +7121,7 @@ function filtered(){
   if(Q){const q=Q.toLowerCase();r=r.filter(s=>s.name.toLowerCase().includes(q)||s.code.includes(q));}
   if(FLABELS!==null)r=r.filter(s=>FLABELS.has(s.label));
   if(FSTAT==="open")r=r.filter(s=>s.missing>0);
-  if(FSTAT==="done")r=r.filter(s=>s.missing===0);
+  if(FSTAT==="done")r=r.filter(s=>s.total>0&&s.missing===0);
   if(FSTAT==="started")r=r.filter(s=>s.owned>0&&s.missing>0);
   if(FSTAT==="empty")r=r.filter(s=>s.owned===0);
   if(HIDEEXC)r=r.filter(s=>s.counted);
@@ -6561,7 +7169,7 @@ function render(){
       body:JSON.stringify({code:s.code,mode:s.counted?"exclude":"include"})});
     await load();render();});
 }
-const card=s=>`<div class="set clickable ${s.missing===0&&s.counted?"done":""} ${s.counted?"":"off"}">
+const card=s=>`<div class="set clickable ${s.total>0&&s.missing===0&&s.counted?"done":""} ${s.counted?"":"off"}">
   <div class="hd" data-set="${s.code}" style="cursor:pointer">${icon(s)}
     <div><div class="nm">${s.name}</div>
     <div class="cd">${s.code.toUpperCase()} · ${s.released}</div></div></div>
@@ -6581,11 +7189,11 @@ const card=s=>`<div class="set clickable ${s.missing===0&&s.counted?"done":""} $
     <span style="color:${s.sealed.price<s.totalCost?"var(--ok)":"var(--muted)"}">${
       money(s.sealed.price)}${s.sealed.price<s.totalCost?t("setCard.cheaper"):""}</span></div>`:""}
   <div class="spacer"></div>
-  <div class="acts"><button data-view="${s.code}">${t("setCard.viewSet")}</button>
-    <button data-buy="${s.code}" ${s.missing?"":"disabled"}>${t("setCard.buyMissing")}</button>
+  <div class="acts"><button data-view="${s.code}" title="${t("setCard.viewSet")}">${t("setCard.viewSet")}</button>
+    <button data-buy="${s.code}" ${s.missing?"":"disabled"} title="${t("setCard.buyMissing")}">${t("setCard.buyMissing")}</button>
     <button data-tog="${s.code}" title="${s.counted?t("setCard.excludeFromTotals"):t("setCard.includeInTotals")}"
       style="flex:0 0 40px">${s.counted?"✕":"✓"}</button></div></div>`;
-const trow=s=>`<tr class="${s.missing===0&&s.counted?"done":""} ${s.counted?"":"off"} ${
+const trow=s=>`<tr class="${s.total>0&&s.missing===0&&s.counted?"done":""} ${s.counted?"":"off"} ${
   s.depth===1?"child":s.depth===2?"child2":""}">
   <td><span data-set="${s.code}" style="cursor:pointer;display:inline-flex;align-items:center;gap:6px">${icon(s,17)}<span class="setlink">${s.name}</span></span></td><td class="num nowrap">${s.code.toUpperCase()}</td>
   <td class="num nowrap">${s.released}</td><td><span class="kind ${kindClass(s.kind)}">${s.kind}</span></td>
@@ -6679,9 +7287,10 @@ const VAR=c=>(c.variant?`<span class="varlbl">${c.variant}</span>`:"")+
   ((c.ver&&c.ver>1&&!c.extras)?`<span class="verlbl" data-tip-title="${t('tip.cmVerTitle')}"
     data-tip="${t('tip.cmVer',{v:c.ver})}"
     >V.${c.ver}</span>`:"");
-const cardTile=c=>{
+const cardTile=(c,opts)=>{
+  opts=opts||{};
   const qn=c.qtyNormal||0,qf=c.qtyFoil||0,qt=qn+qf;
-  const ownLabel=qt?[qn?`${qn}×`:"",qf?`${t("setPage.thFoil")} ${qf}×`:""].filter(Boolean).join(" · "):"0";
+  const ownLabel=qt?[qn?`${t("cardPage.regular")} ${qn}×`:"",qf?`${t("setPage.thFoil")} ${qf}×`:""].filter(Boolean).join(" · "):"0";
   return `<div class="cc" data-card="${c.set}|${c.number}">
   <div class="imgwrap">${c.img?`<img class="face" src="${c.img}" alt="${cardName(c)}" loading="lazy">`
     :`<div class="noimg">${cardName(c)}</div>`}
@@ -6693,6 +7302,10 @@ const cardTile=c=>{
     ${c.setName?`<div class="cset">${c.setName} · #${c.number}</div>`:""}
     <div class="cp">${c.eur?money(c.eur):(c.foil?"<em>foil</em> "+money(c.foil):"—")}${
       c.eur&&c.foil?` <em>· foil ${money(c.foil)}</em>`:""}</div>
+    ${opts.quickAdd?`<div class="tileadd" onclick="event.stopPropagation()">
+      <button data-qtyadj="${c.set}|${c.number}|0" title="${t('setPage.addRegular')}">+1 ${t("cardPage.regular")}</button>
+      <button data-qtyadj="${c.set}|${c.number}|1" title="${t('setPage.addFoil')}">+1 ${t("setPage.thFoil")}</button>
+    </div>`:""}
   </div></div>`;};
 function bindTiles(root){
   (root||document).querySelectorAll("[data-card]").forEach(e=>e.onclick=ev=>{
@@ -6755,15 +7368,16 @@ function drawCards(){
       HIDE_OFFGOAL?"checked":""}> ${t("setPage.hideOffGoal")}</label></div>`;
   if(DV==="grid"){
     OUT.innerHTML=head+`<div class="cgrid">${rows.map(c=>cardTile(
-      {...c,set:DETAIL.code,setName:DETAIL.name})).join("")}</div>`;
-    bindTiles(); bindSetTools(); bindCartButtons();
+      {...c,set:DETAIL.code,setName:DETAIL.name},{quickAdd:true})).join("")}</div>`;
+    bindTiles(); bindSetTools(); bindCartButtons(); bindQuickAdd();
     document.querySelectorAll("[data-dv]").forEach(b=>b.onclick=()=>{DV=b.dataset.dv;drawCards();});
     $("#gsort").onchange=e=>{CS=e.target.value;drawCards();};
     $("#gdir").onclick=()=>{CD=-CD;drawCards();};
     return;
   }
   const NUMCOLS=new Set(["number","eur","foil","qty"]);
-  const cols=[...SORTCOLS.map(([k,l])=>[k,l,NUMCOLS.has(k)?"num":""]),["note",t("setPage.thNote"),""],["",t("missing.thCart"),"num"]];
+  const cols=[...SORTCOLS.map(([k,l])=>[k,l,NUMCOLS.has(k)?"num":""]),["note",t("setPage.thNote"),""],
+    ["",t("cardPage.regular"),"num"],["",t("setPage.thFoil"),"num"],["",t("missing.thCart"),"num"]];
   OUT.innerHTML=head+`<table class="setcards"><thead><tr>${cols.map(([k,l,c])=>
     `<th class="${c}" data-c="${k}">${l}${CS===k?`<span class="ar">${CD>0?"▲":"▼"}</span>`:""}</th>`).join("")}
     </tr></thead><tbody>${rows.map(c=>`<tr class="${c.have?"have":"miss"} ${(!c.inGoal&&!c.have)?"notgoal":""}">
@@ -6778,6 +7392,10 @@ function drawCards(){
         c.inGoal?"":`<span class="badge">${t("setPage.notInGoal")}</span> `}${
         {Endgame:t("setPage.noteEndgame"),BaseMissing:t("setPage.baseMissing"),
          "Other printing":t("setPage.noteOtherPrinting")}[c.note]||c.note||""}</td>
+      <td class="num quickadd"><button data-qtyadj="${DETAIL.code}|${c.number}|0"
+          title="${t('setPage.addRegular')}">+1</button></td>
+      <td class="num quickadd"><button data-qtyadj="${DETAIL.code}|${c.number}|1"
+          title="${t('setPage.addFoil')}">+1</button></td>
       <td class="num"><button data-cart="${DETAIL.code}|${c.number}"
         >+</button></td></tr>`).join("")}
     </tbody></table>`;
@@ -6787,7 +7405,25 @@ function drawCards(){
   document.querySelectorAll("[data-dv]").forEach(b=>b.onclick=()=>{DV=b.dataset.dv;drawCards();});
   $("#gsort").onchange=e=>{CS=e.target.value;drawCards();};
   $("#gdir").onclick=()=>{CD=-CD;drawCards();};
-  bindTiles(); bindSetTools(); bindCartButtons();
+  bindTiles(); bindSetTools(); bindCartButtons(); bindQuickAdd();
+}
+// +1 regular / +1 foil straight from a set's table or grid, no detour through
+// the card page. Reloads the whole set (setPage, not just drawCards) since
+// the header line above the table (owned/total/%) needs refreshing too.
+function bindQuickAdd(root){
+  (root||document).querySelectorAll("[data-qtyadj]").forEach(b=>b.onclick=async ev=>{
+    ev.stopPropagation();
+    const [set,number,foilFlag]=b.dataset.qtyadj.split("|");
+    const card=DETAIL.cards.find(x=>x.number===number);
+    b.disabled=true;
+    try{
+      await fetch("/api/collection-adjust",{method:"POST",body:JSON.stringify({
+        set, number, name:(card&&card.name)||"", foil:foilFlag==="1",
+        action:"delta", delta:1})});
+    }finally{
+      await setPage(DETAIL.code);
+    }
+  });
 }
 function bindSetTools(){
   const a=$("#cartAllMissing"),b=$("#buyFromSet");
@@ -6961,7 +7597,7 @@ async function cardPage(sc,nr){
     const rows=d.copies.filter(cp=>!q||cp.setName.toLowerCase().includes(q));
     $("#copiesBody").innerHTML=rows.map(cp=>`<div class="li" data-card="${cp.set}|${cp.number}"
         data-pop="${cp.img||""}">
-        <span class="nm">${cp.setName}${cp.foil?` <span class="varlbl">${t("setPage.thFoil")}</span>`:""}</span>
+        <span class="nm">${cp.setName} <span class="varlbl">${cp.foil?t("setPage.thFoil"):t("cardPage.regular")}</span></span>
         <span class="mt">#${cp.number} · ${cp.qty}×</span>
         <span class="mt" style="flex:0 0 96px" onclick="event.stopPropagation()">
           <input type="number" step="0.01" min="0" class="priceIn" data-copyid="${cp.id}"
@@ -7487,12 +8123,12 @@ function deckRow(c,i){
       <td class="num"><button data-drm="${i}">✕</button></td></tr>`;
   return `<tr data-di="${i}">
     <td><span class="setlink" data-pop="${deckPop(c)}">${esc(c.name)}</span> ${deckMiss(c)}</td>
-    ${DECK._hasSec?`<td>${deckSecLbl(c)}</td>`:""}
-    <td>${deckCollBadge(c)}</td>
-    <td class="num">${c.qty}</td>
-    <td>${deckSeg(c,i)}</td>
-    <td class="num">${deckPriceHtml(c)}</td>
-    <td class="num"><button data-drm="${i}">✕</button></td></tr>`;
+    ${DECK._hasSec?`<td class="dcSec">${deckSecLbl(c)}</td>`:""}
+    <td class="dcColl">${deckCollBadge(c)}</td>
+    <td class="num dcQty">${c.qty}</td>
+    <td class="dcSet">${deckSeg(c,i)}</td>
+    <td class="num dcPrice">${deckPriceHtml(c)}</td>
+    <td class="num dcRm"><button data-drm="${i}">✕</button></td></tr>`;
 }
 function deckTile(c,i){
   // qty and the remove button live in the meta block, never on the card art
@@ -7970,10 +8606,10 @@ function goalsPane(sel){
   ${seg("scope",g.scope,[["names",t("goal.scopeNames")],["printings",t("goal.scopePrintings")]])}
   <h3 style="margin-top:18px">${t("goal.extras")}</h3>
   ${seg("extras",g.extras,[["exclude",t("goal.extrasExclude")],["include",t("goal.extrasInclude")]])}
-  <p class="sub">${t("goal.extrasNote")}</p>
+  <p class="sub" style="margin-top:10px">${t("goal.extrasNote")}</p>
   <h3 style="margin-top:18px">${t("goal.serialized")}</h3>
   ${seg("serialized",g.serialized,[["exclude",t("goal.serializedExclude")],["include",t("goal.serializedInclude")]])}
-  <p class="sub" style="${g.extras==="include"?"":"opacity:.5"}">${t("goal.serializedNote")}</p>`;
+  <p class="sub" style="margin-top:10px;${g.extras==="include"?"":"opacity:.5"}">${t("goal.serializedNote")}</p>`;
   document.querySelectorAll("[data-goalp]").forEach(el=>el.onclick=async()=>{
     const p=GOAL_PRESETS.find(x=>x[0]===el.dataset.goalp)[1];
     await saveGoal(p);goalsPane(sel);});
@@ -9993,15 +10629,22 @@ def _auto_sync_check():
 
 
 def _price_gap_check():
-    """Two reasons to (re-)run the MTGJSON backfill without being asked:
-    never having run it at all (so a fresh install gets 90 days of real
-    depth immediately instead of waiting 90 days to accumulate it), or a
-    real gap in the daily log — log_price_history only ever writes *today*,
-    it never looks backward, so time Binduno wasn't running leaves a hole
-    that the ordinary daily sync can never fill on its own. MTGJSON's
-    AllPrices always covers the last 90 days up to now, so re-running the
-    same backfill used for the initial load transparently fills either
-    case — the user shouldn't have to remember to click the button again."""
+    """Three reasons to (re-)run the backfill without being asked: never
+    having run it at all (so a fresh install gets real depth immediately
+    instead of waiting to accumulate it), a real gap in the daily log —
+    log_price_history only ever writes *today*, it never looks backward, so
+    time Binduno wasn't running leaves a hole the ordinary daily sync can
+    never fill on its own — or the last backfill only reached MTGJSON's
+    90-day window because the Binduno price server (no such window, keeps
+    everything) happened to be unreachable at the time.
+
+    That third case matters on its own: once MTGJSON fills the recent end of
+    a longer gap, MAX(date) reads as "current" and the plain gap check below
+    would never fire again, silently leaving the older middle of the gap as
+    a permanent hole even after the server comes back. price_backfill_source
+    tracks which one actually served the last backfill, so this keeps
+    retrying the server on the usual cooldown until it succeeds once - the
+    user shouldn't have to remember to click the button again either way."""
     c = connect()
     if not price_logging_enabled(c) or REFRESH["running"]:
         return
@@ -10010,11 +10653,16 @@ def _price_gap_check():
         try:
             if (datetime.now() - datetime.fromisoformat(lt)).total_seconds() \
                     < PRICE_BACKFILL_RETRY_DAYS * 86400:
-                return                      # tried recently — don't hammer a flaky MTGJSON
+                return                      # tried recently — don't hammer a flaky server/MTGJSON
         except ValueError:
             pass
     if not meta_get(c, "price_backfill_done"):
-        log(c, "Price history", "No backfill yet, loading 90 days from MTGJSON")
+        log(c, "Price history", "No backfill yet, loading initial price history")
+        backfill_price_history(auto=True)
+        return
+    if meta_get(c, "price_backfill_source") == "mtgjson":
+        log(c, "Price history",
+            "Last backfill only reached MTGJSON's 90-day window, retrying the Binduno price server")
         backfill_price_history(auto=True)
         return
     last = c.execute("SELECT MAX(date) FROM price_history").fetchone()[0]
@@ -10026,7 +10674,7 @@ def _price_gap_check():
         except ValueError:
             gap = True
     if gap:
-        log(c, "Price history", "Gap since last use detected, backfilling from MTGJSON")
+        log(c, "Price history", "Gap since last use detected, backfilling")
         backfill_price_history(auto=True)
 
 
@@ -10097,6 +10745,7 @@ def run_tray(url, autoopen=False):
                 icon.stop()
             except Exception:                                  # noqa: BLE001
                 pass
+            _kill_refresh_subprocess()
             os._exit(0)
 
         icon.menu = pystray.Menu(
