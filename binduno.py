@@ -16,7 +16,7 @@ import urllib.request
 from datetime import datetime, timedelta
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-VERSION = "6.71"
+VERSION = "6.72"
 SCHEMA = 19
 
 
@@ -3595,13 +3595,16 @@ def missing_names(c, p):
                    MIN(k.eur) eur, k.img, k.type_line, k.variant, k.ver, k.extras_idx, k.cm_suffix, k.cm_ver, k.cm_expansion {base}
             ORDER BY {sort} {d}, k.name LIMIT ? OFFSET ?""",
         args + [per, (page - 1) * per]).fetchall()
+    wl_set = {(row["set_code"], row["number"]) for row in
+              c.execute("SELECT set_code, number FROM watchlist")}
     return {"total": total["n"], "value": round(total["v"], 2), "page": page, "per": per,
             "cards": [{"name": r["name"], "nameDe": r["name_de"] or "",
                        "set": r["set_code"], "setName": r["set_name"],
                        "number": r["number"], "rarity": r["rarity"],
                        "eur": round(r["eur"], 2), "img": r["img"],
                        "type": r["type_line"], "variant": r["variant"] or "",
-                       "ver": r["ver"] or 1, "extras": r["extras_idx"] or 0, "cmSuffix": r["cm_suffix"] or "", "cmVer": r["cm_ver"] if r["cm_ver"] is not None else 1, "cmExpansion": r["cm_expansion"] or ""} for r in rows]}
+                       "ver": r["ver"] or 1, "extras": r["extras_idx"] or 0, "cmSuffix": r["cm_suffix"] or "", "cmVer": r["cm_ver"] if r["cm_ver"] is not None else 1, "cmExpansion": r["cm_expansion"] or "",
+                       "inWatchlist": (r["set_code"], r["number"]) in wl_set} for r in rows]}
 
 
 def secret_lair_codes(c):
@@ -4614,10 +4617,10 @@ table.setcards tr.notgoal td .badge{opacity:1}
 #setBody table.setcards td:not(:nth-child(2)){text-align:center}
 #out table th:not(:nth-child(1)):not(:nth-child(4)),
 #out table td:not(:nth-child(1)):not(:nth-child(4)){text-align:center}
-#cardsOut table th:not(:nth-child(1)):not(:nth-child(2)),
-#cardsOut table td:not(:nth-child(1)):not(:nth-child(2)){text-align:center}
-#mOut table th:not(:nth-child(1)):not(:nth-child(2)),
-#mOut table td:not(:nth-child(1)):not(:nth-child(2)){text-align:center}
+#cardsOut table th:not(:nth-child(2)):not(:nth-child(3)),
+#cardsOut table td:not(:nth-child(2)):not(:nth-child(3)){text-align:center}
+#mOut table th:not(:nth-child(2)):not(:nth-child(3)),
+#mOut table td:not(:nth-child(2)):not(:nth-child(3)){text-align:center}
 #vhTopOut table th:not(:nth-child(1)):not(:nth-child(2)),
 #vhTopOut table td:not(:nth-child(1)):not(:nth-child(2)){text-align:center}
 .help table td:not(:first-child),.help table th:not(:first-child){text-align:center}
@@ -4756,6 +4759,14 @@ textarea{width:100%;height:130px;background:var(--panel2);color:var(--text);bord
   font-size:14px;line-height:1.3;opacity:0;transition:opacity .13s}
 .cc:hover .tilecart{opacity:1}
 .cc .tilecart:hover{border-color:var(--gold);color:var(--gold)}
+/* bulk-select checkbox: unlike .tilecart this stays visible even off-hover,
+   since it needs to show a persisted selection at a glance across a whole
+   page of tiles, not just invite a one-off click. */
+.cc .tilesel{position:absolute;top:7px;left:7px;background:rgba(15,19,25,.85);
+  border:1px solid var(--line);border-radius:5px;padding:4px;line-height:0;
+  display:block;cursor:pointer;z-index:2}
+.cc .tilesel input{display:block;width:15px;height:15px;margin:0;
+  accent-color:var(--gold);cursor:pointer}
 .cc .cqty{margin:1px 0}
 .cc .owned{display:inline-block;background:var(--panel2);
   border:1px solid var(--ok);color:var(--ok);border-radius:11px;padding:1px 8px;
@@ -4773,7 +4784,12 @@ table.setcards td.quickadd button{padding:3px 9px;font-size:12px}
 .cc .cset{font-family:var(--mono);font-size:10.5px;color:var(--dim);
   white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 .cc .vrow{display:flex;flex-wrap:wrap;gap:3px}
-.cc .vrow .varlbl{margin-left:0}
+/* .varlbl/.verlbl both carry their own margin-left for the contexts they're
+   normally inline in - here they sit in a flex row with its own gap, so
+   without this a card with ONLY an Extras/V.n badge (no variant text before
+   it) rendered visibly indented compared to one starting with a variant
+   badge, purely because .verlbl's margin-left doesn't know it's first. */
+.cc .vrow .varlbl,.cc .vrow .verlbl{margin-left:0}
 .cc .cp{font-family:var(--mono);font-size:11.5px;color:var(--gold)}
 .cc .cp em{color:var(--muted);font-style:normal}
 .filters{display:grid;grid-template-columns:250px 1fr;gap:20px;align-items:start}
@@ -5408,6 +5424,7 @@ en:{
   "history.none":"No changes recorded yet.",
   "tip.default":"How this is calculated",
   "common.addToCart":"Add to Wants-List Cart","common.addedCount":"{n} added","common.close":"Close",
+  "common.nSelected":"{n} selected","common.addSelectedToCart":"Add selected to Wants-List Cart",
   "common.shipNote":"Shipping is estimated: about {cps} cards per seller, then Cardmarket "+
     "letter rates (up to 17 cards 1.40 €, up to 40 cards 2.10 €) or 5.00 € tracked once an "+
     "order passes 25 €. Hover any shipping figure for the full calculation.",
@@ -5896,6 +5913,7 @@ de:{
   "history.none":"Noch keine Änderungen aufgezeichnet.",
   "tip.default":"So wird das berechnet",
   "common.addToCart":"Zum Wants-Liste-Cart hinzufügen","common.addedCount":"{n} hinzugefügt","common.close":"Schließen",
+  "common.nSelected":"{n} ausgewählt","common.addSelectedToCart":"Ausgewählte zur Wants-List hinzufügen",
   "common.shipNote":"Versand geschätzt: ca. {cps} Karten pro Verkäufer, dann Cardmarket-"+
     "Brieftarife (bis 17 Karten 1,40 €, bis 40 Karten 2,10 €) oder 5,00 € versichert ab "+
     "25 € Bestellwert. Für die genaue Rechnung mit der Maus über eine Versandangabe fahren.",
@@ -7312,6 +7330,8 @@ const cardTile=(c,opts)=>{
   return `<div class="cc" data-card="${c.set}|${c.number}">
   <div class="imgwrap">${c.img?`<img class="face" src="${c.img}" alt="${cardName(c)}" loading="lazy">`
     :`<div class="noimg">${cardName(c)}</div>`}
+    ${opts.select?`<label class="tilesel" onclick="event.stopPropagation()">
+      <input type="checkbox" class="cardsel" data-selkey="${c.set}|${c.number}" ${opts.selected?"checked":""}></label>`:""}
     <button class="tilecart" data-cart="${c.set}|${c.number}"
       title="${t('common.addToCart')}">+</button></div>
   <div class="meta"><div class="cn">${cardName(c)}</div>
@@ -7452,18 +7472,23 @@ function bindWatchToggle(root,cardsArr){
 // +1 regular / +1 foil straight from a set's table or grid, no detour through
 // the card page. Reloads the whole set (setPage, not just drawCards) since
 // the header line above the table (owned/total/%) needs refreshing too.
-function bindQuickAdd(root){
+// cardsArr/refresh let this serve pages besides the set-detail one it was
+// written for: default (both omitted) keeps the original DETAIL.cards /
+// setPage(DETAIL.code) behaviour, callers elsewhere (the card browser) pass
+// their own card list and their own re-render function instead.
+function bindQuickAdd(root,cardsArr,refresh){
   (root||document).querySelectorAll("[data-qtyadj]").forEach(b=>b.onclick=async ev=>{
     ev.stopPropagation();
     const [set,number,foilFlag]=b.dataset.qtyadj.split("|");
-    const card=DETAIL.cards.find(x=>x.number===number);
+    const list=cardsArr||(DETAIL&&DETAIL.cards)||[];
+    const card=list.find(x=>x.number===number&&(!x.set||x.set===set));
     b.disabled=true;
     try{
       await fetch("/api/collection-adjust",{method:"POST",body:JSON.stringify({
         set, number, name:(card&&card.name)||"", foil:foilFlag==="1",
         action:"delta", delta:1})});
     }finally{
-      await setPage(DETAIL.code);
+      if(refresh)await refresh(); else await setPage(DETAIL.code);
     }
   });
 }
@@ -7720,6 +7745,24 @@ async function cardPage(sc,nr){
 let CF={q:"",text:"",artist:"",type:"",rarity:"",colors:[],colormode:"atleast",
         owned:"all",unique:"0",baseonly:"0",allsets:"0",noprice:"0",minprice:"",maxprice:"",
         sort:"released",dir:-1,page:1,per:loadPer("cards",48),view:"grid"};
+// "set|number" keys, kept across pages/filters/sorts on purpose - picking a
+// few cards, then narrowing the search to find more, is the whole point.
+let CARDSEL=new Set();
+function selKey(c){return c.set+"|"+c.number;}
+function selBarHTML(sel){
+  return sel.size?`<span class="pill">${t("common.nSelected",{n:sel.size})}</span>
+    <button id="selCartBtn" class="pri">${t("common.addSelectedToCart")}</button>`:"";
+}
+async function bindSelBar(sel,refresh){
+  const b=$("#selCartBtn"); if(!b)return;
+  b.onclick=async()=>{
+    const items=[...sel].map(k=>{const i=k.lastIndexOf("|");
+      return {set:k.slice(0,i),number:k.slice(i+1)};});
+    b.disabled=true;
+    try{await cartPost({action:"addmany",items});sel.clear();}
+    finally{await refresh();}
+  };
+}
 async function cardsPane(){
   const box=$("#cardsOut");
   if(!box)return;
@@ -7741,14 +7784,20 @@ async function cardsPane(){
       <button id="cdir2">${CF.dir<0?"▼":"▲"}</button>
       ${perPageHTML("perSel2",CF.per)}
       ${gridColsHTML(CF.view)}
-      <span class="pill">${t("buyPage.cardsCount",{n:num(r.total)})}</span></div>
+      <span class="pill">${t("buyPage.cardsCount",{n:num(r.total)})}</span>
+      ${selBarHTML(CARDSEL)}</div>
     ${CF.view==="grid"
-      ? `<div class="cgrid">${r.cards.map(cardTile).join("")}</div>`
-      : `<table><thead><tr><th>${t("missing.thCard")}</th><th>${t("cardPage.set")}</th><th class="num">${t("missing.thNo")}</th>
+      ? `<div class="cgrid">${r.cards.map(c=>cardTile(c,{quickAdd:true,select:true,selected:CARDSEL.has(selKey(c))})).join("")}</div>`
+      : `<table><thead><tr><th><input type="checkbox" id="cardsSelAll"
+             ${r.cards.length&&r.cards.every(c=>CARDSEL.has(selKey(c)))?"checked":""}></th>
+         <th>${t("missing.thCard")}</th><th>${t("cardPage.set")}</th><th class="num">${t("missing.thNo")}</th>
          <th>${t("missing.thRarity")}</th><th class="num">${t("missing.thPrice")}</th><th class="num">${t("setPage.thFoil")}</th>
-         <th class="num">${t("setPage.thCopies")}</th><th class="num">${t("missing.thCart")}</th>
+         <th class="num">${t("setPage.thCopies")}</th><th class="num">${t("cardPage.regular")}</th>
+         <th class="num">${t("setPage.thFoil")}</th><th class="num">${t("missing.thCart")}</th>
          <th class="num">${t("setPage.thWatchlist")}</th></tr></thead><tbody>${
          r.cards.map(c=>`<tr>
+         <td class="num"><input type="checkbox" class="cardsel" data-selkey="${selKey(c)}"
+             ${CARDSEL.has(selKey(c))?"checked":""}></td>
          <td><span class="nmline"><span class="setlink"
            data-card="${c.set}|${c.number}" data-pop="${c.img||""}">${cardName(c)}</span>${VAR(c)}</span></td>
          <td><span class="setlink" data-set="${c.set}">${c.setName}</span></td>
@@ -7757,6 +7806,10 @@ async function cardsPane(){
          <td class="num">${c.eur?money(c.eur):"—"}</td>
          <td class="num">${c.foil?money(c.foil):"—"}</td>
          <td class="num">${c.qty||""}</td>
+         <td class="num quickadd"><button data-qtyadj="${c.set}|${c.number}|0"
+             title="${t('setPage.addRegular')}">+1</button></td>
+         <td class="num quickadd"><button data-qtyadj="${c.set}|${c.number}|1"
+             title="${t('setPage.addFoil')}">+1</button></td>
          <td class="num"><button data-cart="${c.set}|${c.number}">+</button></td>
          <td class="num"><button data-watch="${c.set}|${c.number}" class="watchtoggle ${c.inWatchlist?"on":""}"
              title="${c.inWatchlist?t('cardPage.inWatchlist'):t('cardPage.addToWatchlist')}">★</button></td></tr>`).join("")}
@@ -7766,7 +7819,14 @@ async function cardsPane(){
     <div class="pager">${pages>1?`<button ${CF.page<=1?"disabled":""} id="cpv">${t("collection.previous")}</button>
       <span>${t("missing.pagerPageOfN",{p:CF.page,n:num(pages)})}</span>
       <button ${CF.page>=pages?"disabled":""} id="cnx">${t("collection.next")}</button>`:""}</div>`;
-  bindTiles();bindCartButtons();bindSetLinks();bindGridCols();bindWatchToggle(box,r.cards);
+  bindTiles();bindCartButtons();bindSetLinks();bindGridCols();
+  bindWatchToggle(box,r.cards);bindQuickAdd(box,r.cards,cardsPane);bindSelBar(CARDSEL,cardsPane);
+  box.querySelectorAll(".cardsel").forEach(cb=>cb.onchange=()=>{
+    if(cb.checked)CARDSEL.add(cb.dataset.selkey); else CARDSEL.delete(cb.dataset.selkey);
+    cardsPane();});
+  if($("#cardsSelAll"))$("#cardsSelAll").onchange=e=>{
+    r.cards.forEach(c=>e.target.checked?CARDSEL.add(selKey(c)):CARDSEL.delete(selKey(c)));
+    cardsPane();};
   document.querySelectorAll("[data-cv]").forEach(b=>b.onclick=()=>{CF.view=b.dataset.cv;cardsPane();});
   $("#csort2").onchange=e=>{CF.sort=e.target.value;CF.page=1;cardsPane();};
   $("#cdir2").onclick=()=>{CF.dir=-CF.dir;CF.page=1;cardsPane();};
@@ -8375,6 +8435,7 @@ function bindChunks(){
 /* ---------------- Missing names ---------------- */
 let MF={q:"",rarity:"",set:"",maxprice:"",minprice:"",hideendgame:"1",sort:"set",dir:1,
         page:1,per:150,view:"table"};
+let MISSEL=new Set();
 function missingView(){
   const rarSet=new Set(MF.rarity?MF.rarity.split(","):[]);
   const setOpts=SETS.filter(s=>s.counted).slice().sort((a,b)=>a.name.localeCompare(b.name));
@@ -8436,24 +8497,38 @@ async function drawMissing(){
         <div class="n">${t("missing.pageOfN2",{p:r.page,n:num(pages)})}${
           MF.sort==="price"?t("missing.cheapestFirstSuffix") : ""}</div></div>
     </div>
-    <div class="tools"><button id="mCart" class="pri">${t("missing.addPageToCart")}</button></div>
+    <div class="tools"><button id="mCart" class="pri">${t("missing.addPageToCart")}</button>${selBarHTML(MISSEL)}</div>
     ${MF.view==="grid"
-      ? `<div class="cgrid">${r.cards.map(c=>cardTile({...c,foil:0,qty:0,setName:c.setName})).join("")}</div>`
-      : `<table><thead><tr><th>${t("missing.thCard")}</th><th>${t("missing.thCheapestIn")}</th><th class="num">${t("missing.thNo")}</th>
-         <th>${t("missing.thRarity")}</th><th class="num">${t("missing.thPrice")}</th><th class="num">${t("missing.thCart")}</th></tr></thead><tbody>
+      ? `<div class="cgrid">${r.cards.map(c=>cardTile({...c,foil:0,qty:0,setName:c.setName},
+          {select:true,selected:MISSEL.has(selKey(c))})).join("")}</div>`
+      : `<table><thead><tr><th><input type="checkbox" id="missSelAll"
+             ${r.cards.length&&r.cards.every(c=>MISSEL.has(selKey(c)))?"checked":""}></th>
+         <th>${t("missing.thCard")}</th><th>${t("missing.thCheapestIn")}</th><th class="num">${t("missing.thNo")}</th>
+         <th>${t("missing.thRarity")}</th><th class="num">${t("missing.thPrice")}</th><th class="num">${t("missing.thCart")}</th>
+         <th class="num">${t("setPage.thWatchlist")}</th></tr></thead><tbody>
          ${r.cards.map(c=>`<tr>
+           <td class="num"><input type="checkbox" class="cardsel" data-selkey="${selKey(c)}"
+               ${MISSEL.has(selKey(c))?"checked":""}></td>
            <td><span class="setlink" data-card="${c.set}|${c.number}" data-pop="${c.img||""}">${cardName(c)}</span>${VAR(c)}</td>
            <td><span class="setlink" data-set="${c.set}">${c.setName}</span></td>
          <td class="num">${c.number}</td>
            <td>${RAR[c.rarity]?rarLabel(c.rarity):"?"}</td>
            <td class="num" style="color:var(--gold)">${money(c.eur)}</td>
            <td class="num"><button data-cart="${c.set}|${c.number}"
-             style="padding:3px 9px;font-size:12px">+</button></td></tr>`).join("")}
+             style="padding:3px 9px;font-size:12px">+</button></td>
+           <td class="num"><button data-watch="${c.set}|${c.number}" class="watchtoggle ${c.inWatchlist?"on":""}"
+               title="${c.inWatchlist?t('cardPage.inWatchlist'):t('cardPage.addToWatchlist')}">★</button></td></tr>`).join("")}
          </tbody></table>`}
     <div class="pager">${pages>1?`<button ${MF.page<=1?"disabled":""} id="mpv">${t("collection.previous")}</button>
       <span>${t("missing.pagerPageOfN",{p:MF.page,n:num(pages)})}</span>
       <button ${MF.page>=pages?"disabled":""} id="mnx">${t("collection.next")}</button>`:""}</div>`;
-  bindTiles();bindCartButtons();bindSetLinks();
+  bindTiles();bindCartButtons();bindSetLinks();bindWatchToggle(el,r.cards);bindSelBar(MISSEL,drawMissing);
+  el.querySelectorAll(".cardsel").forEach(cb=>cb.onchange=()=>{
+    if(cb.checked)MISSEL.add(cb.dataset.selkey); else MISSEL.delete(cb.dataset.selkey);
+    drawMissing();});
+  if($("#missSelAll"))$("#missSelAll").onchange=e=>{
+    r.cards.forEach(c=>e.target.checked?MISSEL.add(selKey(c)):MISSEL.delete(selKey(c)));
+    drawMissing();};
   $("#mCart").onclick=async()=>{
     await cartPost({action:"addmany",items:r.cards.map(c=>({set:c.set,number:c.number}))});
     $("#mCart").textContent=t("missing.addedCount",{n:r.cards.length});
