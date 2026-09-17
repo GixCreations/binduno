@@ -16,7 +16,7 @@ import urllib.request
 from datetime import datetime, timedelta
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-VERSION = "6.69"
+VERSION = "6.70"
 SCHEMA = 19
 
 
@@ -2983,6 +2983,8 @@ def set_detail(c, code):
     # printings actually have to be owned for the set to read 100% is decided
     # by the Set-goal settings (goal_prefs): "inGoal" marks the ones that do,
     # the rest stay visible (and buyable) but greyed and never "want".
+    wl_numbers = {row["number"] for row in
+                  c.execute("SELECT number FROM watchlist WHERE set_code=?", (code,))}
     cards = []
     for r in c.execute(q, (code,)):
         eur = r["eur"] or 0
@@ -2998,7 +3000,8 @@ def set_detail(c, code):
                       "variant": r["variant"] or "", "finishes": r["finishes"] or "",
                       "ver": r["ver"] or 1, "extras": r["extras_idx"] or 0, "cmSuffix": r["cm_suffix"] or "", "cmVer": r["cm_ver"] if r["cm_ver"] is not None else 1, "cmExpansion": r["cm_expansion"] or "",
                       "qty": r["qty"], "qtyNormal": r["qty_normal"], "qtyFoil": r["qty_foil"],
-                      "have": have, "note": "", "want": False})
+                      "have": have, "note": "", "want": False,
+                      "inWatchlist": r["number"] in wl_numbers})
     # Decide want / note per card. "names" scope: one owned printing of a name
     # settles it, and a still-missing name flags exactly one printing to buy —
     # eg[0], the lowest collector number (Cardmarket's V.1). Picking "the
@@ -3448,6 +3451,10 @@ def card_search(c, p):
                           args).fetchone()["n"]
     else:
         total = c.execute(f"SELECT COUNT(*) n {base}", args).fetchone()["n"]
+    # watchlist is capped at WATCHLIST_MAX (100) - cheap to load whole and
+    # check in Python rather than joining it into the paginated query above
+    wl_set = {(row["set_code"], row["number"]) for row in
+              c.execute("SELECT set_code, number FROM watchlist")}
     rows = c.execute(
         f"""SELECT k.set_code, s.name set_name, s.released, k.number, k.name, k.name_de, k.type_line, k.type_de,
                    k.rarity, {eur_expr} eur, k.eur_foil, k.img, k.mana, k.artist, k.colors,
@@ -3466,7 +3473,8 @@ def card_search(c, p):
                        "colors": r["colors"], "variant": r["variant"] or "",
                        "finishes": r["finishes"] or "", "ver": r["ver"] or 1, "extras": r["extras_idx"] or 0, "cmSuffix": r["cm_suffix"] or "", "cmVer": r["cm_ver"] if r["cm_ver"] is not None else 1, "cmExpansion": r["cm_expansion"] or "",
                        "qtyNormal": r["qty_normal"], "qtyFoil": r["qty_foil"],
-                       "qty": r["qty"]} for r in rows]}
+                       "qty": r["qty"],
+                       "inWatchlist": (r["set_code"], r["number"]) in wl_set} for r in rows]}
 
 
 def card_detail(c, code, number):
@@ -4486,7 +4494,7 @@ button{background:var(--panel);border:1px solid var(--line);color:var(--text);pa
 button:hover{border-color:var(--gold);color:var(--gold)}
 button.pri{background:var(--gold);border-color:var(--gold);color:#181206;font-weight:600}
 button.pri:hover{filter:brightness(1.1);color:#181206}
-#cardWatch.on{border-color:var(--gold);color:var(--gold)}
+#cardWatch.on,.watchtoggle.on{border-color:var(--gold);color:var(--gold)}
 button:disabled{opacity:.45;cursor:not-allowed}
 button:focus-visible,input:focus-visible,select:focus-visible{outline:2px solid var(--gold);outline-offset:2px}
 .seg{display:inline-flex;border:1px solid var(--line);border-radius:4px;overflow:hidden}
@@ -4597,12 +4605,12 @@ table.setcards tr.notgoal td .badge{opacity:1}
    (or shorter), left-align it when the content runs noticeably longer -
    free-text columns (card/set names, type lines, category badges) vs.
    short numbers, codes, dates, statuses and single-icon action buttons. */
-#setBody table.setcards th:not(:nth-child(2)):not(:nth-child(3)),
-#setBody table.setcards td:not(:nth-child(2)):not(:nth-child(3)){text-align:center}
+#setBody table.setcards th:not(:nth-child(2)),
+#setBody table.setcards td:not(:nth-child(2)){text-align:center}
 #out table th:not(:nth-child(1)):not(:nth-child(4)),
 #out table td:not(:nth-child(1)):not(:nth-child(4)){text-align:center}
-#cardsOut table th:not(:nth-child(1)):not(:nth-child(2)):not(:nth-child(4)),
-#cardsOut table td:not(:nth-child(1)):not(:nth-child(2)):not(:nth-child(4)){text-align:center}
+#cardsOut table th:not(:nth-child(1)):not(:nth-child(2)),
+#cardsOut table td:not(:nth-child(1)):not(:nth-child(2)){text-align:center}
 #mOut table th:not(:nth-child(1)):not(:nth-child(2)),
 #mOut table td:not(:nth-child(1)):not(:nth-child(2)){text-align:center}
 #vhTopOut table th:not(:nth-child(1)):not(:nth-child(2)),
@@ -5401,7 +5409,7 @@ en:{
   "setPage.ownedOfTotal":"{owned} of {total} owned",
   "setPage.addAllMissing":"Add all missing to Wants-List Cart",
   "setPage.buyMissingDots":"Buy missing…",
-  "setPage.thType":"Type","setPage.thFoil":"Foil","setPage.thCopies":"Copies",
+  "setPage.thFoil":"Foil","setPage.thCopies":"Copies","setPage.thWatchlist":"Watchlist",
   "setPage.addRegular":"Add 1 regular copy to your collection",
   "setPage.addFoil":"Add 1 foil copy to your collection",
   "setPage.thOwned":"Owned","setPage.thNote":"Note","setPage.yes":"yes","setPage.no":"no",
@@ -5889,7 +5897,7 @@ de:{
   "setPage.ownedOfTotal":"{owned} von {total} besessen",
   "setPage.addAllMissing":"Alle fehlenden zum Wants-Liste-Cart hinzufügen",
   "setPage.buyMissingDots":"Fehlende kaufen…",
-  "setPage.thType":"Typ","setPage.thFoil":"Foil","setPage.thCopies":"Kopien",
+  "setPage.thFoil":"Foil","setPage.thCopies":"Kopien","setPage.thWatchlist":"Watchlist",
   "setPage.addRegular":"1 normale Kopie zur Sammlung hinzufügen",
   "setPage.addFoil":"1 Foil-Kopie zur Sammlung hinzufügen",
   "setPage.thOwned":"In Besitz","setPage.thNote":"Notiz","setPage.yes":"ja","setPage.no":"nein",
@@ -7343,7 +7351,7 @@ function drawCards(){
   const OUT=$("#setBody");
   if(!OUT)return;
   const RORDER={c:1,u:2,r:3,m:4,s:5,b:0};
-  const SORTCOLS=[["number",t("missing.thNo")],["name",t("missing.thCard")],["type",t("setPage.thType")],
+  const SORTCOLS=[["number",t("missing.thNo")],["name",t("missing.thCard")],
     ["rarity",t("missing.thRarity")],["eur",t("missing.thPrice")],["foil",t("setPage.thFoil")],
     ["qty",t("setPage.thCopies")],["have",t("setPage.thOwned")]];
   const rows=DETAIL.cards.slice().sort((a,b)=>{
@@ -7382,14 +7390,14 @@ function drawCards(){
   }
   const NUMCOLS=new Set(["number","eur","foil","qty"]);
   const cols=[...SORTCOLS.map(([k,l])=>[k,l,NUMCOLS.has(k)?"num":""]),["note",t("setPage.thNote"),""],
-    ["",t("cardPage.regular"),"num"],["",t("setPage.thFoil"),"num"],["",t("missing.thCart"),"num"]];
+    ["",t("cardPage.regular"),"num"],["",t("setPage.thFoil"),"num"],["",t("missing.thCart"),"num"],
+    ["",t("setPage.thWatchlist"),"num"]];
   OUT.innerHTML=head+`<table class="setcards"><thead><tr>${cols.map(([k,l,c])=>
     `<th class="${c}" data-c="${k}">${l}${CS===k?`<span class="ar">${CD>0?"▲":"▼"}</span>`:""}</th>`).join("")}
     </tr></thead><tbody>${rows.map(c=>`<tr class="${c.have?"have":"miss"} ${(!c.inGoal&&!c.have)?"notgoal":""}">
       <td class="num">${c.number}</td>
       <td><span class="nmline"><span class="setlink"
         data-card="${DETAIL.code}|${c.number}" data-pop="${c.img||""}">${cardName(c)}</span>${VAR(c)}</span></td>
-      <td>${cardType(c)}</td>
       <td>${RAR[c.rarity]?rarLabel(c.rarity):"?"}</td><td class="num">${c.eur?money(c.eur):"—"}</td>
       <td class="num">${c.foil?money(c.foil):"—"}</td>
       <td class="num">${c.qty||""}</td>
@@ -7402,7 +7410,9 @@ function drawCards(){
       <td class="num quickadd"><button data-qtyadj="${DETAIL.code}|${c.number}|1"
           title="${t('setPage.addFoil')}">+1</button></td>
       <td class="num"><button data-cart="${DETAIL.code}|${c.number}"
-        >+</button></td></tr>`).join("")}
+        >+</button></td>
+      <td class="num"><button data-watch="${DETAIL.code}|${c.number}" class="watchtoggle ${c.inWatchlist?"on":""}"
+          title="${c.inWatchlist?t('cardPage.inWatchlist'):t('cardPage.addToWatchlist')}">★</button></td></tr>`).join("")}
     </tbody></table>`;
   OUT.querySelectorAll("th").forEach(th=>th.onclick=()=>{
     const k=th.dataset.c; if(!k)return;
@@ -7410,7 +7420,29 @@ function drawCards(){
   document.querySelectorAll("[data-dv]").forEach(b=>b.onclick=()=>{DV=b.dataset.dv;drawCards();});
   $("#gsort").onchange=e=>{CS=e.target.value;drawCards();};
   $("#gdir").onclick=()=>{CD=-CD;drawCards();};
-  bindTiles(); bindSetTools(); bindCartButtons(); bindQuickAdd();
+  bindTiles(); bindSetTools(); bindCartButtons(); bindQuickAdd(); bindWatchToggle(OUT,DETAIL.cards);
+}
+// Star toggle straight from a table row, no detour through the card page.
+// cardsArr is whatever card list backs the table (DETAIL.cards on the set
+// page - no "set" field there since every row belongs to DETAIL.code, or
+// r.cards on the cross-set card browser, which does carry "set"); matching
+// falls back to number-only when a row has no "set" of its own.
+function bindWatchToggle(root,cardsArr){
+  (root||document).querySelectorAll("[data-watch]").forEach(b=>b.onclick=async ev=>{
+    ev.stopPropagation();
+    const [set,number]=b.dataset.watch.split("|");
+    const card=(cardsArr||[]).find(x=>x.number===number&&(!x.set||x.set===set));
+    const action=(card&&card.inWatchlist)?"remove":"add";
+    b.disabled=true;
+    try{
+      const r=await fetch("/api/watchlist",{method:"POST",
+        body:JSON.stringify({action,set,number})}).then(r=>r.json());
+      if(!r.ok){alert(r.error);return;}
+      if(card)card.inWatchlist=action==="add";
+      b.classList.toggle("on",action==="add");
+      b.title=action==="add"?t("cardPage.inWatchlist"):t("cardPage.addToWatchlist");
+    }finally{b.disabled=false;}
+  });
 }
 // +1 regular / +1 foil straight from a set's table or grid, no detour through
 // the card page. Reloads the whole set (setPage, not just drawCards) since
@@ -7707,26 +7739,29 @@ async function cardsPane(){
       <span class="pill">${t("buyPage.cardsCount",{n:num(r.total)})}</span></div>
     ${CF.view==="grid"
       ? `<div class="cgrid">${r.cards.map(cardTile).join("")}</div>`
-      : `<table><thead><tr><th>${t("missing.thCard")}</th><th>${t("cardPage.set")}</th><th class="num">${t("missing.thNo")}</th><th>${t("setPage.thType")}</th>
+      : `<table><thead><tr><th>${t("missing.thCard")}</th><th>${t("cardPage.set")}</th><th class="num">${t("missing.thNo")}</th>
          <th>${t("missing.thRarity")}</th><th class="num">${t("missing.thPrice")}</th><th class="num">${t("setPage.thFoil")}</th>
-         <th class="num">${t("setPage.thCopies")}</th><th class="num">${t("missing.thCart")}</th></tr></thead><tbody>${
+         <th class="num">${t("setPage.thCopies")}</th><th class="num">${t("missing.thCart")}</th>
+         <th class="num">${t("setPage.thWatchlist")}</th></tr></thead><tbody>${
          r.cards.map(c=>`<tr>
          <td><span class="nmline"><span class="setlink"
            data-card="${c.set}|${c.number}" data-pop="${c.img||""}">${cardName(c)}</span>${VAR(c)}</span></td>
          <td><span class="setlink" data-set="${c.set}">${c.setName}</span></td>
-         <td class="num">${c.number}</td><td>${cardType(c)}</td>
+         <td class="num">${c.number}</td>
          <td>${RAR[c.rarity]?rarLabel(c.rarity):"?"}</td>
          <td class="num">${c.eur?money(c.eur):"—"}</td>
          <td class="num">${c.foil?money(c.foil):"—"}</td>
          <td class="num">${c.qty||""}</td>
-         <td class="num"><button data-cart="${c.set}|${c.number}">+</button></td></tr>`).join("")}
+         <td class="num"><button data-cart="${c.set}|${c.number}">+</button></td>
+         <td class="num"><button data-watch="${c.set}|${c.number}" class="watchtoggle ${c.inWatchlist?"on":""}"
+             title="${c.inWatchlist?t('cardPage.inWatchlist'):t('cardPage.addToWatchlist')}">★</button></td></tr>`).join("")}
          </tbody></table>`}
     ${r.cards.length?"":`<div class="empty"><h2>${t("browse.nothingMatches")}</h2>
       <p>${t("browse.loosenFilter")}</p></div>`}
     <div class="pager">${pages>1?`<button ${CF.page<=1?"disabled":""} id="cpv">${t("collection.previous")}</button>
       <span>${t("missing.pagerPageOfN",{p:CF.page,n:num(pages)})}</span>
       <button ${CF.page>=pages?"disabled":""} id="cnx">${t("collection.next")}</button>`:""}</div>`;
-  bindTiles();bindCartButtons();bindSetLinks();bindGridCols();
+  bindTiles();bindCartButtons();bindSetLinks();bindGridCols();bindWatchToggle(box,r.cards);
   document.querySelectorAll("[data-cv]").forEach(b=>b.onclick=()=>{CF.view=b.dataset.cv;cardsPane();});
   $("#csort2").onchange=e=>{CF.sort=e.target.value;CF.page=1;cardsPane();};
   $("#cdir2").onclick=()=>{CF.dir=-CF.dir;CF.page=1;cardsPane();};
