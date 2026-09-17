@@ -16,7 +16,7 @@ import urllib.request
 from datetime import datetime, timedelta
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-VERSION = "6.70"
+VERSION = "6.71"
 SCHEMA = 19
 
 
@@ -4511,7 +4511,12 @@ button:focus-visible,input:focus-visible,select:focus-visible{outline:2px solid 
    forced that wide, overflowing the grid and clipping trailing cards off
    the right edge of the page. minmax(0,1fr) lets a column shrink past that
    and leaves the truncation to do its job instead. */
-.grid{display:grid;grid-template-columns:repeat(var(--grid-cols,4),minmax(0,1fr));gap:12px}
+/* margin-top, not just .tools's own bottom margin: hovering a tile in the
+   first row lifts it 3px (.clickable:hover) and adds a soft drop-shadow -
+   both eat into the ~14px gap above just enough that the tile visually
+   crowds the toolbar row above it. A little extra clearance here keeps
+   that hover state comfortably clear of it. */
+.grid{display:grid;grid-template-columns:repeat(var(--grid-cols,4),minmax(0,1fr));gap:16px;margin-top:8px}
 .set{background:var(--panel);border:1px solid var(--line);border-radius:6px;padding:15px;
   display:flex;flex-direction:column;gap:9px}
 .set.done{border-color:var(--ok);background:linear-gradient(180deg,var(--good-bg),var(--panel))}
