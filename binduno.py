@@ -16,7 +16,7 @@ import urllib.request
 from datetime import datetime, timedelta
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-VERSION = "6.68"
+VERSION = "6.69"
 SCHEMA = 19
 
 
@@ -4821,7 +4821,12 @@ img.ms{width:16px;height:16px;vertical-align:-3px;margin:0 1px}
   background:var(--line);border:1px solid var(--line);border-radius:6px;overflow:hidden}
 .legal div{background:var(--panel);padding:8px 12px;display:flex;justify-content:space-between;
   align-items:center;font-size:13px}
-.tag{font-family:var(--mono);font-size:10px;letter-spacing:.07em;padding:2px 7px;border-radius:3px}
+/* white-space:nowrap so a longer label ("in collection") can't line-wrap
+   inside the pill - a wrapped inline element gets its background/padding
+   split per line box, which looked visibly broken in the narrow Collection
+   column of the deck-review table. */
+.tag{display:inline-block;font-family:var(--mono);font-size:10px;letter-spacing:.07em;
+  padding:2px 7px;border-radius:3px;white-space:nowrap}
 .tag.l{background:var(--good-bg);color:var(--ok)}.tag.n{background:var(--panel2);color:var(--dim)}
 .tag.b{background:var(--bad-bg);color:var(--bad)}.tag.r{background:var(--panel2);color:var(--gold)}
 .buybtn{display:inline-flex;align-items:center;gap:9px;background:var(--gold);color:#181206;
