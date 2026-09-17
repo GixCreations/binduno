@@ -16,7 +16,7 @@ import urllib.request
 from datetime import datetime, timedelta
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-VERSION = "6.73"
+VERSION = "6.74"
 SCHEMA = 19
 
 
@@ -2017,7 +2017,7 @@ def watchlist_rows(c, days=7):
     for w in watched:
         k = (w["set_code"], w["number"])
         m = c.execute(
-            """SELECT k.name, k.name_de, k.img, k.rarity, s.name set_name,
+            """SELECT k.name, k.name_de, k.img, k.rarity, k.eur_foil, s.name set_name,
                       (SELECT SUM(qty) FROM collection o
                        WHERE o.set_code=k.set_code AND o.number=k.number) qty
                FROM cards k JOIN sets s ON s.code=k.set_code
@@ -2028,6 +2028,7 @@ def watchlist_rows(c, days=7):
         out.append({"set": k[0], "number": k[1], "name": m["name"],
                     "nameDe": m["name_de"] or "", "setName": m["set_name"],
                     "img": m["img"], "rarity": m["rarity"], "qty": m["qty"] or 0,
+                    "foil": round(m["eur_foil"], 2) if m["eur_foil"] else 0,
                     "eur": h["eur"], "lo": h["lo"], "hi": h["hi"],
                     "series": [p["eur"] for p in h["series"]],
                     "changePct": h["changePct"], "changeEur": h["changeEur"]})
@@ -5127,7 +5128,6 @@ en:{
   "home.watchlistEmpty":"No cards on the watchlist yet — open a card and click "+
     "\"Add to Watchlist\".",
   "home.watchlist7d":"Last 7 days","home.watchlistChange":"Change","home.watchlistTrend":"Trend",
-  "home.watchlistOwned":"Owned",
   "range.d7":"7 D","range.d30":"30 D","range.y1":"1 Y","range.max":"Max",
   "valuePage.title":"Value over time","valuePage.desc":"How your whole collection's Cardmarket trend value has moved, based on the daily price log.",
   "valuePage.mostValuable":"Most valuable cards","valuePage.mostValuableDesc":"Your holdings ranked by total value (price × copies owned).",
@@ -5611,7 +5611,6 @@ de:{
   "home.watchlistEmpty":"Noch keine Karten auf der Watchlist — auf einer Kartenseite auf "+
     "„Zur Watchlist hinzufügen“ klicken.",
   "home.watchlist7d":"Letzte 7 Tage","home.watchlistChange":"Änderung","home.watchlistTrend":"Trend",
-  "home.watchlistOwned":"Besitz",
   "range.d7":"7 T","range.d30":"30 T","range.y1":"1 J","range.max":"Max",
   "valuePage.title":"Wertverlauf","valuePage.desc":"Wie sich der Cardmarket-Trendwert deiner gesamten Sammlung entwickelt hat, basierend auf dem täglichen Preis-Log.",
   "valuePage.mostValuable":"Wertvollste Karten","valuePage.mostValuableDesc":"Deine Karten in Besitz, sortiert nach Gesamtwert (Preis × Kopien in Besitz).",
@@ -6541,14 +6540,14 @@ async function drawWatchlist(){
   }
   out.innerHTML=rangeUI+`<div class="tscroll"><table class="wltable"><thead><tr><th>${t("missing.thCard")}</th><th>${t("cardPage.set")}</th>
       <th>${t("missing.thRarity")}</th><th class="num">${t("missing.thPrice")}</th>
-      <th class="num">${t("home.watchlistOwned")}</th><th class="wlsparkcell">${t("home.watchlistTrend")}</th>
+      <th class="num">${t("setPage.thFoil")}</th><th class="wlsparkcell">${t("home.watchlistTrend")}</th>
       <th class="num">${t("home.watchlistChange")}</th><th></th></tr></thead>
     <tbody>${r.items.map(c=>`<tr>
       <td><span class="setlink" data-card="${c.set}|${c.number}" data-pop="${c.img||""}">${cardName(c)}</span></td>
       <td><span class="setlink" data-set="${c.set}">${c.setName}</span></td>
       <td>${RAR[c.rarity]?rarLabel(c.rarity):"?"}</td>
       <td class="num" style="color:var(--gold)">${c.eur?money(c.eur):"—"}</td>
-      <td class="num">${c.qty||""}</td>
+      <td class="num">${c.foil?money(c.foil):"—"}</td>
       <td class="wlsparkcell">${wlSpark(c.series)}</td>
       <td class="num" style="color:${c.changeEur>0?"var(--ok)":c.changeEur<0?"var(--bad)":"var(--muted)"}">${c.changePct==null?"—":
         `${c.changeEur>0?"+":""}${money(c.changeEur)} <span class="mt">(${
