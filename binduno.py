@@ -16,7 +16,7 @@ import urllib.request
 from datetime import datetime, timedelta
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-VERSION = "6.72"
+VERSION = "6.73"
 SCHEMA = 19
 
 
@@ -3716,15 +3716,17 @@ def _cache_load(stamp):
 
 def cached_sets(c):
     stamp = _sets_stamp(c)
-    if CACHE["sets"] is not None and CACHE["stamp"] == stamp:
-        return CACHE["sets"]
+    cur = CACHE["sets"]
+    if cur is not None and CACHE["stamp"] == stamp:
+        return cur
     disk = _cache_load(stamp)
     if disk and disk.get("sets") is not None:
         CACHE.update(stamp=stamp, sets=disk["sets"], home=disk.get("home"), vh=disk.get("vh"))
-        return CACHE["sets"]
-    CACHE.update(stamp=stamp, sets=set_rows(c), home=None, vh=None)
+        return disk["sets"]
+    sets = set_rows(c)
+    CACHE.update(stamp=stamp, sets=sets, home=None, vh=None)
     _cache_save()
-    return CACHE["sets"]
+    return sets
 
 
 def cached_home(c):
@@ -3733,12 +3735,20 @@ def cached_home(c):
     the set list, in memory and on disk, so a launch with unchanged data is
     instant."""
     stamp = _sets_stamp(c)
-    if CACHE["home"] is not None and CACHE["stamp"] == stamp:
-        return CACHE["home"]
+    cur = CACHE["home"]
+    if cur is not None and CACHE["stamp"] == stamp:
+        return cur
     sets = cached_sets(c)                            # also brings CACHE["stamp"] to `stamp`
-    CACHE["home"] = home_stats(c, sets)
+    # local `home`, not CACHE["home"], is what we return: a concurrent bust()
+    # (the background card-refresh thread calls it right when it finishes)
+    # can null CACHE's entries out between this line finishing and a
+    # `return CACHE["home"]` re-reading it - this request still got a good,
+    # freshly-computed result either way, it just won't be the one left
+    # cached for the next request, which is exactly what bust() intended.
+    home = home_stats(c, sets)
+    CACHE["home"] = home
     _cache_save()
-    return CACHE["home"]
+    return home
 
 
 def cached_value_history(c):
@@ -3747,12 +3757,14 @@ def cached_value_history(c):
     Precomputed once in the background shortly after startup (see
     auto_sync_loop) so opening the value page normally never waits on it."""
     stamp = _sets_stamp(c)
-    if CACHE["vh"] is not None and CACHE["stamp"] == stamp:
-        return CACHE["vh"]
+    cur = CACHE["vh"]
+    if cur is not None and CACHE["stamp"] == stamp:
+        return cur
     cached_sets(c)                                   # brings CACHE["stamp"] to `stamp`
-    CACHE["vh"] = compute_value_history(c)
+    vh = compute_value_history(c)
+    CACHE["vh"] = vh
     _cache_save()
-    return CACHE["vh"]
+    return vh
 
 
 def cached_movers(c, days):
@@ -4559,7 +4571,16 @@ button:focus-visible,input:focus-visible,select:focus-visible{outline:2px solid 
    table's own columns finally fit (~1150px for the set-detail table)
    pushing the whole page wider than the viewport instead of just scrolling
    the table. */
-#out,#setBody,#watchlistOut,#deckListWrap,.dbody{overflow-x:auto;-webkit-overflow-scrolling:touch}
+/* padding+matching negative margin, not just overflow-x:auto: a focused
+   input's outline (outline-offset:2px, 2px wide - 4px total) drawn flush
+   against this box's own edge got hard-clipped by the new overflow, most
+   visibly the search field on the set page losing its whole left edge.
+   The negative margin cancels the padding back out for layout purposes, so
+   this still lines up with content outside it (page heading, etc.) - it
+   only buys the outline (or any other edge decoration) a few px of room
+   that isn't part of the scrollable area. */
+#out,#setBody,#watchlistOut,#deckListWrap,.dbody{overflow-x:auto;-webkit-overflow-scrolling:touch;
+  padding:4px;margin:-4px}
 /* same reason as .tscroll th above - now that these are always their own
    horizontal-scroll container (not just under the mobile breakpoint), their
    sticky headers need the same always-on opt-out */
