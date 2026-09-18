@@ -16,7 +16,7 @@ import urllib.request
 from datetime import datetime, timedelta
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-VERSION = "6.75"
+VERSION = "6.76"
 SCHEMA = 19
 
 
@@ -4504,6 +4504,10 @@ h2{font-family:var(--serif);font-weight:400;font-size:20px;margin:34px 0 12px}
 .li .nm{flex:1;font-size:14px}
 .li .mt{font-family:var(--mono);font-size:12px;color:var(--muted)}
 .bar{flex:1 1 92px;height:6px;background:var(--track);border-radius:4px;overflow:hidden}
+/* "Closest to completion" rows only - match the thicker bars used for "By rarity"
+   (.rarrow .track, 9px) instead of the thinner default .bar used elsewhere (set
+   tiles, other lists) */
+.li .bar{height:9px}
 .bar span{display:block;height:100%;background:var(--gold)}
 /* inside a set card (.set is a flex column) flex-basis controls height, so the
    shared .bar would be 92px tall — pin it back to a thin full-width bar */
@@ -6371,7 +6375,7 @@ function sparkline(vals){
 // move over the period reads at a glance.
 function wlSpark(vals){
   const nums=(vals||[]).filter(v=>v!=null&&v>0);
-  if(nums.length<2)return `<span class="mt" style="color:var(--dim)">—</span>`;
+  if(nums.length<2)return `<span class="mt" style="color:var(--muted);display:block;text-align:center">—</span>`;
   const W=260,H=40,P=5,n=vals.length;
   const min=Math.min(...nums),max=Math.max(...nums),rng=(max-min)||1;
   const X=i=>P+i*(W-2*P)/(n-1);
@@ -6566,11 +6570,11 @@ async function drawWatchlist(){
       <td><span class="setlink" data-card="${c.set}|${c.number}" data-pop="${c.img||""}">${cardName(c)}</span></td>
       <td><span class="setlink" data-set="${c.set}">${c.setName}</span></td>
       <td>${RAR[c.rarity]?rarLabel(c.rarity):"?"}</td>
-      <td class="num" style="color:var(--gold)">${c.eur?money(c.eur):"—"}</td>
+      <td class="num" style="color:${c.eur?"var(--gold)":"var(--muted)"}">${c.eur?money(c.eur):"—"}</td>
       <td class="wlsparkcell">${wlSpark(c.series)}</td>
       <td class="num" style="color:${c.changeEur>0?"var(--ok)":c.changeEur<0?"var(--bad)":"var(--muted)"}">${
         wlChange(c.changeEur,c.changePct,c.lo,c.hi)}</td>
-      <td class="num">${c.foil?money(c.foil):"—"}</td>
+      <td class="num" style="color:${c.foil?"var(--gold)":"var(--muted)"}">${c.foil?money(c.foil):"—"}</td>
       <td class="wlsparkcell">${wlSpark(c.foilSeries)}</td>
       <td class="num" style="color:${c.foilChangeEur>0?"var(--ok)":c.foilChangeEur<0?"var(--bad)":"var(--muted)"}">${
         wlChange(c.foilChangeEur,c.foilChangePct,c.foilLo,c.foilHi)}</td>
