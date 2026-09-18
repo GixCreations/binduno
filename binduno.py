@@ -16,7 +16,7 @@ import urllib.request
 from datetime import datetime, timedelta
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-VERSION = "6.76"
+VERSION = "6.77"
 SCHEMA = 19
 
 
@@ -383,55 +383,6 @@ def log(c, action, detail):
     c.execute("DELETE FROM history WHERE id NOT IN "
               "(SELECT id FROM history ORDER BY id DESC LIMIT 100)")
     c.commit()
-
-
-def _peak_rss_mb():
-    """Best-effort peak resident memory of this process, in MB, measured the
-    same way (a real OS-reported peak, not an eyeballed Task
-    Manager/Activity Monitor snapshot) on every platform - stdlib only:
-    ctypes + GetProcessMemoryInfo on Windows (no `resource` module there),
-    `resource.getrusage` on macOS/Linux (note ru_maxrss is bytes on macOS,
-    kilobytes on Linux). Used only for the Windows-performance diagnostic
-    logging in refresh_cards().
-
-    Returns (value_or_None, error_or_None) rather than just a value: a first
-    version of this without explicit ctypes argtypes/restype came back
-    "unavailable" on the actual Windows machine under investigation with no
-    way to tell why (likely GetCurrentProcess()'s HANDLE getting silently
-    truncated to a 32-bit c_int on a 64-bit process, the classic ctypes
-    Windows-API pitfall) - worth surfacing the real reason if it happens
-    again instead of a second silent failure."""
-    try:
-        if sys.platform == "win32":
-            import ctypes
-            from ctypes import wintypes
-
-            class _PMC(ctypes.Structure):
-                _fields_ = [("cb", wintypes.DWORD), ("PageFaultCount", wintypes.DWORD),
-                            ("PeakWorkingSetSize", ctypes.c_size_t), ("WorkingSetSize", ctypes.c_size_t),
-                            ("QuotaPeakPagedPoolUsage", ctypes.c_size_t), ("QuotaPagedPoolUsage", ctypes.c_size_t),
-                            ("QuotaPeakNonPagedPoolUsage", ctypes.c_size_t), ("QuotaNonPagedPoolUsage", ctypes.c_size_t),
-                            ("PagefileUsage", ctypes.c_size_t), ("PeakPagefileUsage", ctypes.c_size_t)]
-
-            kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
-            psapi = ctypes.WinDLL("psapi", use_last_error=True)
-            kernel32.GetCurrentProcess.restype = wintypes.HANDLE
-            kernel32.GetCurrentProcess.argtypes = []
-            psapi.GetProcessMemoryInfo.restype = wintypes.BOOL
-            psapi.GetProcessMemoryInfo.argtypes = [wintypes.HANDLE, ctypes.POINTER(_PMC), wintypes.DWORD]
-
-            pmc = _PMC()
-            pmc.cb = ctypes.sizeof(_PMC)
-            h = kernel32.GetCurrentProcess()
-            if psapi.GetProcessMemoryInfo(h, ctypes.byref(pmc), pmc.cb):
-                return pmc.PeakWorkingSetSize / 1e6, None
-            return None, f"GetProcessMemoryInfo failed, GetLastError={ctypes.get_last_error()}"
-        else:
-            import resource
-            ru = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
-            return (ru / 1e6 if sys.platform == "darwin" else ru / 1e3), None
-    except Exception as e:                                      # noqa: BLE001
-        return None, f"{type(e).__name__}: {e}"
 
 
 # Everything the user built up by hand — NOT the regenerable Scryfall catalog
@@ -1108,42 +1059,18 @@ def refresh_cards(bulk_type="all_cards"):
         opener = gzip.open if magic == b"\x1f\x8b" else open
 
         REFRESH.update(step="Reading cards", pct=68)
-        # One-off diagnostic (2026-09): a report of refresh_cards() taking ~3x
-        # longer and using ~9x more memory on Windows than macOS for the same
-        # bulk file, even with Defender fully excluded (ruling out AV
-        # scanning) - a PyInstaller onefile build occasionally fails to bundle
-        # the C-accelerated _json extension, silently falling back to the much
-        # slower, more memory-hungry pure-Python decoder. Logged every run
-        # (cheap) so it's visible in Settings -> History without needing
-        # remote access to the machine that's slow.
-        _c_json = json.decoder.scanstring is not json.decoder.py_scanstring
-        # Python 3.13+ can be built "free-threaded" (GIL removable at
-        # runtime) - that build is documented to be measurably slower for
-        # ordinary single-threaded code like this JSON parse, since the
-        # interpreter loses some GIL-era optimizations. Cheap to check and
-        # directly tests whether a Windows build accidentally picked up that
-        # variant instead of the normal one.
-        _gil = "n/a (Python <3.13)"
-        if hasattr(sys, "_is_gil_enabled"):
-            _gil = "enabled" if sys._is_gil_enabled() else \
-                "DISABLED (free-threaded build - known to be slower here)"
-        log(c, "Card data", f"Diagnostics: Python {sys.version.split()[0]} on "
-                            f"{sys.platform}, frozen={getattr(sys, 'frozen', False)}, "
-                            f"json C-accelerator={'yes' if _c_json else 'NO (pure-Python fallback - much slower)'}, "
-                            f"GIL={_gil}")
-        # The real fix: measured 4.7x faster at 300k objects (growing with
-        # scale) just from turning the cyclic GC off for this section. JSON
-        # data is a strict tree - the objects json.load()/json.loads() build
-        # here can never contain a reference cycle, so the generational
-        # collector's periodic scans (which get more frequent AND more
-        # expensive as more objects pile up, explaining why parsing scaled
-        # worse than linearly with card count) never find anything to
-        # collect here; refcounting alone already frees everything
-        # correctly the moment it's unreferenced. Re-enabled unconditionally
-        # in this function's `finally` below, so it can't stay off for the
-        # rest of the process if something raises partway through.
+        # Measured 4.7x faster at 300k objects (growing with scale) just from
+        # turning the cyclic GC off for this section. JSON data is a strict
+        # tree - the objects json.load()/json.loads() build here can never
+        # contain a reference cycle, so the generational collector's periodic
+        # scans (which get more frequent AND more expensive as more objects
+        # pile up, explaining why parsing scaled worse than linearly with
+        # card count) never find anything to collect here; refcounting alone
+        # already frees everything correctly the moment it's unreferenced.
+        # Re-enabled unconditionally in this function's `finally` below, so
+        # it can't stay off for the rest of the process if something raises
+        # partway through.
         gc.disable()
-        _t_parse = time.time()
         rows = []
         alt_pick = {}
         with opener(tmp, "rt", encoding="utf-8") as f:
@@ -1182,8 +1109,6 @@ def refresh_cards(bulk_type="all_cards"):
                             REFRESH.update(step=f"Reading cards — {int(frac * 100)}%",
                                           pct=68 + int(frac * 17))
                 meta_set(c, "last_bulk_count", str(len(it)))
-            log(c, "Card data", f"Diagnostics: JSON parse took {time.time() - _t_parse:.1f}s "
-                                f"for {len(it):,} objects")
             # Some sets never had an English printing (Renaissance, FBB, ...).
             # Import those in their own language so they are at least visible.
             # Language exclusivity is decided per PRINTING (set + collector
@@ -1470,9 +1395,6 @@ def refresh_cards(bulk_type="all_cards"):
                 for i, r in enumerate(rows)]
         del de_names, de_types, de_oracle
 
-        _peak, _peak_err = _peak_rss_mb()
-        log(c, "Card data", f"Diagnostics: peak memory ~{_peak:.0f} MB" if _peak
-                            else f"Diagnostics: peak memory unavailable ({_peak_err})")
         REFRESH.update(step="Saving to database", pct=88)
         for code, lg in set_lang_pick.items():
             if code in sets:
@@ -1818,10 +1740,13 @@ def compute_movers(c, days):
         if then <= 0 or then == cur:
             continue
         qty = qty_by_key[k]
+        # changeEur is the per-card price move, not multiplied by qty owned -
+        # otherwise a bulk-owned bulk card could out-rank a real mover just
+        # because you have 40 copies of it (see valuePage.moversDesc).
         out.append({"set": r["set_code"], "setName": r["set_name"], "number": r["number"],
                     "name": r["name"], "nameDe": r["name_de"] or "", "img": r["img"] or "",
                     "qty": qty, "price": round(cur, 2),
-                    "changeEur": round((cur - then) * qty, 2),
+                    "changeEur": round(cur - then, 2),
                     "changePct": round((cur - then) / then * 100, 1)})
     return out
 
@@ -1998,6 +1923,9 @@ def compute_value_history(c):
                        "idx": round(idx_sum / n_keys, 4) if n_keys else 0})
 
     top = []
+    # Ranked by the card's own price, not price*qty - otherwise owning many
+    # copies of something cheap could outrank a genuinely valuable single
+    # card (see valuePage.mostValuableDesc).
     for r in c.execute("""
             SELECT k.name, k.name_de, k.set_code, s.name set_name, k.number, k.img, o.foil,
                    SUM(o.qty) qty,
@@ -2007,7 +1935,7 @@ def compute_value_history(c):
             JOIN sets s ON s.code=o.set_code
             GROUP BY o.set_code, o.number, o.foil
             HAVING price IS NOT NULL AND price > 0
-            ORDER BY qty*price DESC LIMIT 300"""):
+            ORDER BY price DESC LIMIT 300"""):
         top.append({"name": r["name"], "nameDe": r["name_de"] or "", "set": r["set_code"],
                     "setName": r["set_name"], "number": r["number"], "img": r["img"] or "",
                     "foil": r["foil"] == "foil", "qty": r["qty"],
@@ -4728,16 +4656,29 @@ table.setcards thead th[data-sk]:hover{color:var(--gold)}
 table.wltable{table-layout:auto;width:100%}
 table.wltable th:nth-child(1){width:19%;min-width:130px}
 table.wltable th:nth-child(2){width:12%;min-width:90px}
-table.wltable th:nth-child(3){width:80px}
-table.wltable th:nth-child(4){width:70px}
-table.wltable th:nth-child(5){width:110px}
-table.wltable th:nth-child(6){width:150px}
-table.wltable th:nth-child(7){width:70px}
-table.wltable th:nth-child(8){width:110px}
-table.wltable th:nth-child(9){width:150px}
-table.wltable th:nth-child(10){width:40px}
+/* columns 3-10 pin both min-width AND max-width to the same value (rather
+   than just a width hint, which table-layout:auto is free to ignore). Without
+   this, switching the Watchlist's date range changes how many digits the
+   Change/lo-hi text needs, and auto layout re-distributes a few px across
+   EVERY column to compensate (even Rarity, whose own text never changes) -
+   visible as the whole table jittering left/right on every range click. */
+table.wltable th:nth-child(3){width:80px;min-width:80px;max-width:80px}
+table.wltable th:nth-child(4){width:70px;min-width:70px;max-width:70px}
+table.wltable th:nth-child(5){width:110px;min-width:110px;max-width:110px}
+table.wltable th:nth-child(6){width:150px;min-width:150px;max-width:150px}
+table.wltable th:nth-child(7){width:70px;min-width:70px;max-width:70px}
+table.wltable th:nth-child(8){width:110px;min-width:110px;max-width:110px}
+table.wltable th:nth-child(9){width:150px;min-width:150px;max-width:150px}
+table.wltable th:nth-child(10){width:40px;min-width:40px;max-width:40px}
 table.wltable td:nth-child(1),table.wltable td:nth-child(2){white-space:normal;overflow-wrap:anywhere}
 table.wltable td.wlsparkcell{padding-right:18px}
+/* forces the Change columns' width the way min/max-width on the <td> itself
+   can't (see wlChange's comment) - an ABSOLUTE width here (not 100%, which
+   would just mirror whatever the <td> already grew to) caps how wide this
+   div's content is allowed to ask for, so the table layout algorithm never
+   sees a reason to widen the column past it; longer text wraps onto a third
+   line instead. Matches nth-child(6)/(9)'s 150px above. */
+.wlchg{width:150px}
 .wlspark{width:100%;height:38px;display:block}
 .wlbase{stroke:var(--muted);stroke-width:1;stroke-dasharray:2 3;opacity:.45}
 tr.deckpickrow>td{padding:6px 0}
@@ -4798,12 +4739,10 @@ textarea{width:100%;height:130px;background:var(--panel2);color:var(--text);bord
   font-size:14px;line-height:1.3;opacity:0;transition:opacity .13s}
 .cc:hover .tilecart{opacity:1}
 .cc .tilecart:hover{border-color:var(--gold);color:var(--gold)}
-/* bulk-select checkbox: unlike .tilecart this stays visible even off-hover,
-   since it needs to show a persisted selection at a glance across a whole
-   page of tiles, not just invite a one-off click. */
-.cc .tilesel{position:absolute;top:7px;left:7px;background:rgba(15,19,25,.85);
-  border:1px solid var(--line);border-radius:5px;padding:4px;line-height:0;
-  display:block;cursor:pointer;z-index:2}
+/* bulk-select checkbox: used to sit over the card art (top-left of .imgwrap)
+   but that covered part of the illustration - now it's inline before the
+   card name instead, same row, never overlapping the image. */
+.cc .tilesel{display:inline-flex;flex:0 0 auto;margin-top:1px;cursor:pointer}
 .cc .tilesel input{display:block;width:15px;height:15px;margin:0;
   accent-color:var(--gold);cursor:pointer}
 .cc .cqty{margin:1px 0}
@@ -4813,13 +4752,19 @@ textarea{width:100%;height:130px;background:var(--panel2);color:var(--text);bord
 .cc .miss{display:inline-block;background:var(--panel2);
   border:1px solid var(--line);color:var(--muted);border-radius:11px;padding:1px 8px;
   font-family:var(--mono);font-size:11px}
-.cc .meta{padding:8px 10px;display:flex;flex-direction:column;gap:3px}
-.tileadd{display:flex;gap:5px;margin-top:2px}
+/* .meta grows to fill whatever extra height the grid gives this tile (cards
+   in the same row are stretched to the tallest one), and .tileadd's
+   margin-top:auto rides that growth down to the bottom - so the +1 buttons
+   land on the same line across a row regardless of how much variant/set-name
+   text a given card has above them. */
+.cc .meta{padding:8px 10px;display:flex;flex-direction:column;gap:3px;flex:1 1 auto}
+.tileadd{display:flex;gap:5px;margin-top:auto;padding-top:2px}
 .tileadd button{flex:1 1 0;min-width:0;padding:3px 4px;font-size:11px;
   white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 table.setcards td.quickadd{white-space:nowrap}
 table.setcards td.quickadd button{padding:3px 9px;font-size:12px}
-.cc .cn{font-size:13px;line-height:1.25;overflow-wrap:anywhere}
+.cc .cn{display:flex;align-items:flex-start;gap:6px;font-size:13px;line-height:1.25}
+.cc .cn .cntxt{overflow-wrap:anywhere;min-width:0}
 .cc .cset{font-family:var(--mono);font-size:10.5px;color:var(--dim);
   white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 .cc .vrow{display:flex;flex-wrap:wrap;gap:3px}
@@ -5149,7 +5094,7 @@ en:{
   "home.watchlist7d":"Last 7 days","home.watchlistChange":"Change","home.watchlistTrend":"Trend",
   "range.d7":"7 D","range.d30":"30 D","range.y1":"1 Y","range.max":"Max",
   "valuePage.title":"Value over time","valuePage.desc":"How your whole collection's Cardmarket trend value has moved, based on the daily price log.",
-  "valuePage.mostValuable":"Most valuable cards","valuePage.mostValuableDesc":"Your holdings ranked by total value (price × copies owned).",
+  "valuePage.mostValuable":"Most valuable cards","valuePage.mostValuableDesc":"Your holdings ranked by price per card, regardless of how many copies you own.",
   "valuePage.none":"Nothing owned with a known price yet.","valuePage.thValue":"Total value",
   "valuePage.tabPerformance":"Performance","valuePage.tabValue":"Value","valuePage.tabBySet":"Breakdown",
   "valuePage.dimSet":"Set","valuePage.dimColor":"Color","valuePage.dimRarity":"Rarity","valuePage.dimType":"Card type",
@@ -5305,7 +5250,7 @@ en:{
   "manage.tabHistory":"History","manage.tabApp":"Update app","manage.tabHelp":"Help",
   "manage.tabContact":"Contact",
   "contact.title":"Contact",
-  "contact.body":"Feedback, questions and bug reports are very welcome — email me at",
+  "contact.body":"Feedback, questions, bug reports and feature requests are very welcome — email me at",
   "contact.ghLine":"Source code and issue tracker:",
   "foot.connectPhone":"Connect phone","foot.contact":"Contact","foot.support":"Support ☕",
   "cm.title":"Cardmarket helper",
@@ -5491,7 +5436,7 @@ en:{
   "cardPage.buyOnCardmarket":"Buy on Cardmarket · {price}","cardPage.buyFoil":"Buy foil · {price}",
   "cardPage.viewOnScryfall":"View on Scryfall","cardPage.regular":"Regular",
   "cardPage.copiesOwned":"Copies owned","cardPage.yourCollection":"Your collection",
-  "cardPage.nonfoil":"Nonfoil","cardPage.setTo4":"Add 4 copies",
+  "cardPage.setTo4":"Add 4 copies",
   "cardPage.wantListEntry":"Wants-List entry","cardPage.set":"Set",
   "cardPage.illustratedBy":"Illustrated by {artist}","cardPage.formatLegality":"Format legality",
   "cardPage.allPrintings":"All printings",
@@ -5632,7 +5577,7 @@ de:{
   "home.watchlist7d":"Letzte 7 Tage","home.watchlistChange":"Änderung","home.watchlistTrend":"Trend",
   "range.d7":"7 T","range.d30":"30 T","range.y1":"1 J","range.max":"Max",
   "valuePage.title":"Wertverlauf","valuePage.desc":"Wie sich der Cardmarket-Trendwert deiner gesamten Sammlung entwickelt hat, basierend auf dem täglichen Preis-Log.",
-  "valuePage.mostValuable":"Wertvollste Karten","valuePage.mostValuableDesc":"Deine Karten in Besitz, sortiert nach Gesamtwert (Preis × Kopien in Besitz).",
+  "valuePage.mostValuable":"Wertvollste Karten","valuePage.mostValuableDesc":"Deine Karten in Besitz, sortiert nach Preis pro Karte, unabhängig davon wie viele Kopien du besitzt.",
   "valuePage.none":"Noch nichts mit bekanntem Preis in Besitz.","valuePage.thValue":"Gesamtwert",
   "valuePage.tabPerformance":"Performance","valuePage.tabValue":"Wert","valuePage.tabBySet":"Verteilung",
   "valuePage.dimSet":"Set","valuePage.dimColor":"Farbe","valuePage.dimRarity":"Seltenheit","valuePage.dimType":"Kartentyp",
@@ -5790,7 +5735,7 @@ de:{
   "manage.tabHistory":"Verlauf","manage.tabApp":"App aktualisieren","manage.tabHelp":"Hilfe",
   "manage.tabContact":"Kontakt",
   "contact.title":"Kontakt",
-  "contact.body":"Feedback, Fragen und Fehlermeldungen sind sehr willkommen — schreib mir an",
+  "contact.body":"Feedback, Fragen, Fehlermeldungen und Feature-Wünsche sind sehr willkommen — schreib mir an",
   "contact.ghLine":"Quellcode und Issue-Tracker:",
   "foot.connectPhone":"Handy verbinden","foot.contact":"Kontakt","foot.support":"Unterstützen ☕",
   "cm.title":"Cardmarket-Helfer",
@@ -5979,7 +5924,7 @@ de:{
   "cardPage.buyOnCardmarket":"Auf Cardmarket kaufen · {price}","cardPage.buyFoil":"Foil kaufen · {price}",
   "cardPage.viewOnScryfall":"Auf Scryfall ansehen","cardPage.regular":"Normal",
   "cardPage.copiesOwned":"Kopien in Besitz","cardPage.yourCollection":"Deine Sammlung",
-  "cardPage.nonfoil":"Nonfoil","cardPage.setTo4":"4 Kopien hinzufügen",
+  "cardPage.setTo4":"4 Kopien hinzufügen",
   "cardPage.wantListEntry":"Wants-Liste-Eintrag","cardPage.set":"Set",
   "cardPage.illustratedBy":"Illustriert von {artist}","cardPage.formatLegality":"Format-Legalität",
   "cardPage.allPrintings":"Alle Drucke",
@@ -6153,6 +6098,7 @@ function updateDismissed(v){try{return localStorage.getItem("bnd_upd_dismiss")==
 function dismissUpdate(v){try{localStorage.setItem("bnd_upd_dismiss",v);}catch(e){}}
 let SHOW_COSTS=false;
 let HIDE_OFFGOAL=false;   // set page: hide printings that don't count toward the goal
+let SETSEL=new Set();     // set page: bulk-selected cards, same pattern as CARDSEL/MISSEL
 let FORCE_RELOAD=false;   // set after an import so the next route re-fetches
 let SETS=[],STATS=null,PAGE=1,PER=loadPer("sets",24),VIEW="grid",SORT="totalCost",DIR=1,
     Q="",FLABELS=null,FSTAT="started";
@@ -6557,10 +6503,18 @@ async function drawWatchlist(){
     $("#wlRange")&&bindPhRange("#wlRange",v=>{WL_RANGE=v;savePhRange();drawWatchlist();});
     return;
   }
-  const wlChange=(chEur,chPct,lo,hi)=>chPct==null?"—":
-    `${chEur>0?"+":""}${money(chEur)} <span class="mt">(${
+  // Wrapped in a fixed-width div rather than relying on the <td>'s own width:
+  // table-layout:auto sizes a column by its widest cell content whenever
+  // there's spare table width to do it with, ignoring width/max-width set on
+  // the cell itself - so a longer "+233.51 € (+38.3%)" swing on one range
+  // would silently widen this column (and, since the table's total width is
+  // fixed, shrink space elsewhere) versus a shorter one on another range.
+  // Capping an ordinary block element's width is respected unconditionally,
+  // forcing this column to the same width on every range.
+  const wlChange=(chEur,chPct,lo,hi)=>chPct==null?`<div class="wlchg">—</div>`:
+    `<div class="wlchg">${chEur>0?"+":""}${money(chEur)} <span class="mt">(${
       chPct>0?"+":""}${chPct.toFixed(1)}%)</span><br><span class="mt">${
-      t("ph.lohi",{lo:money(lo),hi:money(hi)})}</span>`;
+      t("ph.lohi",{lo:money(lo),hi:money(hi)})}</span></div>`;
   out.innerHTML=rangeUI+`<div class="tscroll"><table class="wltable"><thead><tr><th>${t("missing.thCard")}</th><th>${t("cardPage.set")}</th>
       <th>${t("missing.thRarity")}</th><th class="num">${t("cardPage.regular")}</th>
       <th class="wlsparkcell">${t("home.watchlistTrend")}</th><th class="num">${t("home.watchlistChange")}</th>
@@ -7375,11 +7329,11 @@ const cardTile=(c,opts)=>{
   return `<div class="cc" data-card="${c.set}|${c.number}">
   <div class="imgwrap">${c.img?`<img class="face" src="${c.img}" alt="${cardName(c)}" loading="lazy">`
     :`<div class="noimg">${cardName(c)}</div>`}
-    ${opts.select?`<label class="tilesel" onclick="event.stopPropagation()">
-      <input type="checkbox" class="cardsel" data-selkey="${c.set}|${c.number}" ${opts.selected?"checked":""}></label>`:""}
     <button class="tilecart" data-cart="${c.set}|${c.number}"
       title="${t('common.addToCart')}">+</button></div>
-  <div class="meta"><div class="cn">${cardName(c)}</div>
+  <div class="meta"><div class="cn">${opts.select?`<label class="tilesel" onclick="event.stopPropagation()">
+      <input type="checkbox" class="cardsel" data-selkey="${c.set}|${c.number}" ${opts.selected?"checked":""}></label>`:""}
+    <span class="cntxt">${cardName(c)}</span></div>
     <div class="cqty"><span class="${qt?"owned":"miss"}">${ownLabel}</span></div>
     ${c.variant||c.extras?`<div class="vrow">${VAR(c)}</div>`:""}
     ${c.setName?`<div class="cset">${c.setName} · #${c.number}</div>`:""}
@@ -7448,23 +7402,32 @@ function drawCards(){
     <button id="cartAllMissing">${t("setPage.addAllMissing")}</button>
     <button id="buyFromSet">${t("setPage.buyMissingDots")}</button>
     <label class="chk" style="margin:0"><input type="checkbox" id="hideOffGoal" ${
-      HIDE_OFFGOAL?"checked":""}> ${t("setPage.hideOffGoal")}</label></div>`;
+      HIDE_OFFGOAL?"checked":""}> ${t("setPage.hideOffGoal")}</label>
+    <span id="selBar">${selBarHTML(SETSEL)}</span></div>`;
   if(DV==="grid"){
     OUT.innerHTML=head+`<div class="cgrid">${rows.map(c=>cardTile(
-      {...c,set:DETAIL.code,setName:DETAIL.name},{quickAdd:true})).join("")}</div>`;
-    bindTiles(); bindSetTools(); bindCartButtons(); bindQuickAdd();
+      {...c,set:DETAIL.code,setName:DETAIL.name},
+      {quickAdd:true,select:true,selected:SETSEL.has(DETAIL.code+"|"+c.number)})).join("")}</div>`;
+    bindTiles(); bindSetTools(); bindCartButtons(); bindQuickAdd(); bindSelBar(SETSEL,drawCards);
     document.querySelectorAll("[data-dv]").forEach(b=>b.onclick=()=>{DV=b.dataset.dv;drawCards();});
     $("#gsort").onchange=e=>{CS=e.target.value;drawCards();};
     $("#gdir").onclick=()=>{CD=-CD;drawCards();};
+    OUT.querySelectorAll(".cardsel").forEach(cb=>cb.onchange=()=>{
+      if(cb.checked)SETSEL.add(cb.dataset.selkey); else SETSEL.delete(cb.dataset.selkey);
+      refreshSelBar(SETSEL,drawCards);
+    });
     return;
   }
   const NUMCOLS=new Set(["number","eur","foil","qty"]);
   const cols=[...SORTCOLS.map(([k,l])=>[k,l,NUMCOLS.has(k)?"num":""]),["note",t("setPage.thNote"),""],
     ["",t("cardPage.regular"),"num"],["",t("setPage.thFoil"),"num"],["",t("missing.thCart"),"num"],
     ["",t("setPage.thWatchlist"),"num"]];
-  OUT.innerHTML=head+`<table class="setcards"><thead><tr>${cols.map(([k,l,c])=>
+  OUT.innerHTML=head+`<table class="setcards"><thead><tr><th><input type="checkbox" id="setSelAll"
+        ${rows.length&&rows.every(c=>SETSEL.has(DETAIL.code+"|"+c.number))?"checked":""}></th>${cols.map(([k,l,c])=>
     `<th class="${c}" data-c="${k}">${l}${CS===k?`<span class="ar">${CD>0?"▲":"▼"}</span>`:""}</th>`).join("")}
     </tr></thead><tbody>${rows.map(c=>`<tr class="${c.have?"have":"miss"} ${(!c.inGoal&&!c.have)?"notgoal":""}">
+      <td class="num"><input type="checkbox" class="cardsel" data-selkey="${DETAIL.code}|${c.number}"
+          ${SETSEL.has(DETAIL.code+"|"+c.number)?"checked":""}></td>
       <td class="num">${c.number}</td>
       <td><span class="nmline"><span class="setlink"
         data-card="${DETAIL.code}|${c.number}" data-pop="${c.img||""}">${cardName(c)}</span>${VAR(c)}</span></td>
@@ -7484,10 +7447,21 @@ function drawCards(){
       <td class="num"><button data-watch="${DETAIL.code}|${c.number}" class="watchtoggle ${c.inWatchlist?"on":""}"
           title="${c.inWatchlist?t('cardPage.inWatchlist'):t('cardPage.addToWatchlist')}">★</button></td></tr>`).join("")}
     </tbody></table>`;
-  OUT.querySelectorAll("th").forEach(th=>th.onclick=()=>{
+  OUT.querySelectorAll("th[data-c]").forEach(th=>th.onclick=()=>{
     const k=th.dataset.c; if(!k)return;
     CD = CS===k ? -CD : 1; CS=k; drawCards();});
   document.querySelectorAll("[data-dv]").forEach(b=>b.onclick=()=>{DV=b.dataset.dv;drawCards();});
+  bindSelBar(SETSEL,drawCards);
+  OUT.querySelectorAll(".cardsel").forEach(cb=>cb.onchange=()=>{
+    if(cb.checked)SETSEL.add(cb.dataset.selkey); else SETSEL.delete(cb.dataset.selkey);
+    refreshSelBar(SETSEL,drawCards);
+    if($("#setSelAll"))$("#setSelAll").checked=rows.length&&rows.every(c=>SETSEL.has(DETAIL.code+"|"+c.number));
+  });
+  if($("#setSelAll"))$("#setSelAll").onchange=e=>{
+    rows.forEach(c=>e.target.checked?SETSEL.add(DETAIL.code+"|"+c.number):SETSEL.delete(DETAIL.code+"|"+c.number));
+    OUT.querySelectorAll(".cardsel").forEach(cb=>cb.checked=e.target.checked);
+    refreshSelBar(SETSEL,drawCards);
+  };
   $("#gsort").onchange=e=>{CS=e.target.value;drawCards();};
   $("#gdir").onclick=()=>{CD=-CD;drawCards();};
   bindTiles(); bindSetTools(); bindCartButtons(); bindQuickAdd(); bindWatchToggle(OUT,DETAIL.cards);
@@ -7645,7 +7619,7 @@ async function cardPage(sc,nr){
       <div id="cardPhGraph"></div>
       <h2>${t("cardPage.yourCollection")}</h2>
       <div class="cards" style="grid-template-columns:repeat(auto-fit,minmax(200px,1fr))">
-        <div class="card"><div class="k">${t("cardPage.nonfoil")}</div>
+        <div class="card"><div class="k">${t("cardPage.regular")}</div>
           <div class="qbtn" style="margin-top:6px">
             <button data-adj="normal|-1">−</button>
             <span class="v" id="qtyNormal" style="font-size:20px;min-width:2ch;
@@ -7808,6 +7782,16 @@ async function bindSelBar(sel,refresh){
     finally{await refresh();}
   };
 }
+// Toggling one checkbox used to re-run the whole page's fetch+render just to
+// update the "N selected" pill - visible as the entire grid/table reloading
+// on every click. Only the small selection bar actually needs to change, so
+// re-render just that (refresh is still what "Add selected to cart" runs
+// afterwards, since that action really does need a full reload).
+function refreshSelBar(sel,refresh){
+  const el=$("#selBar");
+  if(el)el.innerHTML=selBarHTML(sel);
+  bindSelBar(sel,refresh);
+}
 async function cardsPane(){
   const box=$("#cardsOut");
   if(!box)return;
@@ -7830,7 +7814,7 @@ async function cardsPane(){
       ${perPageHTML("perSel2",CF.per)}
       ${gridColsHTML(CF.view)}
       <span class="pill">${t("buyPage.cardsCount",{n:num(r.total)})}</span>
-      ${selBarHTML(CARDSEL)}</div>
+      <span id="selBar">${selBarHTML(CARDSEL)}</span></div>
     ${CF.view==="grid"
       ? `<div class="cgrid">${r.cards.map(c=>cardTile(c,{quickAdd:true,select:true,selected:CARDSEL.has(selKey(c))})).join("")}</div>`
       : `<table><thead><tr><th><input type="checkbox" id="cardsSelAll"
@@ -7868,10 +7852,14 @@ async function cardsPane(){
   bindWatchToggle(box,r.cards);bindQuickAdd(box,r.cards,cardsPane);bindSelBar(CARDSEL,cardsPane);
   box.querySelectorAll(".cardsel").forEach(cb=>cb.onchange=()=>{
     if(cb.checked)CARDSEL.add(cb.dataset.selkey); else CARDSEL.delete(cb.dataset.selkey);
-    cardsPane();});
+    refreshSelBar(CARDSEL,cardsPane);
+    if($("#cardsSelAll"))$("#cardsSelAll").checked=r.cards.length&&r.cards.every(c=>CARDSEL.has(selKey(c)));
+  });
   if($("#cardsSelAll"))$("#cardsSelAll").onchange=e=>{
     r.cards.forEach(c=>e.target.checked?CARDSEL.add(selKey(c)):CARDSEL.delete(selKey(c)));
-    cardsPane();};
+    box.querySelectorAll(".cardsel").forEach(cb=>cb.checked=e.target.checked);
+    refreshSelBar(CARDSEL,cardsPane);
+  };
   document.querySelectorAll("[data-cv]").forEach(b=>b.onclick=()=>{CF.view=b.dataset.cv;cardsPane();});
   $("#csort2").onchange=e=>{CF.sort=e.target.value;CF.page=1;cardsPane();};
   $("#cdir2").onclick=()=>{CF.dir=-CF.dir;CF.page=1;cardsPane();};
@@ -8542,7 +8530,7 @@ async function drawMissing(){
         <div class="n">${t("missing.pageOfN2",{p:r.page,n:num(pages)})}${
           MF.sort==="price"?t("missing.cheapestFirstSuffix") : ""}</div></div>
     </div>
-    <div class="tools"><button id="mCart" class="pri">${t("missing.addPageToCart")}</button>${selBarHTML(MISSEL)}</div>
+    <div class="tools"><button id="mCart" class="pri">${t("missing.addPageToCart")}</button><span id="selBar">${selBarHTML(MISSEL)}</span></div>
     ${MF.view==="grid"
       ? `<div class="cgrid">${r.cards.map(c=>cardTile({...c,foil:0,qty:0,setName:c.setName},
           {select:true,selected:MISSEL.has(selKey(c))})).join("")}</div>`
@@ -8570,10 +8558,14 @@ async function drawMissing(){
   bindTiles();bindCartButtons();bindSetLinks();bindWatchToggle(el,r.cards);bindSelBar(MISSEL,drawMissing);
   el.querySelectorAll(".cardsel").forEach(cb=>cb.onchange=()=>{
     if(cb.checked)MISSEL.add(cb.dataset.selkey); else MISSEL.delete(cb.dataset.selkey);
-    drawMissing();});
+    refreshSelBar(MISSEL,drawMissing);
+    if($("#missSelAll"))$("#missSelAll").checked=r.cards.length&&r.cards.every(c=>MISSEL.has(selKey(c)));
+  });
   if($("#missSelAll"))$("#missSelAll").onchange=e=>{
     r.cards.forEach(c=>e.target.checked?MISSEL.add(selKey(c)):MISSEL.delete(selKey(c)));
-    drawMissing();};
+    el.querySelectorAll(".cardsel").forEach(cb=>cb.checked=e.target.checked);
+    refreshSelBar(MISSEL,drawMissing);
+  };
   $("#mCart").onclick=async()=>{
     await cartPost({action:"addmany",items:r.cards.map(c=>({set:c.set,number:c.number}))});
     $("#mCart").textContent=t("missing.addedCount",{n:r.cards.length});
