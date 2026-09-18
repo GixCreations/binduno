@@ -16,7 +16,7 @@ import urllib.request
 from datetime import datetime, timedelta
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-VERSION = "6.79"
+VERSION = "6.80"
 SCHEMA = 20
 
 
@@ -1937,7 +1937,7 @@ def compute_value_history(c):
     # card (see valuePage.mostValuableDesc).
     for r in c.execute("""
             SELECT k.name, k.name_de, k.set_code, s.name set_name, k.number, k.img, o.foil,
-                   SUM(o.qty) qty,
+                   k.ver, SUM(o.qty) qty,
                    CASE WHEN o.foil='foil' THEN k.eur_foil ELSE k.eur END price
             FROM collection o
             JOIN cards k ON k.set_code=o.set_code AND k.number=o.number
@@ -1947,7 +1947,7 @@ def compute_value_history(c):
             ORDER BY price DESC LIMIT 300"""):
         top.append({"name": r["name"], "nameDe": r["name_de"] or "", "set": r["set_code"],
                     "setName": r["set_name"], "number": r["number"], "img": r["img"] or "",
-                    "foil": r["foil"] == "foil", "qty": r["qty"],
+                    "foil": r["foil"] == "foil", "ver": r["ver"] or 1, "qty": r["qty"],
                     "price": round(r["price"], 2), "value": round(r["qty"] * r["price"], 2)})
     return {"series": series, "top": top}
 
@@ -4348,7 +4348,7 @@ PAGE = r"""<!DOCTYPE html><html lang="en"><head><meta charset="utf-8">
  --bg:#0f1319;--panel:#171d26;--panel2:#131920;--line:#28313d;--text:#e8ebef;
  --muted:#8d98a7;--dim:#5f6a78;--track:#3b4756;
  --w:#e8dcb5;--u:#4a90c4;--b:#8b7fa8;--r:#c8503c;--g:#4f9d69;
- --gold:#d4a629;--mythic:#e0692c;--ok:#4f9d69;--good-bg:#183024;
+ --gold:#d4a629;--gold-fill:var(--gold);--mythic:#e0692c;--ok:#4f9d69;--good-bg:#183024;
  --bad:#d98a8a;--bad-bg:#33191b;
  --row-have-bg:rgba(79,157,105,.11);--row-miss-bg:rgba(200,80,60,.10);
  --kind-normal-bd:#33506b;--kind-normal-fg:#8fb6d8;
@@ -4374,6 +4374,18 @@ PAGE = r"""<!DOCTYPE html><html lang="en"><head><meta charset="utf-8">
     values (measured, not assumed) were below 4.5:1 - #948d7d landed at
     3.3/2.98, #8a7a3a at 4.26/3.84 - so both failed exactly where they're
     used, as small secondary text. */
+ /* --gold-fill is a second, separate gold for backgrounds that carry dark
+    text on top (buttons, the cart badge) or pure decorative strokes - not
+    for anything read as text on the page background itself. That's a real
+    split, not an inconsistency: --gold above sits as dark as AA text
+    contrast on white allows, but a button fill has the opposite need -
+    #181206 button text over it wants the fill as LIGHT as possible, so a
+    dark "safe" gold there just looks like a dull brown slab. #d4a629 is
+    the same vivid gold the dark theme already uses for --gold (where light
+    text on a dark page has no such conflict) and what the donut rings on
+    Home already render in hardcoded to unconditionally, so it's a proven,
+    already-shipping color in this app, not a new guess. */
+ --gold-fill:#d4a629;
  --gold:#8a6000;--mythic:#b8460f;--ok:#3d7a4f;--good-bg:#e3efe4;
  --bad:#a83f2e;--bad-bg:#f7e2df;
  --row-have-bg:rgba(55,120,75,.28);--row-miss-bg:rgba(178,55,40,.20);
@@ -4435,7 +4447,12 @@ h2{font-family:var(--serif);font-weight:400;font-size:20px;margin:34px 0 12px}
 .donut .t{font-size:11px;letter-spacing:.13em;text-transform:uppercase;color:var(--muted)}
 .donut .p{font-family:var(--serif);font-size:26px;margin:3px 0}
 .donut .s{font-family:var(--mono);font-size:11.5px;color:var(--dim)}
-.rarcols{display:grid;grid-template-columns:1fr 1fr;gap:16px}
+/* minmax(0,...) not 1fr alone - a grid track's implicit min-width is auto,
+   which refuses to shrink below its content's min-content size. A wide
+   .tscroll table inside (Movers) would then grow the TRACK instead of
+   staying put and scrolling internally, pushing .rarcols itself wider than
+   the viewport with no scrollbar anywhere to reach the cut-off part. */
+.rarcols{display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1fr);gap:16px}
 .rarcols h3{font-family:var(--sans);font-size:12px;color:var(--muted);text-transform:uppercase;
   letter-spacing:.1em;margin:0 0 8px}
 .rarbars{background:var(--panel);border:1px solid var(--line);border-radius:6px;padding:16px}
@@ -4483,14 +4500,14 @@ input[type=search]{flex:1 1 220px;min-width:108px}
 button{background:var(--panel);border:1px solid var(--line);color:var(--text);padding:8px 13px;
   border-radius:4px;cursor:pointer}
 button:hover{border-color:var(--gold);color:var(--gold)}
-button.pri{background:var(--gold);border-color:var(--gold);color:#181206;font-weight:600}
+button.pri{background:var(--gold-fill);border-color:var(--gold-fill);color:#181206;font-weight:600}
 button.pri:hover{filter:brightness(1.1);color:#181206}
 #cardWatch.on,.watchtoggle.on{border-color:var(--gold);color:var(--gold)}
 button:disabled{opacity:.45;cursor:not-allowed}
 button:focus-visible,input:focus-visible,select:focus-visible{outline:2px solid var(--gold);outline-offset:2px}
 .seg{display:inline-flex;border:1px solid var(--line);border-radius:4px;overflow:hidden}
 .seg button{border:0;border-radius:0;padding:8px 12px}
-.seg button.on{background:var(--gold);color:#181206}
+.seg button.on{background:var(--gold-fill);color:#181206}
 .gridcols{display:inline-flex;align-items:center;gap:7px;font-size:12.5px;color:var(--muted)}
 .gridcols .gcVal{font-family:var(--mono);color:var(--text);min-width:1.2em;text-align:center}
 .gridcols .gcRange{width:90px;accent-color:var(--gold)}
@@ -4610,8 +4627,13 @@ table.setcards tr.notgoal td .badge{opacity:1}
    (or shorter), left-align it when the content runs noticeably longer -
    free-text columns (card/set names, type lines, category badges) vs.
    short numbers, codes, dates, statuses and single-icon action buttons. */
-#setBody table.setcards th:not(:nth-child(2)),
-#setBody table.setcards td:not(:nth-child(2)){text-align:center}
+/* Column 2 is No. (short, centers fine) and column 3 is Card (free text,
+   wants left) - a selection checkbox was added as column 1 after this rule
+   was written, shifting every column right by one without the exclusion
+   index following along, so No. sat excluded/right-aligned (from .num)
+   while Card fell through to centered. */
+#setBody table.setcards th:not(:nth-child(3)),
+#setBody table.setcards td:not(:nth-child(3)){text-align:center}
 #out table th:not(:nth-child(1)):not(:nth-child(4)),
 #out table td:not(:nth-child(1)):not(:nth-child(4)){text-align:center}
 #cardsOut table th:not(:nth-child(2)):not(:nth-child(3)),
@@ -4713,7 +4735,12 @@ table.wltable td.wlsparkcell{padding-right:18px}
    div's content is allowed to ask for, so the table layout algorithm never
    sees a reason to widen the column past it; longer text wraps onto a third
    line instead. Matches nth-child(6)/(9)'s 150px above. */
-.wlchg{width:150px}
+/* white-space:normal overrides the nowrap it otherwise inherits from its
+   own td.num ancestor (line ~4578) - nowrap there defeated the wrapping
+   this div relies on (see comment above) on every screen size, not just
+   mobile, so the "+15.88 € (+32.7 %)" line spilled straight through the
+   150px box instead of breaking after the euro amount. */
+.wlchg{width:150px;white-space:normal}
 .wlspark{width:100%;height:38px;display:block}
 .wlbase{stroke:var(--muted);stroke-width:1;stroke-dasharray:2 3;opacity:.45}
 tr.deckpickrow>td{padding:6px 0}
@@ -4859,13 +4886,17 @@ table.setcards td.quickadd button{padding:3px 9px;font-size:12px}
 .cardpage{display:grid;grid-template-columns:340px 1fr;gap:28px;align-items:start}
 .cardpage .art{width:100%;border-radius:14px;border:1px solid var(--line);display:block}
 .cardpage .artwrap{position:relative}
-/* every real card frame prints its own expansion symbol somewhere around
-   the vertical middle or lower half - top-right always clears it, on any
-   frame era, without needing to know the exact layout. */
-.cardpage .flipbtn{position:absolute;top:10px;right:10px;width:34px;height:34px;
+/* On a standard Magic frame the art box ends and the type line (which
+   carries the expansion symbol at its right edge) begins around 57-58% of
+   the card's height - bottom:44% sits the button's own bottom edge right
+   above that line, on any frame era, without needing to know the exact
+   layout. Positioning from top instead would need to know the button's
+   own height to land in the same place. */
+.cardpage .flipbtn{position:absolute;bottom:44%;right:10px;width:34px;height:34px;
   border-radius:50%;background:rgba(15,19,25,.75);border:1px solid var(--line);
-  color:var(--text);font-size:16px;line-height:1;cursor:pointer;
+  color:var(--text);cursor:pointer;padding:0;
   display:flex;align-items:center;justify-content:center}
+.cardpage .flipbtn svg{width:18px;height:18px}
 .cardpage .flipbtn:hover{border-color:var(--gold);background:rgba(15,19,25,.9)}
 .cardpage h1{font-size:27px;margin:0}
 .mana{font-family:var(--mono);color:var(--muted);font-size:15px;
@@ -4886,7 +4917,7 @@ img.ms{width:16px;height:16px;vertical-align:-3px;margin:0 1px}
   padding:2px 7px;border-radius:3px;white-space:nowrap}
 .tag.l{background:var(--good-bg);color:var(--ok)}.tag.n{background:var(--panel2);color:var(--dim)}
 .tag.b{background:var(--bad-bg);color:var(--bad)}.tag.r{background:var(--panel2);color:var(--gold)}
-.buybtn{display:inline-flex;align-items:center;gap:9px;background:var(--gold);color:#181206;
+.buybtn{display:inline-flex;align-items:center;gap:9px;background:var(--gold-fill);color:#181206;
   border:0;border-radius:5px;padding:11px 17px;font-weight:600;font-size:14px;
   text-decoration:none;margin:6px 8px 0 0}
 .buybtn:hover{filter:brightness(1.08)}
@@ -4901,7 +4932,7 @@ img.ms{width:16px;height:16px;vertical-align:-3px;margin:0 1px}
   border:1px solid var(--gold);border-radius:12px;overflow:hidden;background:#0b0e13;
   box-shadow:0 12px 40px rgba(0,0,0,.7)}
 #cardpop img{display:block;width:360px;max-width:44vw;height:auto}
-.cartn{display:none;background:var(--gold);color:#181206;border-radius:9px;
+.cartn{display:none;background:var(--gold-fill);color:#181206;border-radius:9px;
   padding:0 6px;font-family:var(--mono);font-size:10.5px;margin-left:3px}
 .cartn.on{display:inline-block}
 .crumbs{display:flex;gap:7px;align-items:center;flex-wrap:wrap;margin-bottom:14px;font-size:13px}
@@ -4932,7 +4963,7 @@ tr.child2 td:first-child::before{left:36px}
 .psep{border:0;border-top:1px solid var(--line);margin:30px 0}
 #sub>div>h2:first-child{margin-top:0}
 .helpnav{display:flex;gap:7px;flex-wrap:wrap;margin-bottom:16px}
-.helpnav button.on{background:var(--gold);color:#181206;border-color:var(--gold)}
+.helpnav button.on{background:var(--gold-fill);color:#181206;border-color:var(--gold-fill)}
 .help h3{font-family:var(--serif);font-weight:400;font-size:18px;margin:22px 0 7px}
 .help p,.help li{color:var(--muted);font-size:14px;line-height:1.65}
 .help code{font-family:var(--mono);font-size:12.5px;color:var(--gold)}
@@ -4947,7 +4978,7 @@ tr.child2 td:first-child::before{left:36px}
 @media(max-width:680px){
   body{font-size:14px}
   .gridcols{display:none}     /* mobile forces its own fixed grid columns - the slider has no effect here */
-  .rarcols{grid-template-columns:1fr}
+  .rarcols{grid-template-columns:minmax(0,1fr)}
   /* one compact nav row: icon + tabs + a power button pinned right */
   .navin{gap:11px;padding:9px 12px;height:auto;flex-wrap:wrap;align-items:center}
   .brand{font-size:0}                 /* keep the icon, drop the wordmark */
@@ -6657,10 +6688,14 @@ function explainPage(){
   bindCrumbs();
 }
 
+// Same rule as cardTile()'s ownLabel: "Regular" says nothing a bare row
+// doesn't already - only flag Foil, or which version when the set has more
+// than one printing of this name (and it's not itself the foil case).
+const valueVarLbl=x=>x.foil?t("setPage.thFoil"):(x.ver>1?`V.${x.ver}`:"");
 const valueTile=x=>`<div class="cc" data-card="${x.set}|${x.number}">
   <div class="imgwrap">${x.img?`<img class="face" src="${x.img}" alt="${cardName(x)}" loading="lazy">`
     :`<div class="noimg">${cardName(x)}</div>`}</div>
-  <div class="meta"><div class="cn">${cardName(x)} <span class="varlbl">${x.foil?t("setPage.thFoil"):t("cardPage.regular")}</span></div>
+  <div class="meta"><div class="cn">${cardName(x)}${valueVarLbl(x)?` <span class="varlbl">${valueVarLbl(x)}</span>`:""}</div>
     <div class="cset">${x.setName} · ${x.qty}×</div>
     <div class="cp">${money(x.price)} <em>· ${money(x.value)}</em></div>
   </div></div>`;
@@ -6726,8 +6761,8 @@ async function valuePage(){
            <th class="num">${t("browse.sortCopiesOwned")}</th><th class="num">${t("missing.thPrice")}</th>
            <th class="num">${t("valuePage.thValue")}</th></tr></thead><tbody>${page.map(x=>`<tr>
            <td><span class="nmline"><span class="setlink" data-card="${x.set}|${x.number}"
-             data-pop="${x.img||""}">${cardName(x)}</span> <span class="varlbl">${
-               x.foil?t("setPage.thFoil"):t("cardPage.regular")}</span></span></td>
+             data-pop="${x.img||""}">${cardName(x)}</span>${valueVarLbl(x)?
+               ` <span class="varlbl">${valueVarLbl(x)}</span>`:""}</span></td>
            <td><span class="setlink" data-set="${x.set}">${x.setName}</span></td>
            <td class="num">${x.qty}</td>
            <td class="num">${money(x.price)}</td>
@@ -7669,7 +7704,12 @@ async function cardPage(sc,nr){
   <div class="cardpage">
     <div>${d.img?`<div class="artwrap">
       <img class="art" id="cardArt" src="${d.img}" alt="${cardName(d)}">
-      ${d.imgBack?`<button id="cardFlip" class="flipbtn" title="${t('cardPage.flip')}">🔄</button>`:""}
+      ${d.imgBack?`<button id="cardFlip" class="flipbtn" title="${t('cardPage.flip')}">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2"
+          stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+          <path d="M20 11a8 8 0 0 0-14.9-3.5"></path><polyline points="5 3 5 8 10 8"></polyline>
+          <path d="M4 13a8 8 0 0 0 14.9 3.5"></path><polyline points="20 21 20 16 15 16"></polyline>
+        </svg></button>`:""}
       </div>`
       :`<div class="rules" style="text-align:center">${t("cardPage.noImage")}</div>`}
       ${d.cardmarket&&d.eur?`<a class="buybtn" href="${d.cardmarket}" target="_blank"
