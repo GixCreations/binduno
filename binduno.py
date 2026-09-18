@@ -16,8 +16,8 @@ import urllib.request
 from datetime import datetime, timedelta
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-VERSION = "6.78"
-SCHEMA = 19
+VERSION = "6.79"
+SCHEMA = 20
 
 
 def _env(name, *legacy):
@@ -352,7 +352,7 @@ def init(c):
           set_code TEXT, number TEXT, num_int INT, name TEXT, type_line TEXT,
           rarity TEXT, eur REAL, eur_foil REAL, booster INT, digital INT,
           extra INT DEFAULT 0, mana TEXT, cmc REAL, oracle TEXT, artist TEXT,
-          colors TEXT, pt TEXT, img TEXT, cm_uri TEXT, scry_uri TEXT, legal TEXT,
+          colors TEXT, pt TEXT, img TEXT, img_back TEXT, cm_uri TEXT, scry_uri TEXT, legal TEXT,
           variant TEXT, finishes TEXT, ver INT DEFAULT 1, extras_idx INT DEFAULT 0,
           cm_suffix TEXT, cm_ver INT DEFAULT 1,
           cm_product_id INT DEFAULT 0, cm_expansion TEXT,
@@ -1206,6 +1206,15 @@ def refresh_cards(bulk_type="all_cards"):
                 faces = k.get("card_faces") or []
                 imgs = k.get("image_uris") or (faces[0].get("image_uris") if faces else None) or {}
                 img = imgs.get("normal") or imgs.get("large") or imgs.get("small") or ""
+                # Only transform/modal-DFC/reversible cards carry a second
+                # image here - split/adventure/fuse cards also have two
+                # `card_faces` but both halves live on the ONE card-level
+                # image_uris above, so faces[1] has no image_uris of its own
+                # and this stays empty for them (no flip button - there's
+                # nothing else to show).
+                back_imgs = faces[1].get("image_uris") if len(faces) > 1 else None
+                img_back = (back_imgs.get("normal") or back_imgs.get("large")
+                            or back_imgs.get("small") or "") if back_imgs else ""
                 if faces and not k.get("oracle_text"):
                     oracle = "\n\n//\n\n".join(f.get("oracle_text", "") for f in faces)
                     mana = " // ".join(f.get("mana_cost", "") for f in faces if f.get("mana_cost"))
@@ -1256,7 +1265,7 @@ def refresh_cards(bulk_type="all_cards"):
                              1 if (k.get("digital") or s[6]) else 0,
                              extra, mana, k.get("cmc") or 0, oracle,
                              k.get("artist", "") or "",
-                             "".join(k.get("colors") or []), pt, img,
+                             "".join(k.get("colors") or []), pt, img, img_back,
                              (k.get("purchase_uris") or {}).get("cardmarket", "") or "",
                              k.get("scryfall_uri", "") or "", legal,
                              variant, ",".join(fin)))
@@ -1352,7 +1361,7 @@ def refresh_cards(bulk_type="all_cards"):
         # and store the expansion name so want lines resolve.
         sl_codes = {code for code, s in sets.items()
                     if (s[1] or "").lower().startswith("secret lair")}
-        cm_pids = [int(m.group(1)) if (m := _CM_PID_RE.search(r[18] or "")) else 0
+        cm_pids = [int(m.group(1)) if (m := _CM_PID_RE.search(r[19] or "")) else 0
                    for r in rows]
         want = {cm_pids[i] for i, r in enumerate(rows)
                 if r[0] in sl_codes and cm_pids[i]}
@@ -1402,7 +1411,7 @@ def refresh_cards(bulk_type="all_cards"):
         c.execute("DELETE FROM sets"); c.execute("DELETE FROM cards")
         c.executemany("INSERT INTO sets VALUES(?,?,?,?,?,?,?,?,?)",
                       [tuple(v) for v in sets.values()])
-        c.executemany("INSERT OR REPLACE INTO cards VALUES(" + ",".join("?"*32) + ")", rows)
+        c.executemany("INSERT OR REPLACE INTO cards VALUES(" + ",".join("?"*33) + ")", rows)
         c.commit()
         meta_set(c, "cards_updated", datetime.now().isoformat(timespec="seconds"))
         log(c, "Card data", f"{len(rows):,} printings from {len(sets):,} sets downloaded")
@@ -3476,7 +3485,7 @@ def card_detail(c, code, number):
             "nameDe": r["name_de"] or "", "typeDe": r["type_de"] or "", "oracleDe": r["oracle_de"] or "",
             "type": r["type_line"], "rarity": r["rarity"], "mana": r["mana"],
             "cmc": r["cmc"], "oracle": r["oracle"], "artist": r["artist"],
-            "pt": r["pt"], "img": r["img"], "colors": r["colors"],
+            "pt": r["pt"], "img": r["img"], "imgBack": r["img_back"] or "", "colors": r["colors"],
             "eur": round(r["eur"] or 0, 2), "foil": round(r["eur_foil"] or 0, 2),
             "variant": r["variant"] or "", "finishes": r["finishes"] or "",
             "ver": r["ver"] or 1, "extras": r["extras_idx"] or 0, "cmSuffix": r["cm_suffix"] or "", "cmVer": r["cm_ver"] if r["cm_ver"] is not None else 1, "cmExpansion": r["cm_expansion"] or "", "cardmarket": r["cm_uri"], "scryfall": r["scry_uri"],
@@ -4350,9 +4359,22 @@ PAGE = r"""<!DOCTYPE html><html lang="en"><head><meta charset="utf-8">
  --nav-bg:rgba(15,19,25,.94)}
 :root[data-theme="light"]{
  --bg:#f5f3ee;--panel:#ffffff;--panel2:#f0ede6;--line:#d9d3c5;--text:#211d16;
- --muted:#6b6558;--dim:#948d7d;--track:#cdc6b4;
- --w:#8a7a3a;--u:#2b6ea8;--b:#6b5a92;--r:#a83f2e;--g:#3d7a4f;
- --gold:#93690f;--mythic:#b8460f;--ok:#3d7a4f;--good-bg:#e3efe4;
+ --muted:#6b6558;--dim:#7a705c;--track:#cdc6b4;
+ --w:#7e6d25;--u:#2b6ea8;--b:#6b5a92;--r:#a83f2e;--g:#3d7a4f;
+ /* The dark theme's --gold (#d4a629) only reads as "gold" because it's a
+    bright color on a dark background - the same hue dark enough to pass
+    4.5:1 text contrast on a white/cream page is, by definition, some shade
+    of brown (that's literally what "brown" is: a low-lightness orange/
+    yellow). #93690f technically passed contrast but its low saturation at
+    that lightness made it look flat and muddy rather than "gold" at all.
+    #8a6000 keeps saturation maxed instead of fading it out, and sits at
+    hue 42° (vs. --mythic's 20°) so the two don't get confused - still
+    reads warm/rich rather than muddy, and clears AA on both --panel (5.59:1)
+    and --bg (5.04:1). --dim and --w were re-picked the same way: the old
+    values (measured, not assumed) were below 4.5:1 - #948d7d landed at
+    3.3/2.98, #8a7a3a at 4.26/3.84 - so both failed exactly where they're
+    used, as small secondary text. */
+ --gold:#8a6000;--mythic:#b8460f;--ok:#3d7a4f;--good-bg:#e3efe4;
  --bad:#a83f2e;--bad-bg:#f7e2df;
  --row-have-bg:rgba(55,120,75,.28);--row-miss-bg:rgba(178,55,40,.20);
  --kind-normal-bd:#a9c3db;--kind-normal-fg:#2b6ea8;
@@ -4430,6 +4452,19 @@ h2{font-family:var(--serif);font-weight:400;font-size:20px;margin:34px 0 12px}
 :root[data-theme="light"] .seticon{filter:invert(30%) sepia(8%) saturate(180%)}
 .li img{width:19px;height:19px}
 .li .nm{flex:1;font-size:14px}
+/* group-header rows (Settings > Completion's collapsible category rows)
+   wrap their ▾/▸ arrow and name in one unit so the two can't be split
+   between lines on mobile (see the media query below) - this keeps the
+   pair acting exactly like the plain .nm they replace on every other
+   width: same growth, so the count text and buttons after them still land
+   at the row's far right like before. */
+.li .grouphead{display:flex;align-items:center;gap:6px;flex:1;min-width:0}
+.li .grouphead .nm{flex:0 1 auto;min-width:0}
+/* "Closest to completion" (row()): its owned/total count and percentage
+   are two separate .mt spans, same trick as .grouphead above - wrapped
+   together so a mobile line-wrap can't strand the percentage alone on its
+   own line below the count it belongs with. */
+.li .statgroup{display:flex;gap:11px;flex:0 0 auto}
 .li .mt{font-family:var(--mono);font-size:12px;color:var(--muted)}
 .bar{flex:1 1 92px;height:6px;background:var(--track);border-radius:4px;overflow:hidden}
 /* "Closest to completion" rows only - match the thicker bars used for "By rarity"
@@ -4746,10 +4781,10 @@ textarea{width:100%;height:130px;background:var(--panel2);color:var(--text);bord
 .cc .tilesel input{display:block;width:15px;height:15px;margin:0;
   accent-color:var(--gold);cursor:pointer}
 .cc .cqty{margin:1px 0}
-.cc .owned{display:inline-block;background:var(--panel2);
+.cc .owned{display:inline-block;background:var(--panel2);white-space:nowrap;
   border:1px solid var(--ok);color:var(--ok);border-radius:11px;padding:1px 8px;
   font-family:var(--mono);font-size:11px}
-.cc .miss{display:inline-block;background:var(--panel2);
+.cc .miss{display:inline-block;background:var(--panel2);white-space:nowrap;
   border:1px solid var(--line);color:var(--muted);border-radius:11px;padding:1px 8px;
   font-family:var(--mono);font-size:11px}
 /* .meta grows to fill whatever extra height the grid gives this tile (cards
@@ -4823,6 +4858,15 @@ table.setcards td.quickadd button{padding:3px 9px;font-size:12px}
 .catgroup input,.catlbl input{width:auto}
 .cardpage{display:grid;grid-template-columns:340px 1fr;gap:28px;align-items:start}
 .cardpage .art{width:100%;border-radius:14px;border:1px solid var(--line);display:block}
+.cardpage .artwrap{position:relative}
+/* every real card frame prints its own expansion symbol somewhere around
+   the vertical middle or lower half - top-right always clears it, on any
+   frame era, without needing to know the exact layout. */
+.cardpage .flipbtn{position:absolute;top:10px;right:10px;width:34px;height:34px;
+  border-radius:50%;background:rgba(15,19,25,.75);border:1px solid var(--line);
+  color:var(--text);font-size:16px;line-height:1;cursor:pointer;
+  display:flex;align-items:center;justify-content:center}
+.cardpage .flipbtn:hover{border-color:var(--gold);background:rgba(15,19,25,.9)}
 .cardpage h1{font-size:27px;margin:0}
 .mana{font-family:var(--mono);color:var(--muted);font-size:15px;
   display:flex;align-items:center;gap:6px;flex-wrap:wrap}
@@ -4915,7 +4959,23 @@ tr.child2 td:first-child::before{left:36px}
   #navQuit{margin-left:auto!important}
   .li{flex-wrap:wrap;padding:10px 13px}
   .li .nm{flex:1 1 100%}
-  .li .bar{flex:1 1 60px}
+  /* .grouphead takes the same full-width-own-line treatment .nm gets above
+     (so it can still wrap below the row's buttons/count text on a narrow
+     phone), but as ONE unit - the arrow stays glued to the name inside it
+     instead of the two splitting across lines the way a bare .nm would
+     split from a preceding sibling .mt arrow. flex-basis:0 from the
+     desktop "flex:1" rule would otherwise starve this of width once the
+     buttons/count text claim their own room first; 100% sidesteps that by
+     not sharing a line with them at all. */
+  .li .grouphead{flex:1 1 100%}
+  .li .grouphead .nm{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+  /* "Closest to completion" (the only .li with a .bar) - dropped on mobile
+     entirely rather than shrunk further: at phone width it was already
+     squeezed down to a sliver next to the name, and competing with it for
+     room on that line is what pushed "148/149 · 99.3%" wrapping in a way
+     that could split the two apart. The row's own name/number/% columns
+     carry the same information already. */
+  .li .bar{display:none}
   .li .mt{flex:0 0 auto!important}
   .wrap{padding:16px 13px 64px}
   footer{padding:14px 13px 22px}
@@ -4935,8 +4995,16 @@ tr.child2 td:first-child::before{left:36px}
   #watchlistOut td:nth-child(1){white-space:normal;overflow-wrap:normal;word-break:normal}
   #watchlistOut td:nth-child(2){white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:30vw}
   #watchlistOut td:nth-child(2) span{overflow-wrap:normal}
-  #watchlistOut td:nth-child(6),#watchlistOut th:nth-child(6){width:auto;white-space:nowrap}
-  #watchlistOut td:nth-child(9),#watchlistOut th:nth-child(9){width:auto;white-space:nowrap}
+  /* NOT white-space:nowrap here (it used to be, before the Foil Change
+     column existed) - the Change cell's own .wlchg div already wraps
+     itself at a fixed 150px (see its CSS, next to .wltable's column
+     widths); forcing nowrap on the <td> around it just made that inherited
+     nowrap override .wlchg's own wrapping, so the text spilled out past
+     150px with nothing to stop it and ran straight into the Foil price
+     column (and past it, into the remove button) instead of staying
+     inside its own cell. */
+  #watchlistOut td:nth-child(6),#watchlistOut th:nth-child(6){width:auto}
+  #watchlistOut td:nth-child(9),#watchlistOut th:nth-child(9){width:auto}
   .tscroll>table{min-width:480px}
   #view{overflow-x:hidden}
   table{font-size:13px}
@@ -4964,9 +5032,14 @@ tr.child2 td:first-child::before{left:36px}
   .radio{flex-direction:column;gap:8px}
   .helpnav{gap:6px}
   .helpnav button,.seg button{padding:7px 10px}
-  /* segmented tab strips wrap instead of squashing their labels */
+  /* segmented tab strips wrap instead of squashing their labels. Once
+     wrapped, each button is alone on its own row - flex-grow lets it fill
+     that row instead of hugging its own text while the sibling button
+     (whichever one wrapped down first, usually the longer label) leaves an
+     ugly gap next to it. Compact toggles like Grid/Table never wrap in the
+     first place, so they're unaffected - nothing to grow into there. */
   .seg{flex-wrap:wrap}
-  .seg button{white-space:nowrap}
+  .seg button{white-space:nowrap;flex:1 1 auto}
   /* the 5-way Settings tab strip: one scrollable row beats an ugly wrap */
   .segtabs{flex-wrap:nowrap;overflow-x:auto;max-width:100%;scrollbar-width:none}
   .segtabs::-webkit-scrollbar{display:none}
@@ -5433,6 +5506,7 @@ en:{
   "buyPage.cardsCount":"{n} cards","buyPage.cardsOnlyTip":"Cardmarket trend prices, no shipping.",
   "buyPage.cardsOnlyTipTitle":"Cards only","buyPage.breadcrumbBuyMissing":"Buy missing",
   "cardPage.back":"← Back","cardPage.noImage":"No image available",
+  "cardPage.flip":"Flip card",
   "cardPage.buyOnCardmarket":"Buy on Cardmarket · {price}","cardPage.buyFoil":"Buy foil · {price}",
   "cardPage.viewOnScryfall":"View on Scryfall","cardPage.regular":"Regular",
   "cardPage.copiesOwned":"Copies owned","cardPage.yourCollection":"Your collection",
@@ -5921,6 +5995,7 @@ de:{
   "buyPage.cardsCount":"{n} Karten","buyPage.cardsOnlyTip":"Cardmarket-Trendpreise, kein Versand.",
   "buyPage.cardsOnlyTipTitle":"Nur Karten","buyPage.breadcrumbBuyMissing":"Fehlende kaufen",
   "cardPage.back":"← Zurück","cardPage.noImage":"Kein Bild verfügbar",
+  "cardPage.flip":"Karte umdrehen",
   "cardPage.buyOnCardmarket":"Auf Cardmarket kaufen · {price}","cardPage.buyFoil":"Foil kaufen · {price}",
   "cardPage.viewOnScryfall":"Auf Scryfall ansehen","cardPage.regular":"Normal",
   "cardPage.copiesOwned":"Kopien in Besitz","cardPage.yourCollection":"Deine Sammlung",
@@ -6555,8 +6630,8 @@ const row=(x,i)=>`<div class="li" data-code="${x.code}">
   <span class="nm" style="flex:0 1 180px;white-space:nowrap;overflow:hidden;
     text-overflow:ellipsis" title="${x.name}">${x.name}</span>
   <span class="bar"><span style="width:${x.pct*100}%"></span></span>
-  <span class="mt" style="flex:0 0 72px;text-align:right">${x.owned}/${x.total}</span>
-  <span class="mt" style="color:var(--gold);flex:0 0 58px;text-align:right">${pct(x.pct)}</span>${
+  <span class="statgroup"><span class="mt" style="flex:0 0 72px;text-align:right">${x.owned}/${x.total}</span>
+  <span class="mt" style="color:var(--gold);flex:0 0 58px;text-align:right">${pct(x.pct)}</span></span>${
     SHOW_COSTS?`<span class="mt" style="flex:0 0 80px;text-align:right" title="${t("home.costToFinish")}">${
       money(x.totalCost)}</span>`:""}</div>`;
 function bindRows(){document.querySelectorAll(".li[data-code]").forEach(e=>
@@ -6647,7 +6722,7 @@ async function valuePage(){
         <span class="pill">${t("buyPage.cardsCount",{n:num(total)})}</span></div>
       ${VH_TOP_VIEW==="grid"
         ? `<div class="cgrid">${page.map(valueTile).join("")}</div>`
-        : `<table><thead><tr><th>${t("missing.thCard")}</th><th>${t("cardPage.set")}</th>
+        : `<div class="tscroll"><table><thead><tr><th>${t("missing.thCard")}</th><th>${t("cardPage.set")}</th>
            <th class="num">${t("browse.sortCopiesOwned")}</th><th class="num">${t("missing.thPrice")}</th>
            <th class="num">${t("valuePage.thValue")}</th></tr></thead><tbody>${page.map(x=>`<tr>
            <td><span class="nmline"><span class="setlink" data-card="${x.set}|${x.number}"
@@ -6657,7 +6732,7 @@ async function valuePage(){
            <td class="num">${x.qty}</td>
            <td class="num">${money(x.price)}</td>
            <td class="num" style="color:var(--gold)">${money(x.value)}</td></tr>`).join("")}
-           </tbody></table>`}
+           </tbody></table></div>`}
       <div class="pager">${pages>1?`<button ${VH_TOP_PAGE<=1?"disabled":""} id="vhTopPv">${t("collection.previous")}</button>
         <span>${t("missing.pagerPageOfN",{p:VH_TOP_PAGE,n:num(pages)})}</span>
         <button ${VH_TOP_PAGE>=pages?"disabled":""} id="vhTopNx">${t("collection.next")}</button>`:""}</div>`;
@@ -6698,12 +6773,12 @@ async function valuePage(){
         x.changeEur>0?"+":""}${money(x.changeEur)} (${x.changePct>0?"+":""}${x.changePct.toFixed(1)} %)</td></tr>`;
     out.innerHTML=`<h2 style="margin-top:24px">${t("valuePage.movers")}</h2>
       <p class="sub" style="max-width:640px">${t("valuePage.moversDesc")}</p>
-      <div class="cards" style="grid-template-columns:1fr 1fr;align-items:start">
+      <div class="rarcols" style="align-items:start">
         <div><h3 style="margin:0 0 6px;font-size:14px;color:var(--ok)">${t("valuePage.gainers")}</h3>
-          ${gainers.length?`<table class="movtable"><tbody>${gainers.map(row).join("")}</tbody></table>`
+          ${gainers.length?`<div class="tscroll"><table class="movtable"><tbody>${gainers.map(row).join("")}</tbody></table></div>`
             :`<p class="sub">${t("valuePage.none")}</p>`}</div>
         <div><h3 style="margin:0 0 6px;font-size:14px;color:var(--bad)">${t("valuePage.losers")}</h3>
-          ${losers.length?`<table class="movtable"><tbody>${losers.map(row).join("")}</tbody></table>`
+          ${losers.length?`<div class="tscroll"><table class="movtable"><tbody>${losers.map(row).join("")}</tbody></table></div>`
             :`<p class="sub">${t("valuePage.none")}</p>`}</div>
       </div>`;
     bindTiles(out);
@@ -7327,7 +7402,14 @@ const VAR=c=>(c.variant?`<span class="varlbl">${c.variant}</span>`:"")+
 const cardTile=(c,opts)=>{
   opts=opts||{};
   const qn=c.qtyNormal||0,qf=c.qtyFoil||0,qt=qn+qf;
-  const ownLabel=qt?[qn?`${t("cardPage.regular")} ${qn}×`:"",qf?`${t("setPage.thFoil")} ${qf}×`:""].filter(Boolean).join(" · "):"0";
+  // "Regular" told you nothing a bare copy count didn't already - dropped.
+  // In its place: which version you own, but only when the name actually
+  // has more than one printing in this set (c.ver>1) - a single printing
+  // needs no label at all, same rule the (V.n) wantlist badge already
+  // follows elsewhere. Foil is always worth flagging on its own.
+  const regTxt=(qn&&c.ver>1)?`V.${c.ver} ${qn}×`:"";
+  const foilTxt=qf?`${t("setPage.thFoil")} ${qf}×`:"";
+  const ownLabel=[regTxt,foilTxt].filter(Boolean).join(" · ");
   return `<div class="cc" data-card="${c.set}|${c.number}">
   <div class="imgwrap">${c.img?`<img class="face" src="${c.img}" alt="${cardName(c)}" loading="lazy">`
     :`<div class="noimg">${cardName(c)}</div>`}
@@ -7336,7 +7418,7 @@ const cardTile=(c,opts)=>{
   <div class="meta"><div class="cn">${opts.select?`<label class="tilesel" onclick="event.stopPropagation()">
       <input type="checkbox" class="cardsel" data-selkey="${c.set}|${c.number}" ${opts.selected?"checked":""}></label>`:""}
     <span class="cntxt">${cardName(c)}</span></div>
-    <div class="cqty"><span class="${qt?"owned":"miss"}">${ownLabel}</span></div>
+    <div class="cqty">${qt?(ownLabel?`<span class="owned">${ownLabel}</span>`:""):`<span class="miss">0</span>`}</div>
     ${c.variant||c.extras?`<div class="vrow">${VAR(c)}</div>`:""}
     ${c.setName?`<div class="cset">${c.setName} · #${c.number}</div>`:""}
     <div class="cp">${c.eur?money(c.eur):(c.foil?"<em>foil</em> "+money(c.foil):"—")}${
@@ -7585,7 +7667,10 @@ async function cardPage(sc,nr){
     <button id="cardWatch" class="${d.inWatchlist?"on":""}">${
       d.inWatchlist?t("cardPage.inWatchlist"):t("cardPage.addToWatchlist")}</button></div>
   <div class="cardpage">
-    <div>${d.img?`<img class="art" src="${d.img}" alt="${cardName(d)}">`
+    <div>${d.img?`<div class="artwrap">
+      <img class="art" id="cardArt" src="${d.img}" alt="${cardName(d)}">
+      ${d.imgBack?`<button id="cardFlip" class="flipbtn" title="${t('cardPage.flip')}">🔄</button>`:""}
+      </div>`
       :`<div class="rules" style="text-align:center">${t("cardPage.noImage")}</div>`}
       ${d.cardmarket&&d.eur?`<a class="buybtn" href="${d.cardmarket}" target="_blank"
          rel="noopener">${t("cardPage.buyOnCardmarket",{price:money(d.eur)})}</a>`:""}
@@ -7738,6 +7823,13 @@ async function cardPage(sc,nr){
     await cartPost({action:"add",set:d.set,number:d.number,qty:1});
     $("#cardCart").textContent=t("cardPage.added");
     setTimeout(()=>$("#cardCart").textContent=t("common.addToCart"),1500);};
+  if($("#cardFlip")){
+    let showingBack=false;
+    $("#cardFlip").onclick=()=>{
+      showingBack=!showingBack;
+      $("#cardArt").src=showingBack?d.imgBack:d.img;
+    };
+  }
   $("#cardWatch").onclick=async()=>{
     const action=d.inWatchlist?"remove":"add";
     const r=await fetch("/api/watchlist",{method:"POST",
@@ -8590,7 +8682,7 @@ function contactPane(){
   const repo=(window.HAS&&window.HAS.githubRepo)||"GixCreations/binduno";
   const ghUrl="https://github.com/"+repo;
   $("#sub").innerHTML=`<h2 style="margin-top:0">${t("contact.title")}</h2>
-  <p class="sub">${t("contact.body")} <a href="mailto:github@strickland.one">github@strickland.one</a>.</p>
+  <p class="sub">${t("contact.body")} <a href="mailto:support@binduno.com">support@binduno.com</a>.</p>
   <p class="sub">${t("contact.ghLine")} <a href="${ghUrl}" target="_blank" rel="noopener">${ghUrl}</a></p>`;
 }
 function manage(){
@@ -8698,7 +8790,7 @@ function cmPane(sel){
     </ol>
     <p class="sub" style="margin:8px 0 0">${t("cm.bmNote")}</p>
   </div>
-  <p class="sub">${t("cm.legend")}</p>
+  <p class="sub" style="margin-top:14px">${t("cm.legend")}</p>
   <div class="msg" style="max-width:700px">${t("cm.toggleNote")}</div>
   <p class="sub" style="max-width:700px;margin-top:12px">${t("cm.updateNote")}</p>`;
   $("#cmBrowser").value=(br==="bookmarklet"?"chrome":br);
@@ -9010,8 +9102,8 @@ function setsPane(sel){
       const rows=open?(matches||g):[];
       return `<div class="list" style="margin-bottom:10px">
         <div class="li" style="background:var(--panel2);cursor:pointer" data-grptoggle="${k}">
-          <span class="mt" style="flex:0 0 14px">${open?"▾":"▸"}</span>
-          <span class="nm"><b>${kindFlip(k)}</b></span><span class="mt">${t("manageSets.ofCounted",{on,total:g.length})}</span>
+          <span class="grouphead"><span class="mt" style="flex:0 0 14px">${open?"▾":"▸"}</span>
+          <span class="nm"><b>${kindFlip(k)}</b></span></span><span class="mt">${t("manageSets.ofCounted",{on,total:g.length})}</span>
           <button data-grp="${k}" data-m="exclude">${t("manageSets.excludeAll")}</button>
           <button data-grp="${k}" data-m="include">${t("manageSets.includeAll")}</button></div>
         ${rows.map(s=>`<div class="li srow">
@@ -9212,19 +9304,23 @@ function helpPane(sel){
          foil price; some cards only ever have a foil price.</li>
      <li>Cards with no Cardmarket price at all count as zero. Filter for them under
          Collection → View Cards.</li></ul>
-     <h3>How far the price history goes back</h3>
-     <p>The graph on every card page (and the watchlist sparklines) is built from two
+     <h3>Price history range</h3>
+     <p>The graph on every card page (and the watchlist sparklines) is built from three
         sources:</p>
-     <ul><li>Binduno's <b>own daily log</b> — every time the card data is refreshed it stores
-         that day's Cardmarket price for anything that moved. This history only goes back to
-         when you first started running Binduno, and grows by one day every day it runs.</li>
-     <li>A <b>one‑off backfill from MTGJSON</b> when Binduno is first set up (or after a long
-         gap). MTGJSON's public price file only contains roughly the <b>last 90 days</b>, so
-         that is as far back as the backfill can reach — nothing older exists to download.</li></ul>
-     <p>So right after a fresh install, <i>1 Y</i> and <i>Max</i> show the same ~90 days as
-        <i>30 D</i>. Leave Binduno running (or open it regularly) and the history fills in on
-        its own — after a year, <i>1 Y</i> really is a year. Re‑running the backfill doesn't
-        help; it's always the same 90 days.</p>`,
+     <ul><li>A <b>one‑off backfill from Binduno's own price server</b> when Binduno is first set
+         up (or after a long gap) — it has been logging every card's price daily since it went
+         live, so it usually reaches back <b>well past 90 days</b>, growing a little further
+         with every day that passes.</li>
+     <li>If that server isn't reachable, the same backfill instead pulls from <b>MTGJSON</b>'s
+         public price file, which only holds the <b>last 90 days</b> — nothing older exists
+         there to download.</li>
+     <li>Binduno's <b>own daily log</b> then takes over — every time the card data is refreshed
+         it stores that day's Cardmarket price for anything that moved, growing by one day every
+         day it runs.</li></ul>
+     <p>So right after a fresh install, <i>1 Y</i> and <i>Max</i> show only as much history as
+        whichever backfill source reached. Leave Binduno running (or open it regularly) and the
+        history fills in on its own from there — after a year, <i>1 Y</i> really is a year.
+        Re‑running the backfill doesn't help; it always returns the same source's data.</p>`,
    shipping:`<h3>How shipping is estimated</h3>
      <p>Cardmarket requires tracked shipping once an order exceeds 25 €; below that, sellers
         can use a cheaper untracked letter. Rates depend heavily on the seller's country —
@@ -9338,20 +9434,24 @@ function helpPane(sel){
          Foil-Preis bewertet; manche Karten haben ausschließlich einen Foil-Preis.</li>
      <li>Karten ganz ohne Cardmarket-Preis zählen als null. Filtere danach unter
          Sammlung → Karten anzeigen.</li></ul>
-     <h3>Wie weit der Preisverlauf zurückreicht</h3>
-     <p>Der Graph auf jeder Kartenseite (und die Watchlist-Sparklines) speist sich aus zwei
+     <h3>Reichweite des Preisverlaufs</h3>
+     <p>Der Graph auf jeder Kartenseite (und die Watchlist-Sparklines) speist sich aus drei
         Quellen:</p>
-     <ul><li>Bindunos <b>eigenes tägliches Log</b> — bei jeder Kartendaten-Aktualisierung wird
-         der Cardmarket-Preis des Tages für alles gespeichert, das sich bewegt hat. Diese
-         Historie reicht nur bis zu dem Tag zurück, an dem du Binduno das erste Mal gestartet
-         hast, und wächst pro Lauftag um einen Tag.</li>
-     <li>Ein <b>einmaliger Backfill von MTGJSON</b> beim ersten Einrichten (oder nach längerer
-         Pause). MTGJSONs öffentliche Preisdatei enthält nur etwa die <b>letzten 90 Tage</b> —
-         weiter zurück gibt es nichts zum Herunterladen.</li></ul>
-     <p>Direkt nach einer frischen Installation zeigen <i>1 J</i> und <i>Max</i> daher dieselben
-        ~90 Tage wie <i>30 T</i>. Lass Binduno laufen (oder öffne es regelmäßig), dann füllt
-        sich die Historie von selbst — nach einem Jahr ist <i>1 J</i> wirklich ein Jahr. Den
-        Backfill erneut auszuführen bringt nichts; es sind immer dieselben 90 Tage.</p>`,
+     <ul><li>Ein <b>einmaliger Backfill von Bindunos eigenem Preisserver</b> beim ersten
+         Einrichten (oder nach längerer Pause) — der loggt täglich die Preise jeder Karte,
+         seit er online ist, und reicht daher meist <b>deutlich weiter als 90 Tage</b> zurück,
+         mit jedem Tag ein Stück mehr.</li>
+     <li>Ist dieser Server nicht erreichbar, greift derselbe Backfill stattdessen auf
+         <b>MTGJSON</b> zurück, dessen öffentliche Preisdatei nur die <b>letzten 90 Tage</b>
+         enthält — weiter zurück gibt es dort nichts zum Herunterladen.</li>
+     <li>Danach übernimmt Bindunos <b>eigenes tägliches Log</b> — bei jeder
+         Kartendaten-Aktualisierung wird der Cardmarket-Preis des Tages für alles gespeichert,
+         das sich bewegt hat, und wächst pro Lauftag um einen Tag.</li></ul>
+     <p>Direkt nach einer frischen Installation zeigen <i>1 J</i> und <i>Max</i> daher nur so
+        viel Historie, wie die jeweilige Backfill-Quelle liefern konnte. Lass Binduno laufen
+        (oder öffne es regelmäßig), dann füllt sich die Historie von dort aus von selbst —
+        nach einem Jahr ist <i>1 J</i> wirklich ein Jahr. Den Backfill erneut auszuführen bringt
+        nichts; er liefert immer dieselben Daten derselben Quelle.</p>`,
    shipping:`<h3>Wie der Versand geschätzt wird</h3>
      <p>Cardmarket verlangt getrackten Versand, sobald eine Bestellung 25 € übersteigt; darunter
         können Verkäufer einen günstigeren ungetrackten Brief nutzen. Die Tarife hängen stark
