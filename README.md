@@ -25,8 +25,9 @@ One Python file, standard library only. No account, no cloud, nothing to sign up
   - [The collection dashboard](#the-collection-dashboard)
   - [Set completion, your rules](#set-completion-your-rules)
   - [Wants-Lists for Cardmarket](#wants-lists-for-cardmarket)
-  - [From a deck list](#from-a-deck-list)
+  - [Easily build your dream deck](#easily-build-your-dream-deck)
   - [Price history and watchlist](#price-history-and-watchlist)
+  - [Value over time](#value-over-time)
   - [The Cardmarket browser helper](#the-cardmarket-browser-helper)
   - [Everything else](#everything-else)
 - [Install](#install)
@@ -80,7 +81,7 @@ It runs a tiny local web server and opens in your browser. That's the whole app.
 - "Buy missing" per set, or collect cards across sets in the **Wants‑List Cart**
 - **Secret Lair** works too — Cardmarket splits it into dozens of per‑drop expansions, so Binduno resolves each Secret Lair card to its exact drop ("Secret Lair Drop Series: Marvel Superdrop", …) via Cardmarket's public product list and emits the matching want‑list line.
 
-### From a deck list
+### Easily build your dream deck
 
 Paste a deck list from **Moxfield, Archidekt, MTG Arena, MTGO, TappedOut, Deckstats** or plain text and Binduno turns it into a Wants‑List:
 
@@ -101,6 +102,14 @@ Paste a deck list from **Moxfield, Archidekt, MTG Arena, MTGO, TappedOut, Deckst
 <p align="center"><img src="docs/watchlist.jpg" width="880" alt="Price watchlist with a 7/30-day/1-year/Max range switch"></p>
 
 > Right after a fresh install the history reaches back further than 90 days if the project's own price server is reachable (it's been logging daily since it went up), or about 90 days from MTGJSON's public price file otherwise. Binduno then logs prices itself every day it runs, so the history fills in on its own — after a year, *1 Y* really is a year.
+
+### Value over time
+
+- A **performance graph** of your whole collection's Cardmarket trend value, not just today's snapshot — your collection vs. an equal‑weighted market index of the same printings, so you can tell price movement from "I bought more stuff"
+- **Movers**: your biggest gainers and losers in the selected time range, by the card's own price
+- **Most valuable cards**, ranked by price per card regardless of how many copies you own — grid or table view, same sorting and paging as everywhere else
+
+<p align="center"><img src="docs/value.jpg" width="880" alt="Value over time - performance graph, movers and most valuable cards"></p>
 
 ### The Cardmarket browser helper
 
