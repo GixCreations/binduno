@@ -16,7 +16,7 @@ import urllib.request
 from datetime import datetime, timedelta
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-VERSION = "6.77"
+VERSION = "6.78"
 SCHEMA = 19
 
 
@@ -6234,7 +6234,7 @@ function home(){
 
   <h2>${t("home.closestToCompletion")}</h2>
   ${s.nearest.length?(()=>{
-    const items=s.nearest.map(x=>row(x));
+    const items=s.nearest.map((x,i)=>row(x,i+1));
     const half=Math.ceil(items.length/2);
     return `<div class="rarcols">
       <div class="list">${items.slice(0,half).join("")}</div>
@@ -6549,7 +6549,9 @@ function bindPhRange(sel,cb){
   const box=$(sel);if(!box)return;
   box.querySelectorAll("[data-phr]").forEach(b=>b.onclick=()=>cb(b.dataset.phr));
 }
-const row=x=>`<div class="li" data-code="${x.code}">${icon(x,19)}
+const row=(x,i)=>`<div class="li" data-code="${x.code}">
+  <span class="mt" style="flex:0 0 20px;text-align:right;color:var(--dim)">${i}.</span>
+  ${icon(x,19)}
   <span class="nm" style="flex:0 1 180px;white-space:nowrap;overflow:hidden;
     text-overflow:ellipsis" title="${x.name}">${x.name}</span>
   <span class="bar"><span style="width:${x.pct*100}%"></span></span>
@@ -8588,7 +8590,7 @@ function contactPane(){
   const repo=(window.HAS&&window.HAS.githubRepo)||"GixCreations/binduno";
   const ghUrl="https://github.com/"+repo;
   $("#sub").innerHTML=`<h2 style="margin-top:0">${t("contact.title")}</h2>
-  <p class="sub">${t("contact.body")} <a href="mailto:gixcreations@strickland.one">gixcreations@strickland.one</a>.</p>
+  <p class="sub">${t("contact.body")} <a href="mailto:github@strickland.one">github@strickland.one</a>.</p>
   <p class="sub">${t("contact.ghLine")} <a href="${ghUrl}" target="_blank" rel="noopener">${ghUrl}</a></p>`;
 }
 function manage(){
