@@ -16,7 +16,7 @@ import urllib.request
 from datetime import datetime, timedelta
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-VERSION = "6.74"
+VERSION = "6.75"
 SCHEMA = 19
 
 
@@ -1713,9 +1713,15 @@ def price_history_series(c, set_code, number, days):
     lo = min(p["eur"] for p in series)
     hi = max(p["eur"] for p in series)
     first, last = series[0]["eur"], series[-1]["eur"]
+    foil_lo = min(p["foil"] for p in series)
+    foil_hi = max(p["foil"] for p in series)
+    foil_first, foil_last = series[0]["foil"], series[-1]["foil"]
     return {"eur": cur_eur, "foil": cur_foil, "series": series,
             "lo": lo, "hi": hi, "changeEur": round(last - first, 2),
             "changePct": round((last - first) / first * 100, 1) if first else None,
+            "foilLo": foil_lo, "foilHi": foil_hi,
+            "foilChangeEur": round(foil_last - foil_first, 2),
+            "foilChangePct": round((foil_last - foil_first) / foil_first * 100, 1) if foil_first else None,
             "start": series[0]["d"], "end": series[-1]["d"], "npts": len(series)}
 
 
@@ -2017,7 +2023,7 @@ def watchlist_rows(c, days=7):
     for w in watched:
         k = (w["set_code"], w["number"])
         m = c.execute(
-            """SELECT k.name, k.name_de, k.img, k.rarity, k.eur_foil, s.name set_name,
+            """SELECT k.name, k.name_de, k.img, k.rarity, s.name set_name,
                       (SELECT SUM(qty) FROM collection o
                        WHERE o.set_code=k.set_code AND o.number=k.number) qty
                FROM cards k JOIN sets s ON s.code=k.set_code
@@ -2028,10 +2034,12 @@ def watchlist_rows(c, days=7):
         out.append({"set": k[0], "number": k[1], "name": m["name"],
                     "nameDe": m["name_de"] or "", "setName": m["set_name"],
                     "img": m["img"], "rarity": m["rarity"], "qty": m["qty"] or 0,
-                    "foil": round(m["eur_foil"], 2) if m["eur_foil"] else 0,
                     "eur": h["eur"], "lo": h["lo"], "hi": h["hi"],
                     "series": [p["eur"] for p in h["series"]],
-                    "changePct": h["changePct"], "changeEur": h["changeEur"]})
+                    "changePct": h["changePct"], "changeEur": h["changeEur"],
+                    "foil": h["foil"], "foilLo": h["foilLo"], "foilHi": h["foilHi"],
+                    "foilSeries": [p["foil"] for p in h["series"]],
+                    "foilChangePct": h["foilChangePct"], "foilChangeEur": h["foilChangeEur"]})
     return out
 
 
@@ -4651,14 +4659,17 @@ table.setcards tr.notgoal td .badge{opacity:1}
 #deckListWrap table.setcards th.dcQty,#deckListWrap table.setcards td.dcQty,
 #deckListWrap table.setcards th.dcPrice,#deckListWrap table.setcards td.dcPrice,
 #deckListWrap table.setcards th.dcRm,#deckListWrap table.setcards td.dcRm{text-align:center}
-/* Watchlist: Change (7th) runs a full "+X € (+Y%)" line plus a second
-   "low A - high B" line under it - much longer than the "Change" header,
-   so it's the one column here that stays left instead of centering. */
+/* Watchlist: both Change columns (6th regular, 9th foil) run a full
+   "+X € (+Y%)" line plus a second "low A - high B" line under it - much
+   longer than the "Change" header, so those two stay left instead of
+   centering. The two Trend columns (5, 8) hold an SVG, not text - left
+   unstyled since text-align doesn't affect a width:100% graphic anyway. */
 table.wltable th:nth-child(3),table.wltable td:nth-child(3),
 table.wltable th:nth-child(4),table.wltable td:nth-child(4),
-table.wltable th:nth-child(5),table.wltable td:nth-child(5),
-table.wltable th:nth-child(8),table.wltable td:nth-child(8){text-align:center}
-table.wltable th:nth-child(7),table.wltable td:nth-child(7){text-align:left}
+table.wltable th:nth-child(7),table.wltable td:nth-child(7),
+table.wltable th:nth-child(10),table.wltable td:nth-child(10){text-align:center}
+table.wltable th:nth-child(6),table.wltable td:nth-child(6),
+table.wltable th:nth-child(9),table.wltable td:nth-child(9){text-align:left}
 .seg.deckseg button{padding:5px 6px;text-align:center}
 table.setcards .seg.deckseg button{min-width:60px}
 /* deck review: freeze column widths so toggling "any set" <-> "keep deck set"
@@ -4711,14 +4722,16 @@ table.setcards thead th[data-sk]:hover{color:var(--gold)}
    above) already scrolls that overflow horizontally, same as it does on
    phones - so cards keep a readable minimum width instead of collapsing. */
 table.wltable{table-layout:auto;width:100%}
-table.wltable th:nth-child(1){width:24%}
-table.wltable th:nth-child(2){width:15%}
-table.wltable th:nth-child(3){width:90px}
-table.wltable th:nth-child(4){width:84px}
-table.wltable th:nth-child(5){width:80px}
-table.wltable th:nth-child(6){width:210px}
-table.wltable th:nth-child(7){width:170px}
-table.wltable th:nth-child(8){width:46px}
+table.wltable th:nth-child(1){width:19%;min-width:130px}
+table.wltable th:nth-child(2){width:12%;min-width:90px}
+table.wltable th:nth-child(3){width:80px}
+table.wltable th:nth-child(4){width:70px}
+table.wltable th:nth-child(5){width:110px}
+table.wltable th:nth-child(6){width:150px}
+table.wltable th:nth-child(7){width:70px}
+table.wltable th:nth-child(8){width:110px}
+table.wltable th:nth-child(9){width:150px}
+table.wltable th:nth-child(10){width:40px}
 table.wltable td:nth-child(1),table.wltable td:nth-child(2){white-space:normal;overflow-wrap:anywhere}
 table.wltable td.wlsparkcell{padding-right:18px}
 .wlspark{width:100%;height:38px;display:block}
@@ -4962,17 +4975,19 @@ tr.child2 td:first-child::before{left:36px}
   .sub{margin-bottom:14px}
   th{top:54px}
   #out>table,#setBody>table{min-width:560px}
-  /* watchlist: drop rarity and the sparkline column (no room on a phone),
+  /* watchlist: drop rarity and both sparkline columns (no room on a phone),
      size columns to content, clip the set name (tap the card for the full
      name) so it never wraps letter by letter */
   #watchlistOut tr>*:nth-child(3){display:none}
-  #watchlistOut tr>*:nth-child(6){display:none}
+  #watchlistOut tr>*:nth-child(5){display:none}
+  #watchlistOut tr>*:nth-child(8){display:none}
   #watchlistOut table.wltable{table-layout:auto;min-width:0}
   #watchlistOut td,#watchlistOut th{padding:7px 6px}
   #watchlistOut td:nth-child(1){white-space:normal;overflow-wrap:normal;word-break:normal}
   #watchlistOut td:nth-child(2){white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:30vw}
   #watchlistOut td:nth-child(2) span{overflow-wrap:normal}
-  #watchlistOut td:nth-child(7),#watchlistOut th:nth-child(7){width:auto;white-space:nowrap}
+  #watchlistOut td:nth-child(6),#watchlistOut th:nth-child(6){width:auto;white-space:nowrap}
+  #watchlistOut td:nth-child(9),#watchlistOut th:nth-child(9){width:auto;white-space:nowrap}
   .tscroll>table{min-width:480px}
   #view{overflow-x:hidden}
   table{font-size:13px}
@@ -6538,8 +6553,13 @@ async function drawWatchlist(){
     $("#wlRange")&&bindPhRange("#wlRange",v=>{WL_RANGE=v;savePhRange();drawWatchlist();});
     return;
   }
+  const wlChange=(chEur,chPct,lo,hi)=>chPct==null?"—":
+    `${chEur>0?"+":""}${money(chEur)} <span class="mt">(${
+      chPct>0?"+":""}${chPct.toFixed(1)}%)</span><br><span class="mt">${
+      t("ph.lohi",{lo:money(lo),hi:money(hi)})}</span>`;
   out.innerHTML=rangeUI+`<div class="tscroll"><table class="wltable"><thead><tr><th>${t("missing.thCard")}</th><th>${t("cardPage.set")}</th>
-      <th>${t("missing.thRarity")}</th><th class="num">${t("missing.thPrice")}</th>
+      <th>${t("missing.thRarity")}</th><th class="num">${t("cardPage.regular")}</th>
+      <th class="wlsparkcell">${t("home.watchlistTrend")}</th><th class="num">${t("home.watchlistChange")}</th>
       <th class="num">${t("setPage.thFoil")}</th><th class="wlsparkcell">${t("home.watchlistTrend")}</th>
       <th class="num">${t("home.watchlistChange")}</th><th></th></tr></thead>
     <tbody>${r.items.map(c=>`<tr>
@@ -6547,12 +6567,13 @@ async function drawWatchlist(){
       <td><span class="setlink" data-set="${c.set}">${c.setName}</span></td>
       <td>${RAR[c.rarity]?rarLabel(c.rarity):"?"}</td>
       <td class="num" style="color:var(--gold)">${c.eur?money(c.eur):"—"}</td>
-      <td class="num">${c.foil?money(c.foil):"—"}</td>
       <td class="wlsparkcell">${wlSpark(c.series)}</td>
-      <td class="num" style="color:${c.changeEur>0?"var(--ok)":c.changeEur<0?"var(--bad)":"var(--muted)"}">${c.changePct==null?"—":
-        `${c.changeEur>0?"+":""}${money(c.changeEur)} <span class="mt">(${
-          c.changePct>0?"+":""}${c.changePct.toFixed(1)}%)</span><br><span class="mt">${
-          t("ph.lohi",{lo:money(c.lo),hi:money(c.hi)})}</span>`}</td>
+      <td class="num" style="color:${c.changeEur>0?"var(--ok)":c.changeEur<0?"var(--bad)":"var(--muted)"}">${
+        wlChange(c.changeEur,c.changePct,c.lo,c.hi)}</td>
+      <td class="num">${c.foil?money(c.foil):"—"}</td>
+      <td class="wlsparkcell">${wlSpark(c.foilSeries)}</td>
+      <td class="num" style="color:${c.foilChangeEur>0?"var(--ok)":c.foilChangeEur<0?"var(--bad)":"var(--muted)"}">${
+        wlChange(c.foilChangeEur,c.foilChangePct,c.foilLo,c.foilHi)}</td>
       <td class="num"><button data-unwatch="${c.set}|${c.number}"
         title="${t("home.watchlistRemove")}" style="padding:3px 9px;font-size:12px">✕</button></td>
     </tr>`).join("")}</tbody></table></div>
