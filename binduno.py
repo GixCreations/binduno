@@ -16,7 +16,7 @@ import urllib.request
 from datetime import datetime, timedelta
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-VERSION = "6.86"
+VERSION = "6.87"
 SCHEMA = 21
 
 
@@ -4896,7 +4896,17 @@ textarea{width:100%;height:130px;background:var(--panel2);color:var(--text);bord
   white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 table.setcards td.quickadd{white-space:nowrap}
 table.setcards td.quickadd button{padding:3px 9px;font-size:12px}
-.cc .cn{display:flex;align-items:flex-start;gap:6px;font-size:13px;line-height:1.25}
+/* min-height:2.5em (2 lines at this line-height) - .tilefoot's own
+   margin-top:auto only ever pinned itself (and the set name/price above
+   it) to the tile's bottom; it never gave the OWNERSHIP badge or the
+   Extras/variant row below the name a fixed starting point, so a
+   one-line name left them sitting higher than a two-line name's did.
+   Reserving room for a name up to two lines, even when it's shorter,
+   means everything after the name always starts at the same height -
+   only a rare three-line-plus name still pushes past this reserved
+   space (accepted - genuinely no card in practice needs that much). */
+.cc .cn{display:flex;align-items:flex-start;gap:6px;font-size:13px;line-height:1.25;
+  min-height:2.5em}
 .cc .cn .cntxt{overflow-wrap:anywhere;min-width:0}
 .cc .cset{font-family:var(--mono);font-size:10.5px;color:var(--dim);
   white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
