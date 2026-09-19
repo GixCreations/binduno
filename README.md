@@ -8,7 +8,7 @@
 
 One Python file, standard library only. No account, no cloud, nothing to sign up for — your collection never leaves your computer.
 
-![version](https://img.shields.io/badge/version-6.29-d4a629)
+![version](https://img.shields.io/badge/version-6.88-d4a629)
 ![python](https://img.shields.io/badge/python-3.9%2B-4a90c4)
 ![status](https://img.shields.io/badge/status-early%20beta-e0692c)
 ![platform](https://img.shields.io/badge/platform-macOS%20%C2%B7%20Windows%20%C2%B7%20Linux-8d98a7)
@@ -65,6 +65,7 @@ It runs a tiny local web server and opens in your browser. That's the whole app.
 ### Set completion, your rules
 
 - Choose what counts as 100 %: one printing per name, every collector number, or include Showcase / borderless / extended‑art / special foils
+- Three built‑in **collector profiles** (Name / Base Set / Master Set Collector) get you close in one click; every rule underneath is still yours to flip
 - Serialized cards and whole sets (promos, tokens, Un‑sets…) toggleable
 - Optional price cap that sets very expensive cards aside so one Reserved‑List card doesn't make a set look unaffordable *(off by default)*
 
@@ -79,6 +80,7 @@ It runs a tiny local web server and opens in your browser. That's the whole app.
 
 - Correct Cardmarket names, bracket order (`Card (Set) (V.1)` vs. `Card (V.1) (Set: Extras)`), quantity prefixes and 150‑entry blocks
 - "Buy missing" per set, or collect cards across sets in the **Wants‑List Cart**
+- Multi‑select in the card browser to add several cards to the cart at once
 - **Secret Lair** works too — Cardmarket splits it into dozens of per‑drop expansions, so Binduno resolves each Secret Lair card to its exact drop ("Secret Lair Drop Series: Marvel Superdrop", …) via Cardmarket's public product list and emits the matching want‑list line.
 
 ### Easily build your dream deck
@@ -96,7 +98,8 @@ Paste a deck list from **Moxfield, Archidekt, MTG Arena, MTGO, TappedOut, Deckst
 ### Price history and watchlist
 
 - A **price history graph on every card page** — 7 days, 30 days, 1 year or Max, with a crosshair that reads off the exact date and price
-- A **watchlist** of up to 100 cards on the home page, with the same time‑range switch and a sparkline that shows how far each card has moved from where it started
+- A **watchlist** of up to 100 cards on the home page, with regular and foil price trend + change shown side by side, and the same time‑range switch
+- **Purchase prices**, tracked per batch — buy the same card twice at different prices and Binduno keeps both, instead of blending them into one number
 
 <p align="center"><img src="docs/pricehistory.jpg" width="880" alt="Price history graph on a card page"></p>
 <p align="center"><img src="docs/watchlist.jpg" width="880" alt="Price watchlist with a 7/30-day/1-year/Max range switch"></p>
