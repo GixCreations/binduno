@@ -16,7 +16,7 @@ import urllib.request
 from datetime import datetime, timedelta
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-VERSION = "6.85"
+VERSION = "6.86"
 SCHEMA = 21
 
 
@@ -4868,7 +4868,10 @@ textarea{width:100%;height:130px;background:var(--panel2);color:var(--text);bord
 .cc .tilesel{display:inline-flex;flex:0 0 auto;margin-top:1px;cursor:pointer}
 .cc .tilesel input{display:block;width:15px;height:15px;margin:0;
   accent-color:var(--gold);cursor:pointer}
-.cc .cqty{margin:1px 0}
+/* Regular and Foil now render as two separate pills (not one "V.2 3× ·
+   Foil 2×" pill), so this needs its own gap/wrap instead of relying on
+   the pills' own margins. */
+.cc .cqty{margin:1px 0;display:flex;flex-wrap:wrap;gap:4px}
 .cc .owned{display:inline-block;background:var(--panel2);white-space:nowrap;
   border:1px solid var(--ok);color:var(--ok);border-radius:11px;padding:1px 8px;
   font-family:var(--mono);font-size:11px}
@@ -4876,12 +4879,19 @@ textarea{width:100%;height:130px;background:var(--panel2);color:var(--text);bord
   border:1px solid var(--line);color:var(--muted);border-radius:11px;padding:1px 8px;
   font-family:var(--mono);font-size:11px}
 /* .meta grows to fill whatever extra height the grid gives this tile (cards
-   in the same row are stretched to the tallest one), and .tileadd's
-   margin-top:auto rides that growth down to the bottom - so the +1 buttons
-   land on the same line across a row regardless of how much variant/set-name
-   text a given card has above them. */
+   in the same row are stretched to the tallest one). Set name/price/the +1
+   buttons used to be loose siblings after the name/ownership-badge/variant-
+   row content, so only the buttons (margin-top:auto on .tileadd) tracked
+   the bottom - set name and price still sat wherever the variable content
+   above happened to end, landing at a different height on every card in a
+   row depending on whether it had a variant badge, an Extras tag, a
+   two-line name, etc. Grouping set name + price + buttons into one
+   .tilefoot and putting margin-top:auto on THAT instead pins the whole
+   group to the tile's bottom together, so it lines up across a row
+   regardless of how much (or how little) sits above it. */
 .cc .meta{padding:8px 10px;display:flex;flex-direction:column;gap:3px;flex:1 1 auto}
-.tileadd{display:flex;gap:5px;margin-top:auto;padding-top:2px}
+.cc .tilefoot{margin-top:auto;display:flex;flex-direction:column;gap:3px}
+.tileadd{display:flex;gap:5px;padding-top:2px}
 .tileadd button{flex:1 1 0;min-width:0;padding:3px 4px;font-size:11px;
   white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 table.setcards td.quickadd{white-space:nowrap}
@@ -7547,7 +7557,6 @@ const cardTile=(c,opts)=>{
   // worth flagging on its own.
   const regTxt=qn?(c.cmVer>0?`V.${c.cmVer} ${qn}×`:`${qn}×`):"";
   const foilTxt=qf?`${t("setPage.thFoil")} ${qf}×`:"";
-  const ownLabel=[regTxt,foilTxt].filter(Boolean).join(" · ");
   return `<div class="cc" data-card="${c.set}|${c.number}">
   <div class="imgwrap">${c.img?`<img class="face" src="${c.img}" alt="${cardName(c)}" loading="lazy">`
     :`<div class="noimg">${cardName(c)}</div>`}
@@ -7556,15 +7565,18 @@ const cardTile=(c,opts)=>{
   <div class="meta"><div class="cn">${opts.select?`<label class="tilesel" onclick="event.stopPropagation()">
       <input type="checkbox" class="cardsel" data-selkey="${c.set}|${c.number}" ${opts.selected?"checked":""}></label>`:""}
     <span class="cntxt">${cardName(c)}</span></div>
-    <div class="cqty">${qt?(ownLabel?`<span class="owned">${ownLabel}</span>`:""):`<span class="miss">0</span>`}</div>
+    <div class="cqty">${qt?`${regTxt?`<span class="owned">${regTxt}</span>`:""}${
+      foilTxt?`<span class="owned">${foilTxt}</span>`:""}`:`<span class="miss">0</span>`}</div>
     ${c.variant||c.extras?`<div class="vrow">${VAR(c)}</div>`:""}
-    ${c.setName?`<div class="cset">${c.setName} · #${c.number}</div>`:""}
-    <div class="cp">${c.eur?money(c.eur):(c.foil?"<em>foil</em> "+money(c.foil):"—")}${
-      c.eur&&c.foil?` <em>· foil ${money(c.foil)}</em>`:""}</div>
-    ${opts.quickAdd?`<div class="tileadd" onclick="event.stopPropagation()">
-      <button data-qtyadj="${c.set}|${c.number}|0" title="${t('setPage.addRegular')}">+1 ${t("cardPage.regular")}</button>
-      <button data-qtyadj="${c.set}|${c.number}|1" title="${t('setPage.addFoil')}">+1 ${t("setPage.thFoil")}</button>
-    </div>`:""}
+    <div class="tilefoot">
+      ${c.setName?`<div class="cset">${c.setName} · #${c.number}</div>`:""}
+      <div class="cp">${c.eur?money(c.eur):(c.foil?"<em>foil</em> "+money(c.foil):"—")}${
+        c.eur&&c.foil?` <em>· foil ${money(c.foil)}</em>`:""}</div>
+      ${opts.quickAdd?`<div class="tileadd" onclick="event.stopPropagation()">
+        <button data-qtyadj="${c.set}|${c.number}|0" title="${t('setPage.addRegular')}">+1 ${t("cardPage.regular")}</button>
+        <button data-qtyadj="${c.set}|${c.number}|1" title="${t('setPage.addFoil')}">+1 ${t("setPage.thFoil")}</button>
+      </div>`:""}
+    </div>
   </div></div>`;};
 function bindTiles(root){
   (root||document).querySelectorAll("[data-card]").forEach(e=>e.onclick=ev=>{
