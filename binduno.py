@@ -16,7 +16,7 @@ import urllib.request
 from datetime import datetime, timedelta
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-VERSION = "6.83"
+VERSION = "6.84"
 SCHEMA = 21
 
 
@@ -5611,6 +5611,7 @@ en:{
   "cardPage.buyOnCardmarket":"Buy on Cardmarket · {price}","cardPage.buyFoil":"Buy foil · {price}",
   "cardPage.viewOnScryfall":"View on Scryfall","cardPage.regular":"Regular",
   "cardPage.copiesOwned":"Copies owned","cardPage.yourCollection":"Your collection",
+  "cardPage.availableAs":"Available as",
   "cardPage.setTo4":"Add 4 copies",
   "cardPage.wantListEntry":"Wants-List entry","cardPage.set":"Set",
   "cardPage.illustratedBy":"Illustrated by {artist}","cardPage.formatLegality":"Format legality",
@@ -6100,6 +6101,7 @@ de:{
   "cardPage.buyOnCardmarket":"Auf Cardmarket kaufen · {price}","cardPage.buyFoil":"Foil kaufen · {price}",
   "cardPage.viewOnScryfall":"Auf Scryfall ansehen","cardPage.regular":"Normal",
   "cardPage.copiesOwned":"Kopien in Besitz","cardPage.yourCollection":"Deine Sammlung",
+  "cardPage.availableAs":"Verfügbar als",
   "cardPage.setTo4":"4 Kopien hinzufügen",
   "cardPage.wantListEntry":"Wants-Liste-Eintrag","cardPage.set":"Set",
   "cardPage.illustratedBy":"Illustriert von {artist}","cardPage.formatLegality":"Format-Legalität",
@@ -7839,7 +7841,8 @@ async function cardPage(sc,nr){
           <div class="v" style="font-size:22px;color:var(--gold)">${d.eur?money(d.eur):"—"}</div></div>
         <div class="card"><div class="k">${t("setPage.thFoil")}</div>
           <div class="v" style="font-size:22px">${d.foil?money(d.foil):"—"}</div>
-          <div class="n">${(d.finishes||"").split(",").filter(Boolean).join(", ")||"—"}</div></div>
+          <div class="n">${t("cardPage.availableAs")}: ${(d.finishes||"").split(",").filter(Boolean)
+            .map(f=>f[0].toUpperCase()+f.slice(1)).join(", ")||"—"}</div></div>
         <div class="card"><div class="k">${t("cardPage.copiesOwned")}</div>
           <div class="v" id="qtyTotal" style="font-size:22px;color:${d.qty?"var(--ok)":"var(--muted)"}">${d.qty}</div></div>
         <div class="card"><div class="k">${t("missing.thRarity")}</div>
