@@ -16,7 +16,7 @@ import urllib.request
 from datetime import datetime, timedelta
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-VERSION = "6.82"
+VERSION = "6.83"
 SCHEMA = 21
 
 
@@ -4401,21 +4401,28 @@ PAGE = r"""<!DOCTYPE html><html lang="en"><head><meta charset="utf-8">
     - instead: it can sit dark enough for AA contrast while still reading
     as a rich, saturated color rather than a muddied one, because unlike
     yellow, blue-green hues don't visually collapse into "brown" as they
-    darken. #077c79 clears 5.04:1 on --panel and 4.54:1 on --bg. The
-    brand gold isn't gone - --gold-fill (below) still carries it wherever
-    it sits on its own fixed dark background instead of competing with
-    this page's light one (buttons, the card-flip button, the Home donut
-    rings), where the same conflict never existed in the first place. */
+    darken. #077c79 clears 5.04:1 on --panel and 4.54:1 on --bg.
+
+    Follow-up: gold turned out to have the identical washed-out problem
+    in several more spots that never went through this variable at all
+    (the donut rings, the logo icon, --gold-fill's buttons) - once actually
+    looked at side by side, plain gold just didn't fit next to this new
+    teal --gold anymore, so those moved to the same teal too (see
+    --gold-fill below and DONUT_PALETTE/_render() elsewhere in the file).
+    This is a light-theme-only change - dark theme's own --gold never had
+    a contrast problem on a dark background and stays the original gold,
+    unrelated to any of this. */
  --gold:#077c79;
- /* --gold-fill: a vivid gold for backgrounds that carry dark text on top
-    (buttons, the cart badge) or sit on a fixed dark chip of their own
-    (the flip button) - not for anything read as text directly on the
-    page background. #d4a629 is the same color the dark theme uses for
-    --gold (where light text on a dark page has no contrast conflict to
-    begin with) and what the donut rings on Home already render in
-    hardcoded unconditionally either theme - a proven, already-shipping
-    color in this app, not a new guess. */
- --gold-fill:#d4a629;
+ /* --gold-fill: a vivid version of the same teal for backgrounds that
+    carry dark text on top (buttons, the cart badge) or sit on a fixed
+    dark chip of their own (the flip button) - not for anything read as
+    text directly on the page background, which is what --gold above is
+    for. Dark theme keeps its original gold everywhere (it never had a
+    contrast problem to begin with, on dark backgrounds gold reads fine)
+    - this is a light-theme-only accent swap, not a brand-wide one, so
+    --gold-fill here is its own teal rather than reusing dark theme's
+    --gold value the way it briefly did. */
+ --gold-fill:#1cc4b9;
  --mythic:#b8460f;--ok:#3d7a4f;--good-bg:#e3efe4;
  --bad:#a83f2e;--bad-bg:#f7e2df;
  /* By-rarity bar fills, re-picked for --track (#cdc6b4): the dark theme's
@@ -4498,7 +4505,12 @@ h2{font-family:var(--serif);font-weight:400;font-size:20px;margin:34px 0 12px}
 .rarrow .fill{height:100%;border-radius:5px}
 .rarrow .nm{font-family:var(--mono);font-size:11.5px;color:var(--dim);text-align:right}
 .list{background:var(--panel);border:1px solid var(--line);border-radius:6px;overflow:hidden}
-.li{display:flex;align-items:center;gap:11px;padding:11px 15px;border-bottom:1px solid #1e2530;cursor:pointer}
+/* var(--line), not a literal hex - #1e2530 was a dark-navy row divider
+   that never adapted to the light theme, where it rendered as a near-
+   black hairline between rows on a white/pastel background instead of a
+   subtle one. Same fix applied to td/.hist .row/.cartrow below - all four
+   had the identical hardcoded-for-dark-only divider. */
+.li{display:flex;align-items:center;gap:11px;padding:11px 15px;border-bottom:1px solid var(--line);cursor:pointer}
 .li:last-child{border-bottom:0}
 .li:hover{background:var(--panel2)}
 .seticon{filter:invert(80%) sepia(10%) saturate(250%);vertical-align:-3px}
@@ -4622,7 +4634,7 @@ th{position:sticky;top:60px;background:var(--panel);text-align:left;font-weight:
   border-bottom:1px solid var(--line);white-space:nowrap;z-index:4}
 table th,table thead th,table th.num{font-family:var(--sans);font-size:10.5px;
   letter-spacing:.1em;font-weight:500}
-td{padding:8px 9px;border-bottom:1px solid #1c222b}
+td{padding:8px 9px;border-bottom:1px solid var(--line)}
 td:last-child{white-space:nowrap}
 td.nowrap,th.nowrap{white-space:nowrap}
 td button{padding:4px 9px;font-size:12px}
@@ -4647,8 +4659,14 @@ dialog::backdrop{background:rgba(6,9,13,.8)}
 .dbody th .ar{opacity:.45;font-size:9px;margin-left:3px}
 .set.off,tr.off td{opacity:.5}
 .set.off{border-style:dashed}
+/* var(--bad), not the literal #d98a8a/#6b3a3a pair - hardcoded to the
+   dark theme's own light-salmon-on-dark-maroon pairing, which read as a
+   washed-out pale pink on the light theme's white/pastel row backgrounds
+   (the "off-goal" tag in a set table). --bad already carries the same
+   dark/light split this needed - a light salmon for dark backgrounds, a
+   darker red for light ones - it just wasn't being used here. */
 .badge{font-size:10px;letter-spacing:.06em;padding:2px 6px;border-radius:3px;
-  border:1px solid #6b3a3a;color:#d98a8a;white-space:nowrap}
+  border:1px solid var(--bad);color:var(--bad);white-space:nowrap}
 .opt{display:grid;grid-template-columns:minmax(120px,1fr) 74px 88px 88px 100px 168px;gap:10px;align-items:center;
   padding:10px 12px;border:1px solid var(--line);border-radius:5px;margin-bottom:7px;background:var(--panel2)}
 .opt .lb{font-size:14px}
@@ -4813,7 +4831,7 @@ textarea{width:100%;height:130px;background:var(--panel2);color:var(--text);bord
 #busy .prog{margin:0}
 #busy .prog span{transition:width .4s ease}
 .hist{font-family:var(--mono);font-size:12.5px}
-.hist .row{display:flex;gap:14px;padding:9px 0;border-bottom:1px solid #1c222b}
+.hist .row{display:flex;gap:14px;padding:9px 0;border-bottom:1px solid var(--line)}
 .hist .ts{color:var(--gold);flex:0 0 200px}
 .hist .ac{color:var(--muted);flex:0 0 90px}
 .empty{text-align:center;padding:60px 20px;color:var(--muted)}
@@ -4989,16 +5007,26 @@ tr.child td:first-child::before,tr.child2 td:first-child::before{
   content:"\21B3";position:absolute;top:8px;color:var(--dim);font-family:var(--mono)}
 tr.child td:first-child::before{left:14px}
 tr.child2 td:first-child::before{left:36px}
-.verlbl{font-family:var(--mono);font-size:10px;color:#8fc0e0;border:1px solid #2b4d66;
+/* var(--kind-normal-fg)/-bd, not the literal #8fc0e0/#2b4d66 pair - a
+   pale blue tuned for the dark theme only (same washed-out-on-light-theme
+   problem as .badge above: this is the "Extras 1" pill next to a card
+   name in a set table). --kind-normal-fg/-bd already is this exact pale-
+   blue-on-dark-navy pairing with a light-theme counterpart defined right
+   alongside it, just never reused here. */
+.verlbl{font-family:var(--mono);font-size:10px;color:var(--kind-normal-fg);
+  border:1px solid var(--kind-normal-bd);
   border-radius:3px;padding:2px 5px;margin-left:5px;vertical-align:middle;white-space:nowrap;display:inline-block}
+/* border:var(--mythic), not the literal #5a3520 - same fix as above, one
+   step smaller: the text already followed the theme, only the border was
+   stuck on a dark-theme-only brown. */
 .varlbl{font-family:var(--mono);font-size:10px;letter-spacing:.04em;color:var(--mythic);
-  border:1px solid #5a3520;border-radius:3px;padding:2px 5px;margin-left:5px;vertical-align:middle;
+  border:1px solid var(--mythic);border-radius:3px;padding:2px 5px;margin-left:5px;vertical-align:middle;
   white-space:nowrap;display:inline-block;max-width:100%;overflow:hidden;text-overflow:ellipsis}
 .chunk{background:var(--panel);border:1px solid var(--line);border-radius:6px;
   padding:13px 15px;margin-bottom:9px}
 .chunk h4{margin:0 0 7px;font-family:var(--serif);font-weight:400;font-size:16px}
 .cartrow{display:grid;grid-template-columns:44px 1fr 120px 92px 108px 40px;gap:11px;
-  align-items:center;padding:9px 14px;border-bottom:1px solid #1e2530}
+  align-items:center;padding:9px 14px;border-bottom:1px solid var(--line)}
 .cartrow img{width:44px;border-radius:3px}
 .qbtn{display:inline-flex;align-items:center;gap:5px}
 .qbtn button{padding:3px 9px;font-size:13px;line-height:1.2}
@@ -6270,7 +6298,11 @@ function donut(p,color,size=96){
 // One ring, one arc per group (Value-page "by set/color/rarity/type" tab) -
 // same stroke-dasharray trick as donut() above, just walked around the
 // circle once per group instead of drawing one fraction against a track.
-const DONUT_PALETTE=["#d4a629","#4a90c4","#4f9d69","#b1548c","#c0605a",
+// var(--gold-fill) for the first slot, not a literal hex - it needs to
+// stay gold in the dark theme (never had a contrast problem there) and
+// teal in the light theme (where it did), so it has to track whichever
+// theme is active instead of picking one fixed color for both.
+const DONUT_PALETTE=["var(--gold-fill)","#4a90c4","#4f9d69","#b1548c","#c0605a",
   "#7a6fc4","#5aa6a0","#c4914a","#8a8f98"];
 function donutMulti(groups,size=180){
   const R=70,C=2*Math.PI*R,SW=26,CX=90,CY=90;
@@ -6355,7 +6387,7 @@ function home(){
     <label class="chk" style="margin:14px 0 0;font-size:12.5px;color:var(--muted)">
       <input type="checkbox" id="startNever"> ${t("start.hide")}</label></div>`}
   <div class="donuts">
-    <div class="donut clickable" id="tileNames" style="cursor:pointer">${donut(nm,"#d4a629")}
+    <div class="donut clickable" id="tileNames" style="cursor:pointer">${donut(nm,"var(--gold-fill)")}
       <div><div class="t">${t("home.cardNames")}</div><div class="p">${pct(nm)}</div>
       <div class="s">${t("home.xOfY",{a:num(s.names.owned),b:num(s.names.total)})}</div></div></div>
     <div class="donut clickable" id="tilePrintings" style="cursor:pointer">${donut(pr,"#4a90c4")}
@@ -10210,8 +10242,10 @@ def _render(size, tile=True, palette="dark", mono=None):
         # in the <style> block) - this Python-rendered PNG never followed
         # along since it's a completely separate code path. Now the same
         # deep teal instead, at the same two-tone dark/light relationship
-        # GOLD/GOLD2 have in the dark palette below.
-        GOLD, GOLD2 = (0.028, 0.532, 0.515), (0.038, 0.722, 0.699)
+        # GOLD/GOLD2 have in the dark palette below. Light-theme-only - the
+        # dark palette keeps the original gold, which never had this
+        # problem on a dark background.
+        GOLD, GOLD2 = (0.110, 0.769, 0.725), (0.335, 0.905, 0.868)
         PALE = (0.176, 0.216, 0.271)                # dark slate instead of cream
     else:
         GOLD, GOLD2 = (0.831, 0.651, 0.161), (0.960, 0.820, 0.380)
