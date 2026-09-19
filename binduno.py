@@ -16,8 +16,8 @@ import urllib.request
 from datetime import datetime, timedelta
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-VERSION = "6.80"
-SCHEMA = 20
+VERSION = "6.81"
+SCHEMA = 21
 
 
 def _env(name, *legacy):
@@ -1307,12 +1307,24 @@ def refresh_cards(bulk_type="all_cards"):
                 rows[i] = r[:10] + (1,) + r[11:]
 
         # Cardmarket numbers the printings of one card name inside a set as
-        # V.1, V.2 ... in collector-number order. Mirror that so want lists
-        # point at the right version.
-        # Cardmarket keeps the regular printings inside the set itself and puts
-        # special treatments into separate expansions called
-        # "<Set>: Extras Version 1", "... Version 2" and so on, numbered per card
-        # in collector-number order. Mirror both so want lists resolve.
+        # V.1, V.2 ... - NOT in collector-number order, empirically confirmed
+        # against the live site for Kamigawa: Neon Dynasty's full-art basics:
+        # Forest #301/#302 (full art) are Cardmarket's V.1/V.2, and #291/#292
+        # (normal frame, the LOWER collector numbers) are V.3/V.4 - the exact
+        # reverse of number order. What actually predicts Cardmarket's order
+        # is their own idProduct (already extracted from Scryfall's
+        # purchase_uris.cardmarket into cm_uri below, for the Secret Lair
+        # lookup) - #301/#302 carry the lower idProduct (605042/605043,
+        # added to Cardmarket's catalog first) versus #291/#292's 608318/
+        # 608319, matching V.1/V.2 vs V.3/V.4 exactly. Sorting by idProduct
+        # instead of collector number is likely correct generally (Cardmarket
+        # numbers versions in catalog-entry order, which has no reason to
+        # track Wizards' own numbering), not just for this one set - falls
+        # back to collector number only for the rare printing with no
+        # Cardmarket link at all (idProduct 0).
+        cm_pid_of = [int(m.group(1)) if (m := _CM_PID_RE.search(r[19] or "")) else 0
+                     for r in rows]
+        # Mirror both so want lists resolve.
         # Safety net: products where *every* printing is a special treatment
         # (Secret Lairs, Art Series, promo-only sets) have no separate ": Extras"
         # page on Cardmarket — everything lives in the one expansion. Without
@@ -1331,8 +1343,10 @@ def refresh_cards(bulk_type="all_cards"):
         vers = [1] * len(rows)
         extras = [0] * len(rows)
         for _key, idxs in by_name.items():
-            base = sorted((i for i in idxs if not rows[i][10]), key=lambda i: rows[i][2])
-            extra = sorted((i for i in idxs if rows[i][10]), key=lambda i: rows[i][2])
+            base = sorted((i for i in idxs if not rows[i][10]),
+                          key=lambda i: cm_pid_of[i] or rows[i][2])
+            extra = sorted((i for i in idxs if rows[i][10]),
+                           key=lambda i: cm_pid_of[i] or rows[i][2])
             for pos, i in enumerate(base, start=1):
                 vers[i] = pos
             for pos, i in enumerate(extra, start=1):
@@ -1361,8 +1375,7 @@ def refresh_cards(bulk_type="all_cards"):
         # and store the expansion name so want lines resolve.
         sl_codes = {code for code, s in sets.items()
                     if (s[1] or "").lower().startswith("secret lair")}
-        cm_pids = [int(m.group(1)) if (m := _CM_PID_RE.search(r[19] or "")) else 0
-                   for r in rows]
+        cm_pids = cm_pid_of                                       # already extracted above
         want = {cm_pids[i] for i, r in enumerate(rows)
                 if r[0] in sl_codes and cm_pids[i]}
         pid2exp = _cm_product_expansions(want, c)
@@ -1937,7 +1950,7 @@ def compute_value_history(c):
     # card (see valuePage.mostValuableDesc).
     for r in c.execute("""
             SELECT k.name, k.name_de, k.set_code, s.name set_name, k.number, k.img, o.foil,
-                   k.ver, SUM(o.qty) qty,
+                   k.cm_ver, SUM(o.qty) qty,
                    CASE WHEN o.foil='foil' THEN k.eur_foil ELSE k.eur END price
             FROM collection o
             JOIN cards k ON k.set_code=o.set_code AND k.number=o.number
@@ -1947,7 +1960,8 @@ def compute_value_history(c):
             ORDER BY price DESC LIMIT 300"""):
         top.append({"name": r["name"], "nameDe": r["name_de"] or "", "set": r["set_code"],
                     "setName": r["set_name"], "number": r["number"], "img": r["img"] or "",
-                    "foil": r["foil"] == "foil", "ver": r["ver"] or 1, "qty": r["qty"],
+                    "foil": r["foil"] == "foil",
+                    "cmVer": r["cm_ver"] if r["cm_ver"] is not None else 1, "qty": r["qty"],
                     "price": round(r["price"], 2), "value": round(r["qty"] * r["price"], 2)})
     return {"series": series, "top": top}
 
@@ -4350,6 +4364,7 @@ PAGE = r"""<!DOCTYPE html><html lang="en"><head><meta charset="utf-8">
  --w:#e8dcb5;--u:#4a90c4;--b:#8b7fa8;--r:#c8503c;--g:#4f9d69;
  --gold:#d4a629;--gold-fill:var(--gold);--mythic:#e0692c;--ok:#4f9d69;--good-bg:#183024;
  --bad:#d98a8a;--bad-bg:#33191b;
+ --rar-c:#7d8896;--rar-u:#a8b4c2;--rar-r:#d4a629;--rar-m:#e0692c;--rar-s:#b49ed0;--rar-b:#6f7a88;
  --row-have-bg:rgba(79,157,105,.11);--row-miss-bg:rgba(200,80,60,.10);
  --kind-normal-bd:#33506b;--kind-normal-fg:#8fb6d8;
  --kind-special-bd:#5b4a72;--kind-special-fg:#b49ed0;--kind-sealed-bd:#6b5324;
@@ -4359,35 +4374,45 @@ PAGE = r"""<!DOCTYPE html><html lang="en"><head><meta charset="utf-8">
  --nav-bg:rgba(15,19,25,.94)}
 :root[data-theme="light"]{
  --bg:#f5f3ee;--panel:#ffffff;--panel2:#f0ede6;--line:#d9d3c5;--text:#211d16;
- --muted:#6b6558;--dim:#7a705c;--track:#cdc6b4;
+ --muted:#6b6558;--dim:#766f5d;--track:#cdc6b4;
+ /* --dim vs --bg measured at 4.40:1 - just under the 4.5:1 AA line for the
+    small secondary text it's used as (timestamps, sub-labels). #766f5d
+    is the same hue nudged one step darker, clearing 4.51:1. */
  --w:#7e6d25;--u:#2b6ea8;--b:#6b5a92;--r:#a83f2e;--g:#3d7a4f;
- /* The dark theme's --gold (#d4a629) only reads as "gold" because it's a
-    bright color on a dark background - the same hue dark enough to pass
-    4.5:1 text contrast on a white/cream page is, by definition, some shade
-    of brown (that's literally what "brown" is: a low-lightness orange/
-    yellow). #93690f technically passed contrast but its low saturation at
-    that lightness made it look flat and muddy rather than "gold" at all.
-    #8a6000 keeps saturation maxed instead of fading it out, and sits at
-    hue 42° (vs. --mythic's 20°) so the two don't get confused - still
-    reads warm/rich rather than muddy, and clears AA on both --panel (5.59:1)
-    and --bg (5.04:1). --dim and --w were re-picked the same way: the old
-    values (measured, not assumed) were below 4.5:1 - #948d7d landed at
-    3.3/2.98, #8a7a3a at 4.26/3.84 - so both failed exactly where they're
-    used, as small secondary text. */
- /* --gold-fill is a second, separate gold for backgrounds that carry dark
-    text on top (buttons, the cart badge) or pure decorative strokes - not
-    for anything read as text on the page background itself. That's a real
-    split, not an inconsistency: --gold above sits as dark as AA text
-    contrast on white allows, but a button fill has the opposite need -
-    #181206 button text over it wants the fill as LIGHT as possible, so a
-    dark "safe" gold there just looks like a dull brown slab. #d4a629 is
-    the same vivid gold the dark theme already uses for --gold (where light
-    text on a dark page has no such conflict) and what the donut rings on
-    Home already render in hardcoded to unconditionally, so it's a proven,
-    already-shipping color in this app, not a new guess. */
+ /* --gold used to just be a darkened version of the dark theme's yellow-
+    gold (#d4a629), re-picked twice (#93690f, then #8a6000) trying to fix
+    "looks brown" by tuning that same hue. Measured both times: they DID
+    clear 4.5:1 - the actual problem is physical, not a bad pick. Any
+    orange/yellow hue dark enough for AA text contrast on a white/cream
+    page is, by definition, some shade of brown (that's what "brown" is).
+    No amount of hue/saturation tuning within that family fixes it, so
+    --gold in light theme is now a completely different hue - a deep teal
+    - instead: it can sit dark enough for AA contrast while still reading
+    as a rich, saturated color rather than a muddied one, because unlike
+    yellow, blue-green hues don't visually collapse into "brown" as they
+    darken. #077c79 clears 5.04:1 on --panel and 4.54:1 on --bg. The
+    brand gold isn't gone - --gold-fill (below) still carries it wherever
+    it sits on its own fixed dark background instead of competing with
+    this page's light one (buttons, the card-flip button, the Home donut
+    rings), where the same conflict never existed in the first place. */
+ --gold:#077c79;
+ /* --gold-fill: a vivid gold for backgrounds that carry dark text on top
+    (buttons, the cart badge) or sit on a fixed dark chip of their own
+    (the flip button) - not for anything read as text directly on the
+    page background. #d4a629 is the same color the dark theme uses for
+    --gold (where light text on a dark page has no contrast conflict to
+    begin with) and what the donut rings on Home already render in
+    hardcoded unconditionally either theme - a proven, already-shipping
+    color in this app, not a new guess. */
  --gold-fill:#d4a629;
- --gold:#8a6000;--mythic:#b8460f;--ok:#3d7a4f;--good-bg:#e3efe4;
+ --mythic:#b8460f;--ok:#3d7a4f;--good-bg:#e3efe4;
  --bad:#a83f2e;--bad-bg:#f7e2df;
+ /* By-rarity bar fills, re-picked for --track (#cdc6b4): the dark theme's
+    values are light/desaturated colors meant to pop against a dark navy
+    track and land under 2.6:1 here (as low as 1.24:1 for Uncommon) against
+    a light warm-gray one - not just gold, every one of them. Same fix as
+    --gold: darkened/resaturated per hue for ~3:1 against this track. */
+ --rar-c:#5c6f89;--rar-u:#646f7b;--rar-r:#876a1a;--rar-m:#b54f1b;--rar-s:#815cb1;--rar-b:#626f7d;
  --row-have-bg:rgba(55,120,75,.28);--row-miss-bg:rgba(178,55,40,.20);
  --kind-normal-bd:#a9c3db;--kind-normal-fg:#2b6ea8;
  --kind-special-bd:#cdb9e0;--kind-special-fg:#6b4a92;--kind-sealed-bd:#e0c98a;
@@ -4892,12 +4917,18 @@ table.setcards td.quickadd button{padding:3px 9px;font-size:12px}
    above that line, on any frame era, without needing to know the exact
    layout. Positioning from top instead would need to know the button's
    own height to land in the same place. */
-.cardpage .flipbtn{position:absolute;bottom:44%;right:10px;width:34px;height:34px;
-  border-radius:50%;background:rgba(15,19,25,.75);border:1px solid var(--line);
-  color:var(--text);cursor:pointer;padding:0;
+/* Fixed black/white/gold regardless of theme, not var(--text)/var(--line)/
+   a translucent dark fill - those follow the page theme, and in light
+   theme that meant a near-black icon on a near-black (if translucent)
+   background sitting on top of the card art: invisible. This button sits
+   ON the artwork, not on the page background, so it shouldn't inherit the
+   theme at all. */
+.cardpage .flipbtn{position:absolute;bottom:44%;right:10px;width:41px;height:41px;
+  border-radius:50%;background:#000;border:1.5px solid #fff;
+  color:var(--gold-fill);cursor:pointer;padding:0;
   display:flex;align-items:center;justify-content:center}
-.cardpage .flipbtn svg{width:18px;height:18px}
-.cardpage .flipbtn:hover{border-color:var(--gold);background:rgba(15,19,25,.9)}
+.cardpage .flipbtn svg{width:22px;height:22px}
+.cardpage .flipbtn:hover{background:#262626}
 .cardpage h1{font-size:27px;margin:0}
 .mana{font-family:var(--mono);color:var(--muted);font-size:15px;
   display:flex;align-items:center;gap:6px;flex-wrap:wrap}
@@ -6151,8 +6182,14 @@ const $=s=>document.querySelector(s);
 const money=n=>(n||0).toLocaleString("en-US",{minimumFractionDigits:2,maximumFractionDigits:2})+" €";
 const num=n=>(n||0).toLocaleString("en-US");
 const pct=n=>(n*100).toFixed(1)+" %";
-const RAR={c:["Common","#7d8896"],u:["Uncommon","#a8b4c2"],r:["Rare","#d4a629"],
-           m:["Mythic","#e0692c"],s:["Special","#b49ed0"],b:["Basic land","#6f7a88"]};
+// Colors as var(--rar-*), not literal hex - the old literals were tuned to
+// pop against the dark theme's --track and were never revisited for the
+// light theme's, where every one of them (not just gold) landed under
+// 2.6:1 against it - lightly-saturated colors chosen to stand out on a
+// dark background naturally wash out on a light one; each theme needs its
+// own pick, same as --gold above.
+const RAR={c:["Common","var(--rar-c)"],u:["Uncommon","var(--rar-u)"],r:["Rare","var(--rar-r)"],
+           m:["Mythic","var(--rar-m)"],s:["Special","var(--rar-s)"],b:["Basic land","var(--rar-b)"]};
 const rarLabel=k=>t("rarity."+k);
 // Sticky "N per page" choice, one per view (sets/cards/value-page-top),
 // same localStorage-backed pattern as GRID_COLS below.
@@ -6655,15 +6692,20 @@ function bindPhRange(sel,cb){
   const box=$(sel);if(!box)return;
   box.querySelectorAll("[data-phr]").forEach(b=>b.onclick=()=>cb(b.dataset.phr));
 }
+// flex:0 0 <px> (a hard cap, no shrink but also no grow) clips silently if
+// the rendered text ever comes out wider than the guessed px - a different
+// installed monospace fallback, a browser zoom level, anything. flex:0 0
+// auto with min-width keeps the same alignment in the normal case but
+// still grows for whatever the actual text needs instead of cutting it.
 const row=(x,i)=>`<div class="li" data-code="${x.code}">
   <span class="mt" style="flex:0 0 20px;text-align:right;color:var(--dim)">${i}.</span>
   ${icon(x,19)}
   <span class="nm" style="flex:0 1 180px;white-space:nowrap;overflow:hidden;
     text-overflow:ellipsis" title="${x.name}">${x.name}</span>
   <span class="bar"><span style="width:${x.pct*100}%"></span></span>
-  <span class="statgroup"><span class="mt" style="flex:0 0 72px;text-align:right">${x.owned}/${x.total}</span>
-  <span class="mt" style="color:var(--gold);flex:0 0 58px;text-align:right">${pct(x.pct)}</span></span>${
-    SHOW_COSTS?`<span class="mt" style="flex:0 0 80px;text-align:right" title="${t("home.costToFinish")}">${
+  <span class="statgroup"><span class="mt" style="flex:0 0 auto;min-width:72px;text-align:right">${x.owned}/${x.total}</span>
+  <span class="mt" style="color:var(--gold);flex:0 0 auto;min-width:58px;text-align:right">${pct(x.pct)}</span></span>${
+    SHOW_COSTS?`<span class="mt" style="flex:0 0 auto;min-width:80px;text-align:right" title="${t("home.costToFinish")}">${
       money(x.totalCost)}</span>`:""}</div>`;
 function bindRows(){document.querySelectorAll(".li[data-code]").forEach(e=>
   e.onclick=()=>openSet(e.dataset.code));bindCrumbs();}
@@ -6691,7 +6733,7 @@ function explainPage(){
 // Same rule as cardTile()'s ownLabel: "Regular" says nothing a bare row
 // doesn't already - only flag Foil, or which version when the set has more
 // than one printing of this name (and it's not itself the foil case).
-const valueVarLbl=x=>x.foil?t("setPage.thFoil"):(x.ver>1?`V.${x.ver}`:"");
+const valueVarLbl=x=>x.foil?t("setPage.thFoil"):(x.cmVer>0?`V.${x.cmVer}`:"");
 const valueTile=x=>`<div class="cc" data-card="${x.set}|${x.number}">
   <div class="imgwrap">${x.img?`<img class="face" src="${x.img}" alt="${cardName(x)}" loading="lazy">`
     :`<div class="noimg">${cardName(x)}</div>`}</div>
@@ -7427,22 +7469,29 @@ function SHIPCALC(n,value){
 }
 
 /* ---------------- shared bits ---------------- */
+// cmVer (not the plain ver column) is the field that already encodes
+// "only one printing here" as 0 and "ambiguous Secret Lair ordering" as -1
+// (see wantLine/CLAUDE.md) - cmVer>0 is exactly "show V.N", and N starts at
+// 1 for the first of several printings, not 2. Using the plain ver column
+// with a >1 cutoff (the previous version of this code) silently swallowed
+// V.1 on the very first printing even when the set has several.
 const VAR=c=>(c.variant?`<span class="varlbl">${c.variant}</span>`:"")+
   (c.extras?`<span class="verlbl" data-tip-title="${t('tip.cmExpTitle')}"
     data-tip="${t('tip.cmExp',{v:c.extras})}"
     >Extras ${c.extras}</span>`:"")+
-  ((c.ver&&c.ver>1&&!c.extras)?`<span class="verlbl" data-tip-title="${t('tip.cmVerTitle')}"
-    data-tip="${t('tip.cmVer',{v:c.ver})}"
-    >V.${c.ver}</span>`:"");
+  ((c.cmVer>0&&!c.extras)?`<span class="verlbl" data-tip-title="${t('tip.cmVerTitle')}"
+    data-tip="${t('tip.cmVer',{v:c.cmVer})}"
+    >V.${c.cmVer}</span>`:"");
 const cardTile=(c,opts)=>{
   opts=opts||{};
   const qn=c.qtyNormal||0,qf=c.qtyFoil||0,qt=qn+qf;
   // "Regular" told you nothing a bare copy count didn't already - dropped.
   // In its place: which version you own, but only when the name actually
-  // has more than one printing in this set (c.ver>1) - a single printing
-  // needs no label at all, same rule the (V.n) wantlist badge already
-  // follows elsewhere. Foil is always worth flagging on its own.
-  const regTxt=(qn&&c.ver>1)?`V.${c.ver} ${qn}×`:"";
+  // has more than one printing in this set (cmVer>0 - see VAR() above for
+  // why cmVer and not the plain ver column) - a single printing needs no
+  // label at all, same rule the (V.n) wantlist badge already follows
+  // elsewhere. Foil is always worth flagging on its own.
+  const regTxt=(qn&&c.cmVer>0)?`V.${c.cmVer} ${qn}×`:"";
   const foilTxt=qf?`${t("setPage.thFoil")} ${qf}×`:"";
   const ownLabel=[regTxt,foilTxt].filter(Boolean).join(" · ");
   return `<div class="cc" data-card="${c.set}|${c.number}">
