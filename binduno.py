@@ -16,7 +16,7 @@ import urllib.request
 from datetime import datetime, timedelta
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-VERSION = "6.84"
+VERSION = "6.85"
 SCHEMA = 21
 
 
@@ -4850,11 +4850,18 @@ textarea{width:100%;height:130px;background:var(--panel2);color:var(--text);bord
 .cc img.face{width:100%;height:100%;object-fit:cover;display:block}
 .cc .noimg{display:flex;align-items:center;justify-content:center;height:100%;
   color:var(--dim);font-size:12px;text-align:center;padding:10px}
+/* Fixed dark/white/gold-fill regardless of theme, not var(--line)/
+   var(--text)/var(--gold) - same reasoning as the card-flip button: this
+   chip sits ON the card artwork underneath it, not on the page background,
+   so it shouldn't invert with the page theme. In light theme var(--text)
+   is near-black, which on this already-dark chip made the "+" all but
+   disappear, worst on hover where var(--gold) (also dark in light theme,
+   see :root[data-theme="light"] above) took over. */
 .cc .tilecart{position:absolute;bottom:7px;right:7px;background:rgba(15,19,25,.92);
-  border:1px solid var(--line);color:var(--text);border-radius:5px;padding:2px 9px;
+  border:1px solid rgba(255,255,255,.22);color:#e8ebef;border-radius:5px;padding:2px 9px;
   font-size:14px;line-height:1.3;opacity:0;transition:opacity .13s}
 .cc:hover .tilecart{opacity:1}
-.cc .tilecart:hover{border-color:var(--gold);color:var(--gold)}
+.cc .tilecart:hover{border-color:var(--gold-fill);color:var(--gold-fill)}
 /* bulk-select checkbox: used to sit over the card art (top-left of .imgwrap)
    but that covered part of the illustration - now it's inline before the
    card name instead, same row, never overlapping the image. */
@@ -5611,7 +5618,6 @@ en:{
   "cardPage.buyOnCardmarket":"Buy on Cardmarket · {price}","cardPage.buyFoil":"Buy foil · {price}",
   "cardPage.viewOnScryfall":"View on Scryfall","cardPage.regular":"Regular",
   "cardPage.copiesOwned":"Copies owned","cardPage.yourCollection":"Your collection",
-  "cardPage.availableAs":"Available as",
   "cardPage.setTo4":"Add 4 copies",
   "cardPage.wantListEntry":"Wants-List entry","cardPage.set":"Set",
   "cardPage.illustratedBy":"Illustrated by {artist}","cardPage.formatLegality":"Format legality",
@@ -6101,7 +6107,6 @@ de:{
   "cardPage.buyOnCardmarket":"Auf Cardmarket kaufen · {price}","cardPage.buyFoil":"Foil kaufen · {price}",
   "cardPage.viewOnScryfall":"Auf Scryfall ansehen","cardPage.regular":"Normal",
   "cardPage.copiesOwned":"Kopien in Besitz","cardPage.yourCollection":"Deine Sammlung",
-  "cardPage.availableAs":"Verfügbar als",
   "cardPage.setTo4":"4 Kopien hinzufügen",
   "cardPage.wantListEntry":"Wants-Liste-Eintrag","cardPage.set":"Set",
   "cardPage.illustratedBy":"Illustriert von {artist}","cardPage.formatLegality":"Format-Legalität",
@@ -7840,9 +7845,7 @@ async function cardPage(sc,nr){
         <div class="card"><div class="k">${t("cardPage.regular")}</div>
           <div class="v" style="font-size:22px;color:var(--gold)">${d.eur?money(d.eur):"—"}</div></div>
         <div class="card"><div class="k">${t("setPage.thFoil")}</div>
-          <div class="v" style="font-size:22px">${d.foil?money(d.foil):"—"}</div>
-          <div class="n">${t("cardPage.availableAs")}: ${(d.finishes||"").split(",").filter(Boolean)
-            .map(f=>f[0].toUpperCase()+f.slice(1)).join(", ")||"—"}</div></div>
+          <div class="v" style="font-size:22px">${d.foil?money(d.foil):"—"}</div></div>
         <div class="card"><div class="k">${t("cardPage.copiesOwned")}</div>
           <div class="v" id="qtyTotal" style="font-size:22px;color:${d.qty?"var(--ok)":"var(--muted)"}">${d.qty}</div></div>
         <div class="card"><div class="k">${t("missing.thRarity")}</div>
