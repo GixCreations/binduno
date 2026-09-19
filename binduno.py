@@ -16,7 +16,7 @@ import urllib.request
 from datetime import datetime, timedelta
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-VERSION = "6.81"
+VERSION = "6.82"
 SCHEMA = 21
 
 
@@ -4374,10 +4374,21 @@ PAGE = r"""<!DOCTYPE html><html lang="en"><head><meta charset="utf-8">
  --nav-bg:rgba(15,19,25,.94)}
 :root[data-theme="light"]{
  --bg:#f5f3ee;--panel:#ffffff;--panel2:#f0ede6;--line:#d9d3c5;--text:#211d16;
- --muted:#6b6558;--dim:#766f5d;--track:#cdc6b4;
- /* --dim vs --bg measured at 4.40:1 - just under the 4.5:1 AA line for the
-    small secondary text it's used as (timestamps, sub-labels). #766f5d
-    is the same hue nudged one step darker, clearing 4.51:1. */
+ /* --muted/--dim only barely cleared AA (or, for --dim, didn't quite) -
+    legal, but visibly washed out next to --text on a light page, and
+    exactly what read as "gray on beige" (nav tabs, tile labels, sub-text,
+    all --muted; the by-rarity row labels use it too). Both darkened
+    well past the 4.5:1 floor instead of just to it: #5a5549 now clears
+    7.42:1 (was #6b6558, 5.22:1) and #676051 clears 6.23:1 (was #766f5d,
+    a same-hue nudge that only just cleared 4.51:1). --track (the empty
+    portion of the donut rings and every progress bar) had the identical
+    problem in a non-text form - 1.70:1 against --panel, so close to it
+    it was barely possible to see where a bar/ring even was. #b4aa93
+    clears 2.30:1 - a real boundary without swallowing the colored fills
+    that sit on top of it (those still need to read as "the filled
+    part", so this doesn't chase full black-level contrast the way text
+    does). */
+ --muted:#5a5549;--dim:#676051;--track:#b4aa93;
  --w:#7e6d25;--u:#2b6ea8;--b:#6b5a92;--r:#a83f2e;--g:#3d7a4f;
  /* --gold used to just be a darkened version of the dark theme's yellow-
     gold (#d4a629), re-picked twice (#93690f, then #8a6000) trying to fix
@@ -7486,12 +7497,16 @@ const cardTile=(c,opts)=>{
   opts=opts||{};
   const qn=c.qtyNormal||0,qf=c.qtyFoil||0,qt=qn+qf;
   // "Regular" told you nothing a bare copy count didn't already - dropped.
-  // In its place: which version you own, but only when the name actually
-  // has more than one printing in this set (cmVer>0 - see VAR() above for
-  // why cmVer and not the plain ver column) - a single printing needs no
-  // label at all, same rule the (V.n) wantlist badge already follows
-  // elsewhere. Foil is always worth flagging on its own.
-  const regTxt=(qn&&c.cmVer>0)?`V.${c.cmVer} ${qn}×`:"";
+  // In its place: which version you own (only when the name actually has
+  // more than one printing in this set - cmVer>0, see VAR() above for why
+  // cmVer and not the plain ver column - a single printing needs no
+  // version prefix, same rule the (V.n) wantlist badge follows elsewhere),
+  // but the quantity itself always shows whenever qn>0 regardless - an
+  // earlier version of this line dropped the whole badge (qty included)
+  // for single-printing names, silently showing no count at all for an
+  // owned card instead of falling back to a bare "3×". Foil is always
+  // worth flagging on its own.
+  const regTxt=qn?(c.cmVer>0?`V.${c.cmVer} ${qn}×`:`${qn}×`):"";
   const foilTxt=qf?`${t("setPage.thFoil")} ${qf}×`:"";
   const ownLabel=[regTxt,foilTxt].filter(Boolean).join(" · ");
   return `<div class="cc" data-card="${c.set}|${c.number}">
@@ -7661,8 +7676,13 @@ function bindWatchToggle(root,cardsArr){
 // the header line above the table (owned/total/%) needs refreshing too.
 // cardsArr/refresh let this serve pages besides the set-detail one it was
 // written for: default (both omitted) keeps the original DETAIL.cards /
-// setPage(DETAIL.code) behaviour, callers elsewhere (the card browser) pass
-// their own card list and their own re-render function instead.
+// setPage(DETAIL.code) behaviour. The card browser passes its own card list
+// and a cheap per-card patch function instead (see cardsPane) - a full
+// setPage-style reload there means refetching + rebuilding the whole
+// (often 24-96 card) page on every single +1 click, which visibly flashes
+// the list and loses scroll position. `refresh` gets the mutated card
+// object (or undefined if it wasn't found in `cardsArr`, e.g. stale
+// pagination) back so it can patch just that one row/tile.
 function bindQuickAdd(root,cardsArr,refresh){
   (root||document).querySelectorAll("[data-qtyadj]").forEach(b=>b.onclick=async ev=>{
     ev.stopPropagation();
@@ -7674,8 +7694,12 @@ function bindQuickAdd(root,cardsArr,refresh){
       await fetch("/api/collection-adjust",{method:"POST",body:JSON.stringify({
         set, number, name:(card&&card.name)||"", foil:foilFlag==="1",
         action:"delta", delta:1})});
+      if(card){
+        if(foilFlag==="1")card.qtyFoil=(card.qtyFoil||0)+1; else card.qtyNormal=(card.qtyNormal||0)+1;
+        card.qty=(card.qty||0)+1;
+      }
     }finally{
-      if(refresh)await refresh(); else await setPage(DETAIL.code);
+      if(refresh)await refresh(card); else await setPage(DETAIL.code);
     }
   });
 }
@@ -8017,7 +8041,7 @@ async function cardsPane(){
          <td>${RAR[c.rarity]?rarLabel(c.rarity):"?"}</td>
          <td class="num">${c.eur?money(c.eur):"—"}</td>
          <td class="num">${c.foil?money(c.foil):"—"}</td>
-         <td class="num">${c.qty||""}</td>
+         <td class="num" data-qtycell="${c.set}|${c.number}">${c.qty||""}</td>
          <td class="num quickadd"><button data-qtyadj="${c.set}|${c.number}|0"
              title="${t('setPage.addRegular')}">+1</button></td>
          <td class="num quickadd"><button data-qtyadj="${c.set}|${c.number}|1"
@@ -8031,8 +8055,35 @@ async function cardsPane(){
     <div class="pager">${pages>1?`<button ${CF.page<=1?"disabled":""} id="cpv">${t("collection.previous")}</button>
       <span>${t("missing.pagerPageOfN",{p:CF.page,n:num(pages)})}</span>
       <button ${CF.page>=pages?"disabled":""} id="cnx">${t("collection.next")}</button>`:""}</div>`;
+  // Patches just the one row/tile a +1 click touched instead of the full
+  // cardsPane() reload bindQuickAdd defaults to - that reload refetches and
+  // rebuilds the whole (often 24-96 card) list on every click, visibly
+  // flashing it and losing scroll position. Falls back to the full reload
+  // if the tile/cell isn't there to patch (shouldn't happen, but a stale
+  // pagination race is cheap insurance).
+  const patchCard=(card)=>{
+    if(!card)return cardsPane();
+    const key=selKey(card);
+    if(CF.view==="grid"){
+      const tile=box.querySelector(`.cc[data-card="${key}"]`);
+      if(!tile)return cardsPane();
+      const tmp=document.createElement("div");
+      tmp.innerHTML=cardTile(card,{quickAdd:true,select:true,selected:CARDSEL.has(key)});
+      const fresh=tmp.firstElementChild;
+      tile.replaceWith(fresh);
+      bindTiles(fresh);bindWatchToggle(fresh,[card]);bindQuickAdd(fresh,r.cards,patchCard);
+      fresh.querySelectorAll(".cardsel").forEach(cb=>cb.onchange=()=>{
+        if(cb.checked)CARDSEL.add(cb.dataset.selkey); else CARDSEL.delete(cb.dataset.selkey);
+        refreshSelBar(CARDSEL,cardsPane);
+        if($("#cardsSelAll"))$("#cardsSelAll").checked=r.cards.length&&r.cards.every(c=>CARDSEL.has(selKey(c)));
+      });
+    }else{
+      const cell=box.querySelector(`[data-qtycell="${key}"]`);
+      if(cell)cell.textContent=card.qty||"";
+    }
+  };
   bindTiles();bindCartButtons();bindSetLinks();bindGridCols();
-  bindWatchToggle(box,r.cards);bindQuickAdd(box,r.cards,cardsPane);bindSelBar(CARDSEL,cardsPane);
+  bindWatchToggle(box,r.cards);bindQuickAdd(box,r.cards,patchCard);bindSelBar(CARDSEL,cardsPane);
   box.querySelectorAll(".cardsel").forEach(cb=>cb.onchange=()=>{
     if(cb.checked)CARDSEL.add(cb.dataset.selkey); else CARDSEL.delete(cb.dataset.selkey);
     refreshSelBar(CARDSEL,cardsPane);
@@ -10154,7 +10205,13 @@ def _render(size, tile=True, palette="dark", mono=None):
     aa = 1.5 / S                                    # edge softness in unit space
     TOP, BOT = (0.129, 0.161, 0.204), (0.043, 0.059, 0.078)
     if palette == "light":
-        GOLD, GOLD2 = (0.576, 0.412, 0.059), (0.706, 0.514, 0.098)
+        # Same #93690f-family muddy brown the CSS --gold went through and
+        # dropped for the identical reason (see :root[data-theme="light"]
+        # in the <style> block) - this Python-rendered PNG never followed
+        # along since it's a completely separate code path. Now the same
+        # deep teal instead, at the same two-tone dark/light relationship
+        # GOLD/GOLD2 have in the dark palette below.
+        GOLD, GOLD2 = (0.028, 0.532, 0.515), (0.038, 0.722, 0.699)
         PALE = (0.176, 0.216, 0.271)                # dark slate instead of cream
     else:
         GOLD, GOLD2 = (0.831, 0.651, 0.161), (0.960, 0.820, 0.380)
