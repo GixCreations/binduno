@@ -16,7 +16,7 @@ import urllib.request
 from datetime import datetime, timedelta
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-VERSION = "6.87"
+VERSION = "6.88"
 SCHEMA = 21
 
 
@@ -4725,6 +4725,11 @@ table.setcards .seg.deckseg button{min-width:60px}
 #deckListWrap table.setcards th.dcPrice{width:108px}
 #deckListWrap table.setcards th.dcRm{width:44px}
 #deckListWrap table.setcards td:first-child{white-space:normal;overflow-wrap:anywhere}
+/* Zebra striping - the name column can wrap to two lines while every
+   column after it (Section, Collection, Set, Price) stays one line, so
+   without an alternating background it was easy to lose track of which
+   row's name lines up with which row's cells further right. */
+#deckListWrap table.setcards tbody tr:nth-child(even){background:var(--panel2)}
 .cc .seg.deckseg{display:flex;width:100%}
 .cc .seg.deckseg button{flex:1 1 0;min-width:0;padding:5px 4px;font-size:11px}
 .cc .dtrow{margin-top:7px;display:flex;justify-content:flex-end}
@@ -8553,8 +8558,15 @@ function deckRow(c,i){
     return `<tr data-di="${i}" style="opacity:.6"><td colspan="${NC-1}">${c.qty>1?c.qty+"× ":""}${esc(c.name)}
       <span class="tag b">${t("deck.notFound")}</span></td>
       <td class="num"><button data-drm="${i}">✕</button></td></tr>`;
+  // Same printing a click on the row would already show in the hover
+  // preview (deckPop) - reused here so the name goes to that exact card
+  // page instead of leaving the name a dead label like every other cell
+  // in this row already had (Section/Collection/Set are all clickable
+  // via their own controls, the name alone wasn't going anywhere).
+  const p=deckChosen(c);
+  const linkAttr=(p&&p.set&&p.number)?` data-card="${p.set}|${p.number}"`:"";
   return `<tr data-di="${i}">
-    <td><span class="setlink" data-pop="${deckPop(c)}">${esc(c.name)}</span> ${deckMiss(c)}</td>
+    <td><span class="setlink"${linkAttr} data-pop="${deckPop(c)}">${esc(c.name)}</span> ${deckMiss(c)}</td>
     ${DECK._hasSec?`<td class="dcSec">${deckSecLbl(c)}</td>`:""}
     <td class="dcColl">${deckCollBadge(c)}</td>
     <td class="num dcQty">${c.qty}</td>
