@@ -16,7 +16,7 @@ import urllib.request
 from datetime import datetime, timedelta
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-VERSION = "6.88"
+VERSION = "6.89"
 SCHEMA = 21
 
 
@@ -2762,8 +2762,15 @@ def set_rows(c):
     of a name are counted once; under "Base set"/"Everything" every eligible
     printing is its own missing entry. Either way, anything at or above the
     endgame threshold is left out of the cost.
+
+    A set with a future `released` date is NOT filtered out (6.89) - prerelease
+    cards exist and get scanned in before Scryfall's own release date, and
+    Scryfall's own printed_size/card list for an upcoming set fills in on its
+    own over spoiler season; Binduno just reflects whatever the last refresh
+    downloaded, same as any other set. Only sets with no release date at all
+    (released == "") are excluded, since those have no place in a by-release
+    sort anyway.
     """
-    today = datetime.now().strftime("%Y-%m-%d")
     tracked, ship_country = tracked_shipping_only(c), shipping_country(c)
     gp = goal_prefs(c)
     eg_eur = endgame_prefs(c)["eur"]
@@ -2786,9 +2793,9 @@ def set_rows(c):
         LEFT JOIN (SELECT set_code, number, SUM(qty) qty FROM collection
                    GROUP BY set_code, number) o
                ON o.set_code = k.set_code AND o.number = k.number
-        WHERE k.digital = 0 AND s.released <> '' AND s.released <= ?
+        WHERE k.digital = 0 AND s.released <> ''
         ORDER BY k.set_code, k.num_int, k.number
-    """, (today,)).fetchall()
+    """).fetchall()
 
     per = {}
     for r in rows:
