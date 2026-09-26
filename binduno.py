@@ -16,7 +16,7 @@ import urllib.request
 from datetime import datetime, timedelta
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-VERSION = "6.89"
+VERSION = "6.90"
 SCHEMA = 21
 
 
@@ -5648,6 +5648,7 @@ en:{
   "cardPage.back":"← Back","cardPage.noImage":"No image available",
   "cardPage.flip":"Flip card",
   "cardPage.buyOnCardmarket":"Buy on Cardmarket · {price}","cardPage.buyFoil":"Buy foil · {price}",
+  "cardPage.buyOnCardmarketNoPrice":"Buy on Cardmarket","cardPage.buyFoilNoPrice":"Buy foil",
   "cardPage.viewOnScryfall":"View on Scryfall","cardPage.regular":"Regular",
   "cardPage.copiesOwned":"Copies owned","cardPage.yourCollection":"Your collection",
   "cardPage.setTo4":"Add 4 copies",
@@ -6137,6 +6138,7 @@ de:{
   "cardPage.back":"← Zurück","cardPage.noImage":"Kein Bild verfügbar",
   "cardPage.flip":"Karte umdrehen",
   "cardPage.buyOnCardmarket":"Auf Cardmarket kaufen · {price}","cardPage.buyFoil":"Foil kaufen · {price}",
+  "cardPage.buyOnCardmarketNoPrice":"Auf Cardmarket kaufen","cardPage.buyFoilNoPrice":"Foil kaufen",
   "cardPage.viewOnScryfall":"Auf Scryfall ansehen","cardPage.regular":"Normal",
   "cardPage.copiesOwned":"Kopien in Besitz","cardPage.yourCollection":"Deine Sammlung",
   "cardPage.setTo4":"4 Kopien hinzufügen",
@@ -7858,13 +7860,13 @@ async function cardPage(sc,nr){
         </svg></button>`:""}
       </div>`
       :`<div class="rules" style="text-align:center">${t("cardPage.noImage")}</div>`}
-      ${d.cardmarket&&d.eur?`<a class="buybtn" href="${d.cardmarket}" target="_blank"
-         rel="noopener">${t("cardPage.buyOnCardmarket",{price:money(d.eur)})}</a>`:""}
-      ${d.cardmarket&&d.foil&&(d.finishes||"").includes("foil")?`<a class="buybtn"
+      ${d.cardmarket&&(d.finishes||"").includes("nonfoil")?`<a class="buybtn" href="${d.cardmarket}" target="_blank"
+         rel="noopener">${d.eur?t("cardPage.buyOnCardmarket",{price:money(d.eur)}):t("cardPage.buyOnCardmarketNoPrice")}</a>`:""}
+      ${d.cardmarket&&(d.finishes||"").includes("foil")?`<a class="buybtn"
          href="${d.cardmarket+(d.cardmarket.includes("?")?"&":"?")+"isFoil=Y"}"
          target="_blank" rel="noopener"
          style="background:linear-gradient(96deg,#c9a227,#e0692c,#4a90c4);color:#12161c">
-         ${t("cardPage.buyFoil",{price:money(d.foil)})}</a>`:""}
+         ${d.foil?t("cardPage.buyFoil",{price:money(d.foil)}):t("cardPage.buyFoilNoPrice")}</a>`:""}
       ${d.scryfall?`<a class="buybtn" href="${d.scryfall}" target="_blank" rel="noopener"
          style="background:var(--panel);color:var(--text);border:1px solid var(--line)">
          ${t("cardPage.viewOnScryfall")}</a>`:""}
