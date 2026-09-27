@@ -16,7 +16,7 @@ import urllib.request
 from datetime import datetime, timedelta
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-VERSION = "6.91"
+VERSION = "6.92"
 SCHEMA = 21
 
 
@@ -215,6 +215,31 @@ NOT_COUNTED = {"token", "memorabilia", "promo", "funny", "alchemy", "minigame",
                "vanguard", "treasure_chest", "box", "from_the_vault",
                "premium_deck", "spellbook"}
 
+# Universes Beyond crossover sets (6.92) - Scryfall's set object has no field
+# for this (set_type is "expansion"/"commander"/"eternal"/"masterpiece" same
+# as any ordinary Magic set), so there is no way to detect it automatically.
+# Fixed list, checked against the real card data - only codes whose set_type
+# ISN'T already in NOT_COUNTED need to be here (their Tokens/Promos/Art
+# Series/Minigames are already excluded regardless). One flagship code plus
+# its Commander/Eternal/masterpiece siblings per crossover. Grows with every
+# new UB release - update on the next one, same discipline as
+# CM_SLD_EXPANSIONS above.
+UNIVERSES_BEYOND_SETS = {
+    "40k",                    # Warhammer 40,000 Commander
+    "bot",                    # Transformers
+    "ltr", "ltc",             # The Lord of the Rings: Tales of Middle-earth (+ Commander)
+    "who",                    # Doctor Who
+    "rex",                    # Jurassic World Collection
+    "pip",                    # Fallout
+    "acr",                    # Assassin's Creed
+    "fin", "fic", "fca",      # Final Fantasy (+ Commander, Through the Ages)
+    "spm", "spe", "mar",      # Marvel's Spider-Man (+ Eternal, Marvel Universe)
+    "tla", "tle",             # Avatar: The Last Airbender (+ Eternal)
+    "tmt", "tmc", "pza",      # Teenage Mutant Ninja Turtles (+ Eternal, Source Material)
+    "msh", "msc",             # Marvel Super Heroes (+ Commander)
+    "trk", "trc", "sds",      # Star Trek (+ Commander, Stardates)
+}
+
 
 # ----------------------------------------------------------------- database
 def connect():
@@ -271,7 +296,7 @@ def init(c):
     CREATE TABLE IF NOT EXISTS collection(
       id INTEGER PRIMARY KEY AUTOINCREMENT,
       set_code TEXT, number TEXT, name TEXT, qty INT, lang TEXT, foil TEXT,
-      purchase_price REAL, purchase_date TEXT, price_source TEXT);
+      purchase_price REAL, purchase_date TEXT, price_source TEXT, binder TEXT);
     CREATE TABLE IF NOT EXISTS history(
       id INTEGER PRIMARY KEY AUTOINCREMENT, ts TEXT, action TEXT, detail TEXT);
     CREATE TABLE IF NOT EXISTS meta(k TEXT PRIMARY KEY, v TEXT);
@@ -297,7 +322,7 @@ def init(c):
         "cart": {"qty": "INT DEFAULT 1", "added": "TEXT"},
         "cards": {"ver": "INT DEFAULT 1", "extras_idx": "INT DEFAULT 0",
                   "cm_suffix": "TEXT", "cm_ver": "INT DEFAULT 1"},
-        "collection": {"lang": "TEXT", "foil": "TEXT"},
+        "collection": {"lang": "TEXT", "foil": "TEXT", "binder": "TEXT"},
     }.items():
         try:
             have = {r["name"] for r in c.execute(f"PRAGMA table_info({table})")}
@@ -328,9 +353,9 @@ def init(c):
         c.execute("""CREATE TABLE collection(
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             set_code TEXT, number TEXT, name TEXT, qty INT, lang TEXT, foil TEXT,
-            purchase_price REAL, purchase_date TEXT, price_source TEXT)""")
-        c.execute("""INSERT INTO collection(set_code,number,name,qty,lang,foil)
-                     SELECT set_code,number,name,qty,lang,foil FROM collection_pre_batch""")
+            purchase_price REAL, purchase_date TEXT, price_source TEXT, binder TEXT)""")
+        c.execute("""INSERT INTO collection(set_code,number,name,qty,lang,foil,binder)
+                     SELECT set_code,number,name,qty,lang,foil,binder FROM collection_pre_batch""")
         c.execute("DROP TABLE collection_pre_batch")
         c.execute("CREATE INDEX IF NOT EXISTS ix_coll_set ON collection(set_code)")
         c.execute("CREATE INDEX IF NOT EXISTS ix_coll_setnum ON collection(set_code, number)")
@@ -2195,23 +2220,32 @@ def _imp_manabox(rows):
                 price = float(raw)
             except ValueError:
                 price = None
+        # "Binder Name" is the only import format that says where a physical
+        # copy actually lives - a regular binder or a built deck, ManaBox
+        # doesn't distinguish the two in this column (Binder Type does, but
+        # the name alone is normally enough to tell "Modern staples" from
+        # "Magda, Brazen Outlaw"). Empty when the card isn't filed anywhere.
         out.append(((r.get("Set code") or ""), (r.get("Collector number") or ""),
                     (r.get("Name") or "").split(" // ")[0], r.get("Quantity"),
-                    r.get("Language"), _foil_norm(r.get("Foil")), price))
+                    r.get("Language"), _foil_norm(r.get("Foil")), price,
+                    (r.get("Binder Name") or "").strip()))
     return out
 
 
 def _imp_moxfield(rows):
+    # Moxfield's CSV is a flat collection export with no per-row binder/deck
+    # column - unlike ManaBox, there's nothing here to carry into `binder`.
     return [((r.get("Edition") or ""), (r.get("Collector Number") or ""),
              (r.get("Name") or "").split(" // ")[0], r.get("Count"),
-             r.get("Language"), _foil_norm(r.get("Foil")), None) for r in rows]
+             r.get("Language"), _foil_norm(r.get("Foil")), None, "") for r in rows]
 
 
 def _imp_archidekt(rows):
+    # Same as Moxfield - no binder/deck-location column in Archidekt's export.
     return [((r.get("Edition Code") or r.get("Set Code") or ""),
              (r.get("Collector Number") or ""),
              (r.get("Name") or "").split(" // ")[0], r.get("Quantity"),
-             r.get("Language"), _foil_norm(r.get("Finish") or r.get("Foil")), None)
+             r.get("Language"), _foil_norm(r.get("Finish") or r.get("Foil")), None, "")
             for r in rows]
 
 
@@ -2234,7 +2268,7 @@ def _detect_format(fields):
 
 
 def _reconcile_batches(old, new, today, source):
-    """old: existing DB rows for one (set,number,lang,foil) key, as
+    """old: existing DB rows for one (set,number,lang,foil,binder) key, as
     (qty, purchase_price, purchase_date, price_source) — oldest first.
     new: freshly parsed rows for the same key from the import file, as
     (qty, purchase_price). Returns the batches to write for that key.
@@ -2269,20 +2303,22 @@ def _reconcile_batches(old, new, today, source):
 
 def _commit_collection_rows(c, raw_rows, mode, label, keep_existing_prices=True):
     """raw_rows: iterable of (set_code, number, name, qty, lang, foil,
-    purchase_price) — the shape every IMPORT_FORMATS parser (and the
+    purchase_price, binder) — the shape every IMPORT_FORMATS parser (and the
     Cardmarket-purchase import) returns; purchase_price is None when the
     source doesn't know one (Moxfield/Archidekt have no such column; ManaBox
-    only when a row has no price or a non-EUR currency). Each distinct
-    (set, number, lang, foil, purchase_price) combination becomes its own
-    batch row, so multiple purchases of the same printing at different
-    prices/times stay distinguishable instead of blending into one average.
+    only when a row has no price or a non-EUR currency); binder is "" unless
+    the source is ManaBox and the card is filed in a binder/deck there. Each
+    distinct (set, number, lang, foil, purchase_price, binder) combination
+    becomes its own batch row, so multiple purchases of the same printing at
+    different prices/times/locations stay distinguishable instead of
+    blending into one average.
     `keep_existing_prices` only matters for mode="replace": whether a card
     that was already in the collection keeps its recorded purchase price
     (see _reconcile_batches) or is priced fresh from this import, as if the
     whole collection were being entered for the first time."""
     source = {"ManaBox": "manabox", "Cardmarket purchase": "cm"}.get(label, label.lower())
     agg, names, cards = {}, {}, 0
-    for setc, num, name, qraw, lang, foil, price in raw_rows:
+    for setc, num, name, qraw, lang, foil, price, binder in raw_rows:
         try:
             q = int(float(qraw or 1))
         except (ValueError, TypeError):
@@ -2290,7 +2326,11 @@ def _commit_collection_rows(c, raw_rows, mode, label, keep_existing_prices=True)
         if q <= 0:
             continue
         pkey = round(price, 2) if price is not None else None
-        key = (setc.lower().strip(), num.strip(), _lang_code(lang), foil, pkey)
+        bkey = (binder or "").strip() or None
+        # binder is part of the key (not just price) so "1 in my binder, 1 in
+        # my Magda deck" stays two visibly-separate batches instead of
+        # blending into an anonymous qty=2 - the whole point of tracking it.
+        key = (setc.lower().strip(), num.strip(), _lang_code(lang), foil, pkey, bkey)
         agg[key] = agg.get(key, 0) + q
         names[key[:4]] = name.strip()
         cards += q
@@ -2298,8 +2338,8 @@ def _commit_collection_rows(c, raw_rows, mode, label, keep_existing_prices=True)
         return {"rows": 0, "cards": 0, "mode": mode}
     today = datetime.now().strftime("%Y-%m-%d")
     new_by_key = {}
-    for (setc, num, lang, foil, price), q in agg.items():
-        new_by_key.setdefault((setc, num, lang, foil), []).append((q, price))
+    for (setc, num, lang, foil, price, binder), q in agg.items():
+        new_by_key.setdefault((setc, num, lang, foil, binder), []).append((q, price))
 
     insert_rows = []
     if mode == "replace":
@@ -2307,32 +2347,33 @@ def _commit_collection_rows(c, raw_rows, mode, label, keep_existing_prices=True)
             backup_user_data(c, "replace-import")
         old_by_key = {}
         if keep_existing_prices:
-            for r in c.execute("""SELECT set_code, number, lang, foil, qty,
+            for r in c.execute("""SELECT set_code, number, lang, foil, binder, qty,
                                           purchase_price, purchase_date, price_source
                                    FROM collection ORDER BY id"""):
-                k = (r["set_code"].lower().strip(), r["number"].strip(), r["lang"], r["foil"])
+                k = (r["set_code"].lower().strip(), r["number"].strip(), r["lang"], r["foil"],
+                     r["binder"] or None)
                 old_by_key.setdefault(k, []).append(
                     (r["qty"], r["purchase_price"], r["purchase_date"], r["price_source"]))
         c.execute("DELETE FROM collection")
-        for k4, new_batches in new_by_key.items():
-            setc, num, lang, foil = k4
-            if keep_existing_prices and k4 in old_by_key:
-                batches = _reconcile_batches(old_by_key[k4], new_batches, today, source)
+        for k5, new_batches in new_by_key.items():
+            setc, num, lang, foil, binder = k5
+            if keep_existing_prices and k5 in old_by_key:
+                batches = _reconcile_batches(old_by_key[k5], new_batches, today, source)
             else:
                 batches = [(q, price, today, source if price is not None else None)
                            for q, price in new_batches]
             for q, price, date, src in batches:
-                insert_rows.append((setc, num, names[k4], q, lang, foil, price, date, src))
+                insert_rows.append((setc, num, names[k5[:4]], q, lang, foil, price, date, src, binder))
     else:
-        for k4, new_batches in new_by_key.items():
-            setc, num, lang, foil = k4
+        for k5, new_batches in new_by_key.items():
+            setc, num, lang, foil, binder = k5
             for q, price in new_batches:
                 src = source if price is not None else None
-                insert_rows.append((setc, num, names[k4], q, lang, foil, price,
-                                    today if price is not None else None, src))
+                insert_rows.append((setc, num, names[k5[:4]], q, lang, foil, price,
+                                    today if price is not None else None, src, binder))
     c.executemany("""INSERT INTO collection
-                      (set_code,number,name,qty,lang,foil,purchase_price,purchase_date,price_source)
-                      VALUES(?,?,?,?,?,?,?,?,?)""", insert_rows)
+                      (set_code,number,name,qty,lang,foil,purchase_price,purchase_date,price_source,binder)
+                      VALUES(?,?,?,?,?,?,?,?,?,?)""", insert_rows)
     meta_set(c, "collection_updated", datetime.now().isoformat(timespec="seconds"))
     log(c, "Collection", f"{cards:,} cards imported ({label}, {mode} mode)")
     c.commit()
@@ -2436,7 +2477,7 @@ def import_cm_purchase(c, items, mode="add"):
         except (ValueError, TypeError):
             price = None
         rows.append((code, num, name, it.get("qty") or 1,
-                     it.get("lang") or "en", "foil" if it.get("foil") else "normal", price))
+                     it.get("lang") or "en", "foil" if it.get("foil") else "normal", price, ""))
     result = _commit_collection_rows(c, rows, mode, "Cardmarket purchase")
     result["matched"] = len(rows)
     result["skipped"] = len(skipped)
@@ -2595,15 +2636,22 @@ def resolve_deck(c, parsed):
         min_eur = round(min(prices), 2) if prices else 0.0
         # Which sets you already own this card name in (front-face tolerant),
         # for the green/yellow/red collection badge like the Cardmarket helper.
-        owned_in = {r["set_code"]: r["q"] for r in c.execute(
-            """SELECT k.set_code, COALESCE(SUM(o.qty),0) q
-                 FROM cards k JOIN collection o
-                   ON o.set_code=k.set_code AND o.number=k.number
-                WHERE k.digital=0
-                  AND (k.name=? COLLATE NOCASE OR k.name_de=? COLLATE NOCASE
-                       OR k.name LIKE ? COLLATE NOCASE)
-                GROUP BY k.set_code HAVING q>0""",
-            (name, name, front + " // %")).fetchall()}
+        # Grouped by binder too (not just set) so the deck-list badge/pick-set
+        # popup can show WHERE each owned copy actually is, the way ManaBox
+        # reports it ("DS Binder" vs the "Magda, Brazen Outlaw" deck).
+        owned_in, owned_detail = {}, []
+        for r in c.execute(
+                """SELECT k.set_code, o.binder, COALESCE(SUM(o.qty),0) q
+                     FROM cards k JOIN collection o
+                       ON o.set_code=k.set_code AND o.number=k.number
+                    WHERE k.digital=0
+                      AND (k.name=? COLLATE NOCASE OR k.name_de=? COLLATE NOCASE
+                           OR k.name LIKE ? COLLATE NOCASE)
+                    GROUP BY k.set_code, o.binder HAVING q>0""",
+                (name, name, front + " // %")):
+            owned_in[r["set_code"]] = owned_in.get(r["set_code"], 0) + r["q"]
+            if r["binder"]:
+                owned_detail.append({"set": r["set_code"], "binder": r["binder"], "qty": r["q"]})
         pset = (it.get("set") or "").lower()
         pnum = str(it.get("num") or "").strip()
         if pset and pset not in real_sets:             # parser grabbed "(Foil)" etc.
@@ -2631,7 +2679,8 @@ def resolve_deck(c, parsed):
                     "printings": printings, "status": status,
                     "minEur": min_eur,
                     "owned": sum(owned_in.values()),
-                    "ownedSets": list(owned_in.keys())})
+                    "ownedSets": list(owned_in.keys()),
+                    "ownedDetail": owned_detail})
     return {"cards": out}
 
 
@@ -2774,6 +2823,7 @@ def set_rows(c):
     tracked, ship_country = tracked_shipping_only(c), shipping_country(c)
     gp = goal_prefs(c)
     eg_eur = endgame_prefs(c)["eur"]
+    exclude_ub = meta_get(c, "exclude_ub") == "1"
     prefs, sealed = {}, {}
     for r in c.execute("SELECT code,mode,sealed_note,sealed_price FROM set_pref"):
         prefs[r["code"]] = r["mode"]
@@ -2818,7 +2868,8 @@ def set_rows(c):
             cat, label = "Special Set", "Eternal"
         lang_only = m["lang_only"] or ""
         auto = ((st not in NOT_COUNTED) and (code not in LANG_EXCLUDED)
-                and not lang_only)
+                and not lang_only
+                and not (exclude_ub and code in UNIVERSES_BEYOND_SETS))
         pref = prefs.get(code)
         counted = True if pref == "include" else (False if pref == "exclude" else auto)
         ship = shipping(missing, missing_value, tracked, ship_country)
@@ -3484,7 +3535,7 @@ def card_detail(c, code, number):
     # separate lines instead of one blended quantity.
     copies = []
     for x in c.execute("""SELECT o.id, o.set_code, s.name set_name, o.number, o.foil, o.qty,
-                                 o.purchase_price, o.purchase_date, o.price_source,
+                                 o.purchase_price, o.purchase_date, o.price_source, o.binder,
                                  k.eur, k.eur_foil, k.img
                           FROM collection o
                           JOIN cards k ON k.set_code=o.set_code AND k.number=o.number
@@ -3499,7 +3550,8 @@ def card_detail(c, code, number):
                        "purchasePrice": round(x["purchase_price"], 2)
                                         if x["purchase_price"] is not None else None,
                        "purchaseDate": x["purchase_date"] or "",
-                       "priceSource": x["price_source"] or "", "trend": round(trend, 2)})
+                       "priceSource": x["price_source"] or "", "trend": round(trend, 2),
+                       "binder": x["binder"] or ""})
     return {"set": r["set_code"], "setName": r["set_name"], "setIcon": r["icon"],
             "inWatchlist": in_watchlist,
             "released": r["released"], "number": r["number"], "name": r["name"],
@@ -3652,6 +3704,7 @@ def _sets_stamp(c):
         SCHEMA, VERSION,          # a new build may compute the aggregates differently
         json.dumps(goal_prefs(c), sort_keys=True),
         json.dumps(endgame_prefs(c), sort_keys=True),
+        meta_get(c, "exclude_ub", "0"),
         shipping_country(c), tracked_shipping_only(c),
         tuple(sorted(
             (r["code"], r["mode"] or "", r["sealed_note"] or "", r["sealed_price"] or 0)
@@ -3868,6 +3921,7 @@ class Handler(BaseHTTPRequestHandler):
                             "cmHelper": {"on": meta_get(c, "cm_helper_on", "1") == "1",
                                          "lastSeen": meta_get(c, "cm_helper_last_seen", "")},
                             "showCosts": meta_get(c, "show_costs") == "1",
+                            "excludeUb": meta_get(c, "exclude_ub") == "1",
                             "hideOffGoal": meta_get(c, "hide_offgoal") == "1",
                             "githubRepo": github_repo(c),
                             "update": UPDATE,
@@ -4258,6 +4312,12 @@ class Handler(BaseHTTPRequestHandler):
             self.send_json({"ok": True, "endgame": {
                 "on": meta_get(c, "endgame_on") == "1",
                 "eur": float(meta_get(c, "endgame_eur") or ENDGAME_EUR)}})
+        elif self.path == "/api/ub-pref":
+            d = json.loads(raw)
+            if "on" in d:
+                meta_set(c, "exclude_ub", "1" if d["on"] else "0")
+            bust()                                   # cached_sets totals depend on this
+            self.send_json({"ok": True, "excludeUb": meta_get(c, "exclude_ub") == "1"})
         elif self.path == "/api/onboarding":
             d = json.loads(raw)
             meta_set(c, "onboarding_done", "1" if d.get("done") else "0")
@@ -5165,9 +5225,20 @@ tr.child2 td:first-child::before{left:36px}
   .set .hd{min-height:0}
   .rarrow{grid-template-columns:66px 1fr 96px;gap:8px}
   .rarrow .nm{font-size:10.5px;white-space:nowrap}
-  .cartrow{grid-template-columns:38px 1fr auto;gap:8px 10px;padding:10px}
+  /* Two tight rows instead of the desktop's one wide one: thumbnail spans
+     both on the left, name+remove on row 1, qty/price/total packed onto
+     row 2 - the previous mobile rule only reset the column count and let
+     qty/price/total each grab a full-width row of their own (3 nearly-empty
+     rows per card), which is what made every cart entry so tall. */
+  .cartrow{grid-template-columns:38px 1fr auto auto;grid-template-rows:auto auto;
+    gap:3px 8px;padding:9px 10px;align-items:center}
+  .cartrow img,.cartrow>span:first-child{grid-row:1/3;grid-column:1;align-self:start}
   .cartrow img{width:38px}
-  .cartrow .qbtn,.cartrow>:nth-child(4),.cartrow>:nth-child(5){grid-column:2/-1}
+  .cartrow>div:nth-child(2){grid-row:1;grid-column:2/4}
+  .cartrow>button:last-child{grid-row:1;grid-column:4;justify-self:end}
+  .cartrow .qbtn{grid-row:2;grid-column:2}
+  .cartrow>div:nth-child(4){grid-row:2;grid-column:3;justify-self:end}
+  .cartrow>div:nth-child(5){grid-row:2;grid-column:4;justify-self:end}
   .opt{grid-template-columns:1fr 92px;gap:8px}
   .radio{flex-direction:column;gap:8px}
   .helpnav{gap:6px}
@@ -5425,6 +5496,7 @@ en:{
   "deck.parseBtn":"Read deck list","deck.parsing":"Reading…",
   "deck.startOver":"New list","deck.allAny":"All: any set","deck.allDeck":"All: keep deck's set",
   "deck.generateBtn":"Generate Wants-List",
+  "deck.onlyMissing":"Only cards I still need",
   "deck.nToBuy":"{n} to buy","deck.nNotFound":"{n} not found",
   "deck.anySet":"Any set","deck.pickSet":"Pick set",
   "deck.notFound":"not in card data",
@@ -5434,6 +5506,7 @@ en:{
   "deck.priceApprox":"Totals are a lower bound — cards on “any set” use their cheapest printing, and cards with no Cardmarket price count as 0.",
   "deck.collIn":"in collection","deck.collOther":"other set","deck.collMissing":"missing",
   "deck.collPartial":"{owned}/{qty} owned",
+  "deck.ownedTipTitle":"Where your copies are",
   "deck.sortOrig":"Deck order","deck.sortSection":"Section","deck.sortColl":"Collection status",
   "deck.filterAll":"All cards","deck.filterBuy":"To buy","deck.filterOwned":"In collection",
   "deck.filterMissing":"Missing","deck.filterOther":"Other set",
@@ -5489,6 +5562,9 @@ en:{
   "goal.extras":"Special printings (Showcase, Borderless, Extended Art, special foils)","goal.extrasInclude":"Add to the goal","goal.extrasExclude":"Don't add to the goal",
   "goal.extrasNote":"Already-owned special printings always complete a card name, no matter this setting. It only controls whether they also count as their own separate targets — which only matters under \"every collector number\".",
   "goal.serialized":"Serialized cards (numbered limited prints)","goal.serializedInclude":"Count toward 100%","goal.serializedExclude":"Don't count","goal.serializedNote":"Only relevant while special printings count.",
+  "ub.title":"Universes Beyond",
+  "ub.desc":"Crossover sets - The Lord of the Rings, Doctor Who, Final Fantasy, Marvel, Transformers and the like - don't count toward set completion when this is on. A set you already added cards from still shows up on its own (see Collection); this only changes what home stats and \"sets completed\" add up.",
+  "ub.enable":"Don't count Universes Beyond sets",
   "endgame.title":"Very expensive cards",
   "endgame.desc":"Cards whose cheapest printing is at or above the threshold are set aside: they don't count toward a set's missing cards or its cost, and are shown on their own on the home page instead. Turn this off to treat them like any other missing card.",
   "endgame.enable":"Set aside cards above a price threshold",
@@ -5528,6 +5604,7 @@ en:{
   "shipPref.tracked":"Tracked only","shipPref.trackedDesc":"Always estimate the tracked "+
     "shipping rate for the selected country, for when you only ever want tracked shipping.",
   "manageUpdate.importTitle":"Import collection",
+  "manageUpdate.binderNote":"Only ManaBox exports include which binder or deck each card is filed in — Binduno shows that wherever it's known (card pages, deck-list review). Moxfield and Archidekt exports don't carry it.",
   "manageUpdate.replace":"Replace",
   "manageUpdate.replaceDesc":"Wipe the stored collection and use this file as the new truth.",
   "manageUpdate.add":"Add",
@@ -5913,6 +5990,7 @@ de:{
   "deck.parseBtn":"Deckliste einlesen","deck.parsing":"Wird gelesen…",
   "deck.startOver":"Neue Liste","deck.allAny":"Alle: irgendein Set","deck.allDeck":"Alle: Deck-Set behalten",
   "deck.generateBtn":"Wants-Liste erzeugen",
+  "deck.onlyMissing":"Nur noch benötigte Karten",
   "deck.nToBuy":"{n} zu kaufen","deck.nNotFound":"{n} nicht gefunden",
   "deck.anySet":"Irgendein Set","deck.pickSet":"Set wählen",
   "deck.notFound":"nicht in den Kartendaten",
@@ -5922,6 +6000,7 @@ de:{
   "deck.priceApprox":"Die Summen sind eine Untergrenze — Karten auf „irgendein Set“ rechnen mit dem günstigsten Druck, Karten ohne Cardmarket-Preis zählen als 0.",
   "deck.collIn":"in Sammlung","deck.collOther":"anderes Set","deck.collMissing":"fehlt",
   "deck.collPartial":"{owned}/{qty} vorhanden",
+  "deck.ownedTipTitle":"Wo deine Exemplare liegen",
   "deck.sortOrig":"Deck-Reihenfolge","deck.sortSection":"Bereich","deck.sortColl":"Sammlungsstatus",
   "deck.filterAll":"Alle Karten","deck.filterBuy":"Zu kaufen","deck.filterOwned":"In Sammlung",
   "deck.filterMissing":"Fehlt","deck.filterOther":"Anderes Set",
@@ -5977,6 +6056,9 @@ de:{
   "goal.extras":"Sonderdrucke (Showcase, Borderless, Extended Art, Spezial-Foils)","goal.extrasInclude":"Ins Ziel aufnehmen","goal.extrasExclude":"Nicht ins Ziel aufnehmen",
   "goal.extrasNote":"Bereits besessene Sonderdrucke erfüllen einen Kartennamen immer, unabhängig von dieser Einstellung. Sie legt nur fest, ob sie zusätzlich als eigene Ziele zählen — relevant nur bei „jede Sammlernummer“.",
   "goal.serialized":"Serialisierte Karten (nummerierte limitierte Prints)","goal.serializedInclude":"Zählen zur 100 %","goal.serializedExclude":"Zählen nicht","goal.serializedNote":"Nur relevant, solange Sonderdrucke mitzählen.",
+  "ub.title":"Universes Beyond",
+  "ub.desc":"Crossover-Sets — Der Herr der Ringe, Doctor Who, Final Fantasy, Marvel, Transformers und ähnliche — zählen nicht zur Set-Vervollständigung, wenn das an ist. Ein Set, von dem du schon Karten hast, bleibt trotzdem in der Sammlung sichtbar (siehe Collection) — nur Home-Statistik und „Sets komplett“ rechnen es nicht mehr mit ein.",
+  "ub.enable":"Universes-Beyond-Sets nicht zählen",
   "endgame.title":"Sehr teure Karten",
   "endgame.desc":"Karten, deren günstigster Druck den Schwellwert erreicht oder überschreitet, werden zurückgestellt: sie zählen nicht zu den fehlenden Karten eines Sets und nicht zu dessen Kosten, sondern werden separat auf der Startseite gezeigt. Aus = sie zählen wie jede andere fehlende Karte.",
   "endgame.enable":"Karten über einem Preis-Schwellwert zurückstellen",
@@ -6017,6 +6099,7 @@ de:{
     "Versandtarif des gewählten Landes — für alle, die grundsätzlich nur getrackten "+
     "Versand wollen.",
   "manageUpdate.importTitle":"Sammlung importieren",
+  "manageUpdate.binderNote":"Nur ManaBox-Exporte enthalten, in welchem Ordner oder Deck eine Karte liegt — Binduno zeigt das, wo bekannt (Kartenseiten, Deckliste-Ansicht). Moxfield- und Archidekt-Exporte liefern diese Info nicht.",
   "manageUpdate.replace":"Ersetzen",
   "manageUpdate.replaceDesc":"Gespeicherte Sammlung löschen und diese Datei als neue Wahrheit verwenden.",
   "manageUpdate.add":"Hinzufügen",
@@ -7960,7 +8043,7 @@ async function cardPage(sc,nr){
     $("#copiesBody").innerHTML=rows.map(cp=>`<div class="li" data-card="${cp.set}|${cp.number}"
         data-pop="${cp.img||""}">
         <span class="nm">${cp.setName} <span class="varlbl">${cp.foil?t("setPage.thFoil"):t("cardPage.regular")}</span></span>
-        <span class="mt">#${cp.number} · ${cp.qty}×</span>
+        <span class="mt">#${cp.number} · ${cp.qty}×${cp.binder?` · ${esc(cp.binder)}`:""}</span>
         <span class="mt" style="flex:0 0 96px" onclick="event.stopPropagation()">
           <input type="number" step="0.01" min="0" class="priceIn" data-copyid="${cp.id}"
             value="${cp.purchasePrice!=null?cp.purchasePrice:""}"
@@ -8367,7 +8450,8 @@ async function drawCart(){
 }
 
 /* ---------------- deck list -> Wants-List ---------------- */
-let DECK={text:"",format:"auto",cards:null,view:"table",q:"",sort:"orig",dir:1,filter:"all",pick:null};
+let DECK={text:"",format:"auto",cards:null,view:"table",q:"",sort:"orig",dir:1,filter:"all",pick:null,
+  onlyMissing:true};
 // keep a reviewed deck (including every per-card set choice) across reloads and
 // navigation for the session; skip the write if it's too big for the quota.
 function deckSave(){
@@ -8424,13 +8508,25 @@ function deckColl(c){
   const inTarget=c.mode==="any"?true:(c.ownedSets||[]).includes((deckChosen(c)||{}).set);
   return inTarget?"in":"other";
 }
+// ManaBox is the only import format that says which binder/deck a card is
+// filed in (Moxfield/Archidekt don't have that column) - when it's known,
+// a hover tooltip on the badge lists where, per set, using the printing's
+// own set name from c.printings rather than a bare code.
+function deckOwnedTip(c){
+  const det=c.ownedDetail||[];
+  if(!det.length)return null;
+  const nameOf=s=>{const p=(c.printings||[]).find(p=>p.set===s);return p?p.setName:s.toUpperCase();};
+  return det.map(d=>`${esc(nameOf(d.set))}: ${esc(d.binder)}${d.qty>1?` ×${d.qty}`:""}`).join("<br>");
+}
 function deckCollBadge(c){
   const s=deckColl(c);
   if(s==="na")return "";
+  const tip=deckOwnedTip(c);
+  const tipAttr=tip?` data-tip-title="${t("deck.ownedTipTitle")}" data-tip="${tip}"`:"";
   if(s==="partial")
-    return `<span class="tag r">${t("deck.collPartial",{owned:c.owned||0,qty:c.qty||1})}</span>`;
+    return `<span class="tag r"${tipAttr}>${t("deck.collPartial",{owned:c.owned||0,qty:c.qty||1})}</span>`;
   const M={in:["l","deck.collIn"],other:["r","deck.collOther"],missing:["b","deck.collMissing"]};
-  return `<span class="tag ${M[s][0]}">${t(M[s][1])}</span>`;
+  return `<span class="tag ${M[s][0]}"${tipAttr}>${t(M[s][1])}</span>`;
 }
 function deckSecLbl(c){
   const n=deckSecName(c);
@@ -8467,7 +8563,7 @@ function drawDeck(){
     return;
   }
   const cs=DECK.cards;
-  const nOut=cs.filter(c=>c.status!=="notFound").length;
+  const nOut=cs.filter(c=>c.status!=="notFound"&&(!DECK.onlyMissing||deckColl(c)!=="in")).length;
   const nBad=cs.filter(c=>c.status==="notFound").length;
   const hasSec=cs.some(deckHasSec);
   DECK._hasSec=hasSec;
@@ -8492,11 +8588,16 @@ function drawDeck(){
       <div class="seg"><button data-dv="table" class="${DECK.view==="table"?"on":""}">${t("collection.table")}</button>
         <button data-dv="grid" class="${DECK.view==="grid"?"on":""}">${t("collection.grid")}</button></div>
       <span class="pill">${t("deck.nToBuy",{n:nOut})}${nBad?" · "+t("deck.nNotFound",{n:nBad}):""}</span>
-      <button id="dgen" class="pri" style="margin-left:auto">${t("deck.generateBtn")}</button></div>
+      <label class="chk" style="margin:0 0 0 auto"><input type="checkbox" id="donlymissing" ${
+        DECK.onlyMissing?"checked":""}> ${t("deck.onlyMissing")}</label>
+      <button id="dgen" class="pri">${t("deck.generateBtn")}</button></div>
     <div id="deckSummary" style="margin:0 0 12px"></div>
     <div id="deckWL"></div>
     <div id="deckListWrap" style="margin-top:12px"></div>
-    <div class="tools" style="margin-top:14px"><button id="dgen2" class="pri">${t("deck.generateBtn")}</button></div>`;
+    <div class="tools" style="margin-top:14px">
+      <label class="chk" style="margin:0"><input type="checkbox" id="donlymissing2" ${
+        DECK.onlyMissing?"checked":""}> ${t("deck.onlyMissing")}</label>
+      <button id="dgen2" class="pri">${t("deck.generateBtn")}</button></div>`;
   deckRefreshSummary();
   const view=deckSelect();
   const wrap=$("#deckListWrap");
@@ -8526,6 +8627,8 @@ function drawDeck(){
   $("#dsort").onchange=()=>{DECK.sort=$("#dsort").value;drawDeck();};
   $("#ddir").onclick=()=>{DECK.dir=-DECK.dir;drawDeck();};
   $("#dfilt").onchange=()=>{DECK.filter=$("#dfilt").value;drawDeck();};
+  $("#donlymissing").onchange=e=>{DECK.onlyMissing=e.target.checked;drawDeck();};
+  $("#donlymissing2").onchange=e=>{DECK.onlyMissing=e.target.checked;drawDeck();};
   document.querySelectorAll("[data-dv]").forEach(b=>b.onclick=()=>{DECK.view=b.dataset.dv;drawDeck();});
   $("#dgen").onclick=deckGenerate;$("#dgen2").onclick=deckGenerate;
   bindDeckRows();
@@ -8694,13 +8797,20 @@ function deckOpenPick(i){
       <input type="search" class="dpq" placeholder="${t("missing.searchPlaceholder")}" style="flex:2 1 150px">
       <button class="dpx" title="${t("common.close")}">✕</button></div>
     <div class="list dplist" style="max-height:300px;overflow:auto;border:1px solid var(--line);border-radius:5px">
-    ${c.printings.map((p,pi)=>`<div class="li dpr" data-dpr="${i}|${pi}" data-pop="${p.img}"
+    ${c.printings.map((p,pi)=>{
+      // Which of the owned copies (if any) are in exactly this printing's
+      // set, and where - lets the picker double as "oh, I already have 2 of
+      // these in my Magda deck" instead of only showing after committing.
+      const here=(c.ownedDetail||[]).filter(d=>d.set===p.set);
+      const hereTxt=here.map(d=>`${esc(d.binder)}${d.qty>1?` ×${d.qty}`:""}`).join(", ");
+      return `<div class="li dpr" data-dpr="${i}|${pi}" data-pop="${p.img}"
         data-name="${esc(p.setName.toLowerCase())} ${p.set}${p.extras?" extras":""}">
       ${p.img?`<img src="${p.img}" width="34" height="47" loading="lazy" style="border-radius:3px">`:"<span style='flex:0 0 34px'></span>"}
       <span class="nm">${esc(p.setName)}${p.extras?` <span class="tag r">${t("deck.extras")}</span>`:""}
-        <span class="mt" style="color:var(--dim)">${p.set.toUpperCase()} · #${p.number}${p.released?" · "+p.released.slice(0,4):""}</span></span>
+        <span class="mt" style="color:var(--dim)">${p.set.toUpperCase()} · #${p.number}${p.released?" · "+p.released.slice(0,4):""}${
+          hereTxt?` · <span style="color:var(--ok)">${hereTxt}</span>`:""}</span></span>
       <span class="mt" style="flex:0 0 64px;text-align:right;color:var(--gold)">${p.eur?money(p.eur):"—"}</span>
-    </div>`).join("")}</div></div>`;
+    </div>`;}).join("")}</div></div>`;
   if(DECK.view==="grid")
     anchor.insertAdjacentHTML("afterend",`<div class="deckpickwrap" style="grid-column:1/-1">${inner}</div>`);
   else
@@ -8730,13 +8840,24 @@ function deckOpenPick(i){
 }
 function deckGenerate(){
   let warn=false;
-  const lines=DECK.cards.filter(c=>c.status!=="notFound").map(c=>{
-    if(c.mode==="any"||(!c.deckPrinting&&c.mode!=="set"))
-      return (c.qty>1?c.qty+"x ":"")+c.name;
-    const p=c.mode==="set"?c.chosen:c.deckPrinting;
-    if(p.cmVer===-1)warn=true;
-    return wantLine({name:c.name,cmVer:p.cmVer,cmSuffix:p.cmSuffix,cmExpansion:p.cmExpansion},p.setName,c.qty);
-  });
+  const only=DECK.onlyMissing;
+  // "Only cards I still need" reuses the exact same "in collection" test as
+  // the To-buy filter - a row targeting a specific printing you own enough
+  // of elsewhere ("other set") stays in, since choosing that printing was
+  // deliberate (a matching-set/completionist buy), same as the filter always
+  // did. Only "partial" (own some, not enough) trims its own line down to
+  // the shortfall - deck-legal count doesn't care which printing the copies
+  // you already have came from, so no reason to buy the full amount again.
+  const lines=DECK.cards
+    .filter(c=>c.status!=="notFound"&&(!only||deckColl(c)!=="in"))
+    .map(c=>{
+      const qty=(only&&deckColl(c)==="partial")?Math.max(1,(c.qty||1)-(c.owned||0)):c.qty;
+      if(c.mode==="any"||(!c.deckPrinting&&c.mode!=="set"))
+        return (qty>1?qty+"x ":"")+c.name;
+      const p=c.mode==="set"?c.chosen:c.deckPrinting;
+      if(p.cmVer===-1)warn=true;
+      return wantLine({name:c.name,cmVer:p.cmVer,cmSuffix:p.cmSuffix,cmExpansion:p.cmExpansion},p.setName,qty);
+    });
   $("#deckWL").innerHTML=wantChunks(lines,warn);
   bindChunks();
   $("#deckWL").scrollIntoView({behavior:"smooth",block:"start"});
@@ -8930,8 +9051,21 @@ function manage(){
 function sectionSep(){ return '<hr class="psep">'; }
 function completionPane(){
   $("#sub").innerHTML='<div id="mSecA"></div>'+sectionSep()+'<div id="mSecCost"></div>'
-    +sectionSep()+'<div id="mSecEg"></div>'+sectionSep()+'<div id="mSecB"></div>';
-  goalsPane("#mSecA"); costsPane("#mSecCost"); endgamePane("#mSecEg"); setsPane("#mSecB");
+    +sectionSep()+'<div id="mSecEg"></div>'+sectionSep()+'<div id="mSecUb"></div>'
+    +sectionSep()+'<div id="mSecB"></div>';
+  goalsPane("#mSecA"); costsPane("#mSecCost"); endgamePane("#mSecEg"); ubPane("#mSecUb"); setsPane("#mSecB");
+}
+function ubPane(sel){
+  sel=sel||"#sub";
+  const on=!!(window.HAS&&window.HAS.excludeUb);
+  $(sel).innerHTML=`<h2 style="margin-top:0">${t("ub.title")}</h2>
+  <p class="sub">${t("ub.desc")}</p>
+  <label class="chk"><input type="checkbox" id="ubOn" ${on?"checked":""}> ${t("ub.enable")}</label>`;
+  $("#ubOn").onchange=async e=>{
+    const r=await fetch("/api/ub-pref",{method:"POST",body:JSON.stringify({on:e.target.checked})}).then(r=>r.json());
+    if(window.HAS)window.HAS.excludeUb=r.excludeUb;
+    await load(); manage();
+  };
 }
 function costsPane(sel){
   $(sel||"#sub").innerHTML=`<h2 style="margin-top:0">${t("costs.title")}</h2>
@@ -9167,11 +9301,12 @@ function updatePane(){
   <h2 style="margin-top:0">${t("manageUpdate.importTitle")}</h2>
   <div class="drop" id="drop"><input type="file" id="file" accept=".csv"></div>
   <label class="sub" style="display:block;margin:10px 0 4px">${t("manageUpdate.formatLabel")}</label>
-  <select id="fmt" style="margin-bottom:10px">
+  <select id="fmt" style="margin-bottom:4px">
     <option value="auto">${t("manageUpdate.formatAuto")}</option>
     <option value="manabox">ManaBox</option>
     <option value="moxfield">Moxfield</option>
     <option value="archidekt">Archidekt</option></select>
+  <p class="sub" style="max-width:640px;margin:0 0 10px">${t("manageUpdate.binderNote")}</p>
   <div class="radio" id="mode">
     <label class="on"><input type="radio" name="m" value="replace" checked>
       <span>${t("manageUpdate.replace")}<span class="d">${t("manageUpdate.replaceDesc")}</span></span></label>
