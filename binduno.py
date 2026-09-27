@@ -16,7 +16,7 @@ import urllib.request
 from datetime import datetime, timedelta
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-VERSION = "6.92"
+VERSION = "6.93"
 SCHEMA = 21
 
 
@@ -2636,9 +2636,14 @@ def resolve_deck(c, parsed):
         min_eur = round(min(prices), 2) if prices else 0.0
         # Which sets you already own this card name in (front-face tolerant),
         # for the green/yellow/red collection badge like the Cardmarket helper.
-        # Grouped by binder too (not just set) so the deck-list badge/pick-set
-        # popup can show WHERE each owned copy actually is, the way ManaBox
-        # reports it ("DS Binder" vs the "Magda, Brazen Outlaw" deck).
+        # Grouped by binder too (not just set) so the deck-list view can show
+        # WHERE each owned copy actually is, the way ManaBox reports it ("DS
+        # Binder" vs the "Magda, Brazen Outlaw" deck), and so the user can mark
+        # specific copies as already spoken for by another physical deck -
+        # owned_detail always sums to owned_in per set (binder="" covers rows
+        # with no location info, e.g. from Moxfield/Archidekt or a manual add)
+        # so the frontend can compute "available in this set" after excluding
+        # some locations without silently losing untagged copies.
         owned_in, owned_detail = {}, []
         for r in c.execute(
                 """SELECT k.set_code, o.binder, COALESCE(SUM(o.qty),0) q
@@ -2650,8 +2655,7 @@ def resolve_deck(c, parsed):
                     GROUP BY k.set_code, o.binder HAVING q>0""",
                 (name, name, front + " // %")):
             owned_in[r["set_code"]] = owned_in.get(r["set_code"], 0) + r["q"]
-            if r["binder"]:
-                owned_detail.append({"set": r["set_code"], "binder": r["binder"], "qty": r["q"]})
+            owned_detail.append({"set": r["set_code"], "binder": r["binder"] or "", "qty": r["q"]})
         pset = (it.get("set") or "").lower()
         pnum = str(it.get("num") or "").strip()
         if pset and pset not in real_sets:             # parser grabbed "(Foil)" etc.
@@ -4787,6 +4791,7 @@ table.setcards .seg.deckseg button{min-width:60px}
 #deckListWrap table.setcards{table-layout:fixed;width:100%;min-width:620px}
 #deckListWrap table.setcards th.dcSec{width:104px}
 #deckListWrap table.setcards th.dcColl{width:104px}
+#deckListWrap table.setcards th.dcLoc{width:150px}
 #deckListWrap table.setcards th.dcQty{width:54px}
 #deckListWrap table.setcards th.dcSet{width:266px}
 #deckListWrap table.setcards th.dcPrice{width:108px}
@@ -5496,7 +5501,7 @@ en:{
   "deck.parseBtn":"Read deck list","deck.parsing":"Reading…",
   "deck.startOver":"New list","deck.allAny":"All: any set","deck.allDeck":"All: keep deck's set",
   "deck.generateBtn":"Generate Wants-List",
-  "deck.onlyMissing":"Only cards I still need",
+  "deck.onlyMissing":"Only missing",
   "deck.nToBuy":"{n} to buy","deck.nNotFound":"{n} not found",
   "deck.anySet":"Any set","deck.pickSet":"Pick set",
   "deck.notFound":"not in card data",
@@ -5506,7 +5511,9 @@ en:{
   "deck.priceApprox":"Totals are a lower bound — cards on “any set” use their cheapest printing, and cards with no Cardmarket price count as 0.",
   "deck.collIn":"in collection","deck.collOther":"other set","deck.collMissing":"missing",
   "deck.collPartial":"{owned}/{qty} owned",
-  "deck.ownedTipTitle":"Where your copies are",
+  "deck.thLocation":"Location",
+  "deck.locTitle":"Where your copies are","deck.locDesc":"Uncheck a location if those copies are already built into another physical deck — they'll stop counting as available for this list.",
+  "deck.stillToBuy":"Still to buy","deck.stillToBuyDesc":"{n} cards, shipping included",
   "deck.sortOrig":"Deck order","deck.sortSection":"Section","deck.sortColl":"Collection status",
   "deck.filterAll":"All cards","deck.filterBuy":"To buy","deck.filterOwned":"In collection",
   "deck.filterMissing":"Missing","deck.filterOther":"Other set",
@@ -5990,7 +5997,7 @@ de:{
   "deck.parseBtn":"Deckliste einlesen","deck.parsing":"Wird gelesen…",
   "deck.startOver":"Neue Liste","deck.allAny":"Alle: irgendein Set","deck.allDeck":"Alle: Deck-Set behalten",
   "deck.generateBtn":"Wants-Liste erzeugen",
-  "deck.onlyMissing":"Nur noch benötigte Karten",
+  "deck.onlyMissing":"Nur Fehlendes",
   "deck.nToBuy":"{n} zu kaufen","deck.nNotFound":"{n} nicht gefunden",
   "deck.anySet":"Irgendein Set","deck.pickSet":"Set wählen",
   "deck.notFound":"nicht in den Kartendaten",
@@ -6000,7 +6007,9 @@ de:{
   "deck.priceApprox":"Die Summen sind eine Untergrenze — Karten auf „irgendein Set“ rechnen mit dem günstigsten Druck, Karten ohne Cardmarket-Preis zählen als 0.",
   "deck.collIn":"in Sammlung","deck.collOther":"anderes Set","deck.collMissing":"fehlt",
   "deck.collPartial":"{owned}/{qty} vorhanden",
-  "deck.ownedTipTitle":"Wo deine Exemplare liegen",
+  "deck.thLocation":"Standort",
+  "deck.locTitle":"Wo deine Exemplare liegen","deck.locDesc":"Häkchen entfernen, wenn diese Exemplare schon in einem anderen physischen Deck stecken — sie zählen dann nicht mehr als verfügbar für diese Liste.",
+  "deck.stillToBuy":"Noch zu kaufen","deck.stillToBuyDesc":"{n} Karten, inkl. Versand",
   "deck.sortOrig":"Deck-Reihenfolge","deck.sortSection":"Bereich","deck.sortColl":"Sammlungsstatus",
   "deck.filterAll":"Alle Karten","deck.filterBuy":"Zu kaufen","deck.filterOwned":"In Sammlung",
   "deck.filterMissing":"Fehlt","deck.filterOther":"Anderes Set",
@@ -8042,8 +8051,10 @@ async function cardPage(sc,nr){
     const rows=d.copies.filter(cp=>!q||cp.setName.toLowerCase().includes(q));
     $("#copiesBody").innerHTML=rows.map(cp=>`<div class="li" data-card="${cp.set}|${cp.number}"
         data-pop="${cp.img||""}">
-        <span class="nm">${cp.setName} <span class="varlbl">${cp.foil?t("setPage.thFoil"):t("cardPage.regular")}</span></span>
-        <span class="mt">#${cp.number} · ${cp.qty}×${cp.binder?` · ${esc(cp.binder)}`:""}</span>
+        <div style="flex:1 1 auto;min-width:0">
+          <div class="nm">${cp.setName} <span class="varlbl">${cp.foil?t("setPage.thFoil"):t("cardPage.regular")}</span></div>
+          <div class="mt" style="margin-top:2px">#${cp.number} · ${cp.qty}×${cp.binder?` · ${esc(cp.binder)}`:""}</div>
+        </div>
         <span class="mt" style="flex:0 0 96px" onclick="event.stopPropagation()">
           <input type="number" step="0.01" min="0" class="priceIn" data-copyid="${cp.id}"
             value="${cp.purchasePrice!=null?cp.purchasePrice:""}"
@@ -8494,39 +8505,77 @@ function deckPriceHtml(c){
   const p=deckChosen(c);
   return p&&p.eur?money(p.eur):"—";
 }
-// green = you own ENOUGH copies (>= this row's qty) in the set this row buys
-// from (or anywhere, for "any"); yellow "other set" = enough copies, but not
-// from the target printing; yellow "partial" = you own some copies, just not
-// enough (a 60-card deck can want 4x a card - owning 1 isn't "in collection"
-// yet, only a Commander's singleton 1x ever made that look right); red =
-// none at all. Mirrors the CM helper, quantity-aware (6.91).
+// A copy can be owned but not actually free for THIS list - already sleeved
+// into another physical deck, say. c.excludedBinders holds the (set+binder)
+// keys of locations the user has told us not to count. deckLocKey must match
+// how the "Location" popup (deckOpenLoc) stores them.
+function deckLocKey(d){return d.set+""+d.binder;}
+function deckReserved(c){
+  const excl=c.excludedBinders;
+  if(!excl||!excl.length)return 0;
+  return (c.ownedDetail||[]).filter(d=>d.binder&&excl.includes(deckLocKey(d)))
+    .reduce((s,d)=>s+d.qty,0);
+}
+function deckAvailable(c){return Math.max(0,(c.owned||0)-deckReserved(c));}
+// Same idea, scoped to one set - a card whose only copies in the target set
+// are all reserved elsewhere shouldn't still read as "in collection" there.
+function deckAvailableInSet(c,setCode){
+  const excl=c.excludedBinders||[];
+  return (c.ownedDetail||[]).filter(d=>d.set===setCode&&!(d.binder&&excl.includes(deckLocKey(d))))
+    .reduce((s,d)=>s+d.qty,0);
+}
+function deckNeed(c){return Math.max(0,(c.qty||1)-deckAvailable(c));}
+// green = enough AVAILABLE copies (>= this row's qty) in the set this row
+// buys from (or anywhere, for "any"); yellow "other set" = enough available,
+// but not from the target printing; yellow "partial" = own some available
+// copies, just not enough (a 60-card deck can want 4x a card - owning 1
+// isn't "in collection" yet, only a Commander's singleton 1x ever made that
+// look right); red = none available at all. Mirrors the CM helper,
+// quantity- and reservation-aware (6.91/6.93).
 function deckColl(c){
   if(c.status==="notFound")return "na";
-  const owned=c.owned||0, need=c.qty||1;
-  if(owned<=0)return "missing";
-  if(owned<need)return "partial";
-  const inTarget=c.mode==="any"?true:(c.ownedSets||[]).includes((deckChosen(c)||{}).set);
+  const avail=deckAvailable(c), need=c.qty||1;
+  if(avail<=0)return "missing";
+  if(avail<need)return "partial";
+  const inTarget=c.mode==="any"?true:deckAvailableInSet(c,(deckChosen(c)||{}).set)>0;
   return inTarget?"in":"other";
-}
-// ManaBox is the only import format that says which binder/deck a card is
-// filed in (Moxfield/Archidekt don't have that column) - when it's known,
-// a hover tooltip on the badge lists where, per set, using the printing's
-// own set name from c.printings rather than a bare code.
-function deckOwnedTip(c){
-  const det=c.ownedDetail||[];
-  if(!det.length)return null;
-  const nameOf=s=>{const p=(c.printings||[]).find(p=>p.set===s);return p?p.setName:s.toUpperCase();};
-  return det.map(d=>`${esc(nameOf(d.set))}: ${esc(d.binder)}${d.qty>1?` ×${d.qty}`:""}`).join("<br>");
 }
 function deckCollBadge(c){
   const s=deckColl(c);
   if(s==="na")return "";
-  const tip=deckOwnedTip(c);
-  const tipAttr=tip?` data-tip-title="${t("deck.ownedTipTitle")}" data-tip="${tip}"`:"";
   if(s==="partial")
-    return `<span class="tag r"${tipAttr}>${t("deck.collPartial",{owned:c.owned||0,qty:c.qty||1})}</span>`;
+    return `<span class="tag r">${t("deck.collPartial",{owned:deckAvailable(c),qty:c.qty||1})}</span>`;
   const M={in:["l","deck.collIn"],other:["r","deck.collOther"],missing:["b","deck.collMissing"]};
-  return `<span class="tag ${M[s][0]}"${tipAttr}>${t(M[s][1])}</span>`;
+  return `<span class="tag ${M[s][0]}">${t(M[s][1])}</span>`;
+}
+// The set name for a known location, from this card's own printings list
+// (falls back to the bare code on the off chance a set isn't in there).
+function deckSetName(c,setCode){
+  const p=(c.printings||[]).find(p=>p.set===setCode);
+  return p?p.setName:setCode.toUpperCase();
+}
+// Visible "Location" text for one row - only the locations relevant to what
+// this row would actually buy: the target set's, once one is picked, or
+// every known location under "any set". Untagged copies (binder="") have
+// nothing to show and are silently skipped here (they still count toward
+// availability, just have no location to display or manage).
+function deckLocText(c){
+  const det=(c.ownedDetail||[]).filter(d=>d.binder);
+  if(!det.length)return "";
+  const setCode=c.mode==="any"?null:(deckChosen(c)||{}).set;
+  const relevant=setCode?det.filter(d=>d.set===setCode):det;
+  if(!relevant.length)return "";
+  const excl=c.excludedBinders||[];
+  return relevant.map(d=>{
+    const label=`${esc(d.binder)}${d.qty>1?` ×${d.qty}`:""}`;
+    return excl.includes(deckLocKey(d))
+      ?`<span style="text-decoration:line-through;opacity:.55">${label}</span>`:label;
+  }).join(", ");
+}
+function deckLocCell(c,i){
+  const txt=deckLocText(c);
+  return txt?`<span class="setlink" data-dm="${i}|loc">${txt}</span>`
+             :`<span class="mt" style="color:var(--dim)">—</span>`;
 }
 function deckSecLbl(c){
   const n=deckSecName(c);
@@ -8567,6 +8616,7 @@ function drawDeck(){
   const nBad=cs.filter(c=>c.status==="notFound").length;
   const hasSec=cs.some(deckHasSec);
   DECK._hasSec=hasSec;
+  DECK._hasLoc=cs.some(c=>(c.ownedDetail||[]).some(d=>d.binder));
   const SORTS=[["orig","deck.sortOrig"],["name","collection.sortName"],
     ...(hasSec?[["section","deck.sortSection"]]:[]),
     ["coll","deck.sortColl"],["qty","setPage.thCopies"],
@@ -8587,7 +8637,7 @@ function drawDeck(){
         `<option value="${v}" ${DECK.filter===v?"selected":""}>${t(l)}</option>`).join("")}</select>
       <div class="seg"><button data-dv="table" class="${DECK.view==="table"?"on":""}">${t("collection.table")}</button>
         <button data-dv="grid" class="${DECK.view==="grid"?"on":""}">${t("collection.grid")}</button></div>
-      <span class="pill">${t("deck.nToBuy",{n:nOut})}${nBad?" · "+t("deck.nNotFound",{n:nBad}):""}</span>
+      <span class="pill" id="dNBuy">${t("deck.nToBuy",{n:nOut})}${nBad?" · "+t("deck.nNotFound",{n:nBad}):""}</span>
       <label class="chk" style="margin:0 0 0 auto"><input type="checkbox" id="donlymissing" ${
         DECK.onlyMissing?"checked":""}> ${t("deck.onlyMissing")}</label>
       <button id="dgen" class="pri">${t("deck.generateBtn")}</button></div>
@@ -8610,7 +8660,7 @@ function drawDeck(){
   }else{
     wrap.innerHTML=`<table class="setcards"><thead><tr>
       ${th("name",t("missing.thCard"))}${hasSec?th("section",t("deck.sortSection"),"dcSec"):""}
-      ${th("coll",t("deck.thCollection"),"dcColl")}
+      ${th("coll",t("deck.thCollection"),"dcColl")}${DECK._hasLoc?`<th class="dcLoc">${t("deck.thLocation")}</th>`:""}
       ${th("qty",t("setPage.thCopies"),"num dcQty")}${th("set",t("cardPage.set"),"dcSet")}
       ${th("price",t("missing.thPrice"),"num dcPrice")}<th class="dcRm"></th></tr></thead><tbody>${
       view.map(o=>deckRow(o.c,o.i)).join("")}</tbody></table>`;
@@ -8673,8 +8723,9 @@ function deckSeg(c,i){
     c.mode==="set"&&c.chosen?setTag(c.chosen):t("deck.pickSet")}</button>`);
   return `<div class="seg deckseg">${b.join("")}</div>`;
 }
+function deckColCount(){return 6+(DECK._hasSec?1:0)+(DECK._hasLoc?1:0);}
 function deckRow(c,i){
-  const NC=6+(DECK._hasSec?1:0);
+  const NC=deckColCount();
   if(c.status==="notFound")
     return `<tr data-di="${i}" style="opacity:.6"><td colspan="${NC-1}">${c.qty>1?c.qty+"× ":""}${esc(c.name)}
       <span class="tag b">${t("deck.notFound")}</span></td>
@@ -8690,6 +8741,7 @@ function deckRow(c,i){
     <td><span class="setlink"${linkAttr} data-pop="${deckPop(c)}">${esc(c.name)}</span> ${deckMiss(c)}</td>
     ${DECK._hasSec?`<td class="dcSec">${deckSecLbl(c)}</td>`:""}
     <td class="dcColl">${deckCollBadge(c)}</td>
+    ${DECK._hasLoc?`<td class="dcLoc">${deckLocCell(c,i)}</td>`:""}
     <td class="num dcQty">${c.qty}</td>
     <td class="dcSet">${deckSeg(c,i)}</td>
     <td class="num dcPrice">${deckPriceHtml(c)}</td>
@@ -8704,11 +8756,13 @@ function deckTile(c,i){
       <div class="cn">${nm}</div>
       <div class="cset"><span class="tag b">${t("deck.notFound")}</span></div>${rm}</div></div>`;
   const img=deckPop(c);
+  const locTxt=deckLocText(c);
   return `<div class="cc" data-di="${i}">
     <div class="imgwrap">${img?`<img class="face" src="${img}" alt="${esc(c.name)}" loading="lazy">`
       :`<div class="noimg">${esc(c.name)}</div>`}</div>
     <div class="meta"><div class="cn">${nm}</div>
       <div class="cset">${deckCollBadge(c)} ${deckSecLbl(c)} ${deckMiss(c)}</div>
+      ${locTxt?`<div class="mt" style="margin-top:2px"><span class="setlink" data-dm="${i}|loc">${locTxt}</span></div>`:""}
       <div class="cp">${deckPriceHtml(c)}</div>
       ${deckSeg(c,i)}${rm}
     </div></div>`;
@@ -8727,7 +8781,8 @@ function bindDeckNode(node){
 function deckRemove(k){DECK.cards.splice(k,1);DECK.pick=null;drawDeck();}
 function deckMode(spec){
   const [is,mode]=spec.split("|"),i=+is,c=DECK.cards[i];
-  if(mode==="pick"){DECK.pick===i?deckClosePick():deckOpenPick(i);return;}
+  if(mode==="pick"){(DECK.pick===i&&DECK._pickKind==="pick")?deckClosePick():deckOpenPick(i);return;}
+  if(mode==="loc"){(DECK.pick===i&&DECK._pickKind==="loc")?deckClosePick():deckOpenLoc(i);return;}
   deckClosePick();
   if(mode==="deck"){c.mode="deck";c.chosen=c.deckPrinting;}
   else{c.mode="any";c.chosen=null;}
@@ -8741,8 +8796,18 @@ function deckUpdateOne(i){
   node.outerHTML=DECK.view==="grid"?deckTile(DECK.cards[i],i):deckRow(DECK.cards[i],i);
   bindDeckNode(document.querySelector(`[data-di="${i}"]`));
   deckRefreshSummary();
+  deckRefreshPill();
   deckSave();
   const wl=$("#deckWL");if(wl)wl.innerHTML="";
+}
+// The "N to buy" pill lives in the toolbar, outside what deckUpdateOne
+// redraws (just the one row + the summary) - refresh it too so a mode
+// switch or a reservation toggle doesn't leave it showing a stale count.
+function deckRefreshPill(){
+  const el=$("#dNBuy");if(!el||!DECK.cards)return;
+  const nOut=DECK.cards.filter(c=>c.status!=="notFound"&&(!DECK.onlyMissing||deckColl(c)!=="in")).length;
+  const nBad=DECK.cards.filter(c=>c.status==="notFound").length;
+  el.innerHTML=`${t("deck.nToBuy",{n:nOut})}${nBad?" · "+t("deck.nNotFound",{n:nBad}):""}`;
 }
 // price + shipping estimate for the whole list. "any set" cards are priced at
 // their cheapest printing, so the goods total is a lower bound when any card is
@@ -8758,10 +8823,32 @@ function deckTotals(){
   const ship=shipCost(count,goods);
   return {goods,count,ship,total:goods+ship,approx};
 }
+// Same shape as deckTotals(), but only what's actually still needed - the
+// same rule "Only missing" uses to build the want-list (deckGenerate): a
+// row that's fully "in" contributes nothing, "partial" contributes just its
+// shortfall. Shown alongside the full-list total so both numbers - "the
+// whole deck from scratch" and "what's left to actually buy" - are visible
+// without having to flip the toggle back and forth.
+function deckMissingTotals(){
+  let goods=0,count=0,approx=false;
+  for(const c of DECK.cards){
+    if(c.status==="notFound")continue;
+    const st=deckColl(c);
+    if(st==="in")continue;
+    const qty=st==="partial"?deckNeed(c):c.qty;
+    if(qty<=0)continue;
+    const unit=c.mode==="any"?(c.minEur||0):((deckChosen(c)||{}).eur||0);
+    if(!unit||c.mode==="any")approx=true;
+    goods+=unit*qty;count+=qty;
+  }
+  const ship=shipCost(count,goods);
+  return {goods,count,ship,total:goods+ship,approx};
+}
 function deckRefreshSummary(){
   const el=$("#deckSummary");if(!el)return;
   if(!DECK.cards||!DECK.cards.length){el.innerHTML="";return;}
   const s=deckTotals(),a=s.approx?"~ ":"";
+  const m=deckMissingTotals(),ma=m.approx?"~ ":"";
   el.innerHTML=`<div class="cards" style="margin:0;grid-template-columns:repeat(auto-fit,minmax(150px,1fr))">
     <div class="card"><div class="k">${t("cart.cards")}</div><div class="v">${num(s.count)}</div></div>
     <div class="card"><div class="k">${t("cart.cardsTotal")}</div>
@@ -8770,14 +8857,17 @@ function deckRefreshSummary(){
       <div class="k">${t("cart.shippingEst")}</div><div class="v" style="font-size:22px">~ ${money(s.ship)}</div></div>
     <div class="card"><div class="k">${t("cart.total")}</div>
       <div class="v" style="font-size:22px;color:var(--gold)">${a}${money(s.total)}</div>
-      <div class="n">${t("cart.cardsPlusShipping")}</div></div></div>
-  ${s.approx?`<p class="mt" style="color:var(--muted);margin:6px 2px 0">${t("deck.priceApprox")}</p>`:""}`;
+      <div class="n">${t("cart.cardsPlusShipping")}</div></div>
+    <div class="card" style="border-color:var(--gold)"><div class="k">${t("deck.stillToBuy")}</div>
+      <div class="v" style="font-size:22px;color:var(--gold)">${ma}${money(m.total)}</div>
+      <div class="n">${t("deck.stillToBuyDesc",{n:num(m.count)})}</div></div></div>
+  ${(s.approx||m.approx)?`<p class="mt" style="color:var(--muted);margin:6px 2px 0">${t("deck.priceApprox")}</p>`:""}`;
 }
 function deckClosePick(){
   if(DECK._outside){document.removeEventListener("click",DECK._outside,true);DECK._outside=null;}
   if(DECK._key){document.removeEventListener("keydown",DECK._key);DECK._key=null;}
   const w=document.querySelector(".deckpickrow, .deckpickwrap");if(w)w.remove();
-  const i=DECK.pick;DECK.pick=null;
+  const i=DECK.pick;DECK.pick=null;DECK._pickKind=null;
   if(i!=null){
     const btn=document.querySelector(`[data-dm="${i}|pick"]`);
     if(btn)btn.classList.toggle("on",!!(DECK.cards[i]&&DECK.cards[i].mode==="set"));
@@ -8790,7 +8880,7 @@ function deckOpenPick(i){
   const c=DECK.cards[i];
   const anchor=document.querySelector(`[data-di="${i}"]`);
   if(!c||!anchor||c.status==="notFound"||!(c.printings&&c.printings.length))return;
-  DECK.pick=i;
+  DECK.pick=i;DECK._pickKind="pick";
   const inner=`<div class="deckpick">
     <div class="tools" style="margin:0 0 6px">
       <b style="flex:1 1 auto">${esc(c.name)} — ${t("deck.pickSet")}</b>
@@ -8815,7 +8905,7 @@ function deckOpenPick(i){
     anchor.insertAdjacentHTML("afterend",`<div class="deckpickwrap" style="grid-column:1/-1">${inner}</div>`);
   else
     anchor.insertAdjacentHTML("afterend",
-      `<tr class="deckpickrow"><td colspan="${6+(DECK._hasSec?1:0)}">${inner}</td></tr>`);
+      `<tr class="deckpickrow"><td colspan="${deckColCount()}">${inner}</td></tr>`);
   const panel=document.querySelector(".deckpick");
   const q=panel.querySelector(".dpq");
   q.oninput=()=>{const s=q.value.toLowerCase();
@@ -8838,6 +8928,63 @@ function deckOpenPick(i){
   panel.scrollIntoView({behavior:"smooth",block:"nearest"});
   q.focus();
 }
+// Inline "where are my copies" panel, same slide-out mechanics as the set
+// picker above but for marking specific owned copies as unavailable - e.g.
+// 2 of your 4 are already built into another physical deck, so they
+// shouldn't count as "in collection" for this new list. Stays open across
+// toggles (each one just live-updates the underlying row) so several
+// locations can be unchecked in one go.
+function deckOpenLoc(i){
+  deckClosePick();
+  const c=DECK.cards[i];
+  const anchor=document.querySelector(`[data-di="${i}"]`);
+  const det=(c&&c.ownedDetail||[]).filter(d=>d.binder);
+  if(!c||!anchor||!det.length)return;
+  DECK.pick=i;DECK._pickKind="loc";
+  const excl=c.excludedBinders||[];
+  const inner=`<div class="deckpick">
+    <div class="tools" style="margin:0 0 6px">
+      <b style="flex:1 1 auto">${esc(c.name)} — ${t("deck.locTitle")}</b>
+      <button class="dpx" title="${t("common.close")}">✕</button></div>
+    <p class="sub" style="margin:0 0 8px;max-width:540px">${t("deck.locDesc")}</p>
+    <div class="list dplist" style="max-height:240px;overflow:auto;border:1px solid var(--line);border-radius:5px">
+    ${det.map(d=>{
+      const key=deckLocKey(d);
+      return `<label class="li" style="cursor:pointer">
+        <input type="checkbox" class="dploc" data-key="${esc(key)}" ${excl.includes(key)?"":"checked"}
+          style="margin-right:10px">
+        <span class="nm">${esc(deckSetName(c,d.set))}: ${esc(d.binder)}</span>
+        <span class="mt" style="flex:0 0 40px;text-align:right">${d.qty}×</span>
+      </label>`;
+    }).join("")}</div></div>`;
+  if(DECK.view==="grid")
+    anchor.insertAdjacentHTML("afterend",`<div class="deckpickwrap" style="grid-column:1/-1">${inner}</div>`);
+  else
+    anchor.insertAdjacentHTML("afterend",
+      `<tr class="deckpickrow"><td colspan="${deckColCount()}">${inner}</td></tr>`);
+  const panel=document.querySelector(".deckpick");
+  panel.querySelector(".dpx").onclick=()=>deckClosePick();
+  panel.querySelectorAll(".dploc").forEach(cb=>cb.onchange=()=>{
+    const key=cb.dataset.key;
+    c.excludedBinders=c.excludedBinders||[];
+    const idx=c.excludedBinders.indexOf(key);
+    if(cb.checked){if(idx>=0)c.excludedBinders.splice(idx,1);}
+    else if(idx<0)c.excludedBinders.push(key);
+    deckSave();
+    deckUpdateOne(i);
+    deckRefreshSummary();
+  });
+  DECK._outside=e=>{
+    if(e.target.closest(".deckpick")||e.target.closest(`[data-dm="${i}|loc"]`))return;
+    deckClosePick();
+  };
+  DECK._key=e=>{if(e.key==="Escape")deckClosePick();};
+  setTimeout(()=>{
+    if(DECK._outside)document.addEventListener("click",DECK._outside,true);
+    if(DECK._key)document.addEventListener("keydown",DECK._key);
+  },0);
+  panel.scrollIntoView({behavior:"smooth",block:"nearest"});
+}
 function deckGenerate(){
   let warn=false;
   const only=DECK.onlyMissing;
@@ -8851,7 +8998,7 @@ function deckGenerate(){
   const lines=DECK.cards
     .filter(c=>c.status!=="notFound"&&(!only||deckColl(c)!=="in"))
     .map(c=>{
-      const qty=(only&&deckColl(c)==="partial")?Math.max(1,(c.qty||1)-(c.owned||0)):c.qty;
+      const qty=(only&&deckColl(c)==="partial")?deckNeed(c):c.qty;
       if(c.mode==="any"||(!c.deckPrinting&&c.mode!=="set"))
         return (qty>1?qty+"x ":"")+c.name;
       const p=c.mode==="set"?c.chosen:c.deckPrinting;
