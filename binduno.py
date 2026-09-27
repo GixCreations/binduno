@@ -16,7 +16,7 @@ import urllib.request
 from datetime import datetime, timedelta
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-VERSION = "6.90"
+VERSION = "6.91"
 SCHEMA = 21
 
 
@@ -5433,6 +5433,7 @@ en:{
   "deck.priceFrom":"from","deck.thCollection":"Collection","deck.extras":"Extras",
   "deck.priceApprox":"Totals are a lower bound — cards on “any set” use their cheapest printing, and cards with no Cardmarket price count as 0.",
   "deck.collIn":"in collection","deck.collOther":"other set","deck.collMissing":"missing",
+  "deck.collPartial":"{owned}/{qty} owned",
   "deck.sortOrig":"Deck order","deck.sortSection":"Section","deck.sortColl":"Collection status",
   "deck.filterAll":"All cards","deck.filterBuy":"To buy","deck.filterOwned":"In collection",
   "deck.filterMissing":"Missing","deck.filterOther":"Other set",
@@ -5920,6 +5921,7 @@ de:{
   "deck.priceFrom":"ab","deck.thCollection":"Sammlung","deck.extras":"Extras",
   "deck.priceApprox":"Die Summen sind eine Untergrenze — Karten auf „irgendein Set“ rechnen mit dem günstigsten Druck, Karten ohne Cardmarket-Preis zählen als 0.",
   "deck.collIn":"in Sammlung","deck.collOther":"anderes Set","deck.collMissing":"fehlt",
+  "deck.collPartial":"{owned}/{qty} vorhanden",
   "deck.sortOrig":"Deck-Reihenfolge","deck.sortSection":"Bereich","deck.sortColl":"Sammlungsstatus",
   "deck.filterAll":"Alle Karten","deck.filterBuy":"Zu kaufen","deck.filterOwned":"In Sammlung",
   "deck.filterMissing":"Fehlt","deck.filterOther":"Anderes Set",
@@ -8408,18 +8410,25 @@ function deckPriceHtml(c){
   const p=deckChosen(c);
   return p&&p.eur?money(p.eur):"—";
 }
-// green = you own it in the set this row buys from (or anywhere, for "any");
-// yellow = you own a different printing; red = missing. Mirrors the CM helper.
+// green = you own ENOUGH copies (>= this row's qty) in the set this row buys
+// from (or anywhere, for "any"); yellow "other set" = enough copies, but not
+// from the target printing; yellow "partial" = you own some copies, just not
+// enough (a 60-card deck can want 4x a card - owning 1 isn't "in collection"
+// yet, only a Commander's singleton 1x ever made that look right); red =
+// none at all. Mirrors the CM helper, quantity-aware (6.91).
 function deckColl(c){
   if(c.status==="notFound")return "na";
-  const owned=c.owned||0;
-  const inTarget=c.mode==="any"?owned>0:(c.ownedSets||[]).includes((deckChosen(c)||{}).set);
-  if(inTarget)return "in";
-  return owned>0?"other":"missing";
+  const owned=c.owned||0, need=c.qty||1;
+  if(owned<=0)return "missing";
+  if(owned<need)return "partial";
+  const inTarget=c.mode==="any"?true:(c.ownedSets||[]).includes((deckChosen(c)||{}).set);
+  return inTarget?"in":"other";
 }
 function deckCollBadge(c){
   const s=deckColl(c);
   if(s==="na")return "";
+  if(s==="partial")
+    return `<span class="tag r">${t("deck.collPartial",{owned:c.owned||0,qty:c.qty||1})}</span>`;
   const M={in:["l","deck.collIn"],other:["r","deck.collOther"],missing:["b","deck.collMissing"]};
   return `<span class="tag ${M[s][0]}">${t(M[s][1])}</span>`;
 }
@@ -8542,7 +8551,7 @@ function deckSelect(){
     else if(S==="section"){p=x.c.section||"";r=y.c.section||"";}
     else if(S==="set"){p=(deckChosen(x.c)||{}).set||"";r=(deckChosen(y.c)||{}).set||"";}
     else if(S==="qty"){p=x.c.qty||0;r=y.c.qty||0;}
-    else if(S==="coll"){const o={missing:0,other:1,in:2,na:3};p=o[deckColl(x.c)];r=o[deckColl(y.c)];}
+    else if(S==="coll"){const o={missing:0,partial:1,other:2,in:3,na:4};p=o[deckColl(x.c)];r=o[deckColl(y.c)];}
     else{p=x.c.mode==="any"?(x.c.minEur||0):(deckChosen(x.c)||{}).eur||0;
          r=y.c.mode==="any"?(y.c.minEur||0):(deckChosen(y.c)||{}).eur||0;}
     return (typeof p==="string"?p.localeCompare(r):p-r)*DECK.dir;
