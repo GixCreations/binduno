@@ -16,7 +16,7 @@ import urllib.request
 from datetime import datetime, timedelta
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-VERSION = "6.93"
+VERSION = "6.94"
 SCHEMA = 21
 
 
@@ -2593,7 +2593,12 @@ def resolve_deck(c, parsed):
     (set, collector-number) the list named when both resolve; if only the set
     resolves, its base printing. `printings` (for the 'pick a set' list) is
     collapsed to one entry per set, newest first. A `(Foil)`/`(Etched)` etc.
-    that the parser mistook for a set code is ignored here."""
+    that the parser mistook for a set code is ignored here. Art Series /
+    Oversized / other memorabilia printings (set_type "memorabilia") are
+    excluded from `printings`/`deckPrinting` entirely - they share the card's
+    name on Scryfall but aren't a playable copy of it, so they must never be
+    offered as something to buy for a deck (they can still count toward
+    `ownedDetail` below if the user genuinely owns one)."""
     real_sets = {r["code"] for r in c.execute("SELECT code FROM sets")}
     out = []
     for it in parsed:
@@ -2604,7 +2609,7 @@ def resolve_deck(c, parsed):
             """SELECT k.set_code, s.name set_name, k.number, k.num_int, s.released,
                       k.eur, k.img, k.cm_suffix, k.cm_ver, k.cm_expansion, k.extra
                FROM cards k JOIN sets s ON s.code=k.set_code
-               WHERE k.digital=0
+               WHERE k.digital=0 AND s.set_type<>'memorabilia'
                  AND (k.name=? COLLATE NOCASE OR k.name_de=? COLLATE NOCASE
                       OR k.name LIKE ? COLLATE NOCASE)""",
             (name, name, front + " // %")).fetchall()
@@ -2636,26 +2641,28 @@ def resolve_deck(c, parsed):
         min_eur = round(min(prices), 2) if prices else 0.0
         # Which sets you already own this card name in (front-face tolerant),
         # for the green/yellow/red collection badge like the Cardmarket helper.
-        # Grouped by binder too (not just set) so the deck-list view can show
-        # WHERE each owned copy actually is, the way ManaBox reports it ("DS
-        # Binder" vs the "Magda, Brazen Outlaw" deck), and so the user can mark
-        # specific copies as already spoken for by another physical deck -
-        # owned_detail always sums to owned_in per set (binder="" covers rows
-        # with no location info, e.g. from Moxfield/Archidekt or a manual add)
-        # so the frontend can compute "available in this set" after excluding
-        # some locations without silently losing untagged copies.
+        # Grouped by binder AND foil (not just set) so the deck-list view can
+        # show WHERE each owned copy actually is, the way ManaBox reports it
+        # ("DS Binder" vs the "Magda, Brazen Outlaw" deck) and whether that
+        # particular batch is foil, and so the user can mark specific copies
+        # as already spoken for by another physical deck - owned_detail
+        # always sums to owned_in per set (binder="" covers rows with no
+        # location info, e.g. from Moxfield/Archidekt or a manual add) so the
+        # frontend can compute "available in this set" after excluding some
+        # locations without silently losing untagged copies.
         owned_in, owned_detail = {}, []
         for r in c.execute(
-                """SELECT k.set_code, o.binder, COALESCE(SUM(o.qty),0) q
+                """SELECT k.set_code, o.binder, o.foil, COALESCE(SUM(o.qty),0) q
                      FROM cards k JOIN collection o
                        ON o.set_code=k.set_code AND o.number=k.number
                     WHERE k.digital=0
                       AND (k.name=? COLLATE NOCASE OR k.name_de=? COLLATE NOCASE
                            OR k.name LIKE ? COLLATE NOCASE)
-                    GROUP BY k.set_code, o.binder HAVING q>0""",
+                    GROUP BY k.set_code, o.binder, o.foil HAVING q>0""",
                 (name, name, front + " // %")):
             owned_in[r["set_code"]] = owned_in.get(r["set_code"], 0) + r["q"]
-            owned_detail.append({"set": r["set_code"], "binder": r["binder"] or "", "qty": r["q"]})
+            owned_detail.append({"set": r["set_code"], "binder": r["binder"] or "",
+                                 "foil": (r["foil"] or "normal") == "foil", "qty": r["q"]})
         pset = (it.get("set") or "").lower()
         pnum = str(it.get("num") or "").strip()
         if pset and pset not in real_sets:             # parser grabbed "(Foil)" etc.
@@ -4791,7 +4798,8 @@ table.setcards .seg.deckseg button{min-width:60px}
 #deckListWrap table.setcards{table-layout:fixed;width:100%;min-width:620px}
 #deckListWrap table.setcards th.dcSec{width:104px}
 #deckListWrap table.setcards th.dcColl{width:104px}
-#deckListWrap table.setcards th.dcLoc{width:150px}
+#deckListWrap table.setcards th.dcLoc{width:230px}
+#deckListWrap table.setcards td.dcLoc{padding-left:20px}
 #deckListWrap table.setcards th.dcQty{width:54px}
 #deckListWrap table.setcards th.dcSet{width:266px}
 #deckListWrap table.setcards th.dcPrice{width:108px}
@@ -5081,6 +5089,15 @@ img.ms{width:16px;height:16px;vertical-align:-3px;margin:0 1px}
   padding:2px 7px;border-radius:3px;white-space:nowrap}
 .tag.l{background:var(--good-bg);color:var(--ok)}.tag.n{background:var(--panel2);color:var(--dim)}
 .tag.b{background:var(--bad-bg);color:var(--bad)}.tag.r{background:var(--panel2);color:var(--gold)}
+/* Location pills - colour is the batch's finish (regular/foil), not
+   collection status, so "where are my copies" reads at a glance without
+   opening the picker. .dlocMore is neutral, just an entry point. */
+.dlocTag{display:inline-block;font-family:var(--mono);font-size:10px;letter-spacing:.03em;
+  padding:2px 7px;border-radius:3px;white-space:nowrap;margin:1px 4px 1px 0;border:1px solid transparent}
+.dlocTag.dlocReg{background:var(--panel2);color:var(--dim);border-color:var(--line)}
+.dlocTag.dlocFoil{background:rgba(212,166,41,.12);color:var(--gold);border-color:var(--gold)}
+.dlocTag.dlocOff{opacity:.45;text-decoration:line-through}
+.dlocTag.dlocMore{background:transparent;color:var(--muted);border-color:var(--line)}
 .buybtn{display:inline-flex;align-items:center;gap:9px;background:var(--gold-fill);color:#181206;
   border:0;border-radius:5px;padding:11px 17px;font-weight:600;font-size:14px;
   text-decoration:none;margin:6px 8px 0 0}
@@ -5502,7 +5519,7 @@ en:{
   "deck.startOver":"New list","deck.allAny":"All: any set","deck.allDeck":"All: keep deck's set",
   "deck.generateBtn":"Generate Wants-List",
   "deck.onlyMissing":"Only missing",
-  "deck.nToBuy":"{n} to buy","deck.nNotFound":"{n} not found",
+  "deck.nToBuy":"{n} entries, {cards} cards","deck.nNotFound":"{n} not found",
   "deck.anySet":"Any set","deck.pickSet":"Pick set",
   "deck.notFound":"not in card data",
   "deck.deckSetMissing":"not printed in {s}",
@@ -5511,8 +5528,9 @@ en:{
   "deck.priceApprox":"Totals are a lower bound — cards on “any set” use their cheapest printing, and cards with no Cardmarket price count as 0.",
   "deck.collIn":"in collection","deck.collOther":"other set","deck.collMissing":"missing",
   "deck.collPartial":"{owned}/{qty} owned",
-  "deck.thLocation":"Location",
-  "deck.locTitle":"Where your copies are","deck.locDesc":"Uncheck a location if those copies are already built into another physical deck — they'll stop counting as available for this list.",
+  "deck.thLocation":"Binder",
+  "deck.locTitle":"Where your copies are","deck.locDesc":"Uncheck a binder if those copies are already built into another physical deck — they'll stop counting as available for this list.",
+  "deck.locMore":"+{n} more","deck.locSelectAll":"Select all","deck.locSelectNone":"Select none",
   "deck.stillToBuy":"Still to buy","deck.stillToBuyDesc":"{n} cards, shipping included",
   "deck.sortOrig":"Deck order","deck.sortSection":"Section","deck.sortColl":"Collection status",
   "deck.filterAll":"All cards","deck.filterBuy":"To buy","deck.filterOwned":"In collection",
@@ -5529,7 +5547,7 @@ en:{
   "wantlist.limitInfo":"Cardmarket allows {limit} entries per Wants-List, so this is split "+
     "into {n} {lists}. Paste each block into its own Wants-List.",
   "wantlist.list":"list","wantlist.listsPlural":"lists",
-  "wantlist.entryHeader":"Wants-List {i} of {n} — {count} entries",
+  "wantlist.entryHeader":"Wants-List {i} of {n} — {count} entries, {cards} cards",
   "wantlist.copyList":"Copy list {i}","wantlist.copied":"Copied",
   "wantlist.slAmbiguous":"Some Secret Lair lines carry no version number. Cardmarket lists "+
     "several versions of that card in the same drop, and their numbering doesn't match ours, "+
@@ -5736,6 +5754,7 @@ en:{
   "cardPage.buyOnCardmarketNoPrice":"Buy on Cardmarket","cardPage.buyFoilNoPrice":"Buy foil",
   "cardPage.viewOnScryfall":"View on Scryfall","cardPage.regular":"Regular",
   "cardPage.copiesOwned":"Copies owned","cardPage.yourCollection":"Your collection",
+  "cardPage.binder":"Binder",
   "cardPage.setTo4":"Add 4 copies",
   "cardPage.wantListEntry":"Wants-List entry","cardPage.set":"Set",
   "cardPage.illustratedBy":"Illustrated by {artist}","cardPage.formatLegality":"Format legality",
@@ -5998,7 +6017,7 @@ de:{
   "deck.startOver":"Neue Liste","deck.allAny":"Alle: irgendein Set","deck.allDeck":"Alle: Deck-Set behalten",
   "deck.generateBtn":"Wants-Liste erzeugen",
   "deck.onlyMissing":"Nur Fehlendes",
-  "deck.nToBuy":"{n} zu kaufen","deck.nNotFound":"{n} nicht gefunden",
+  "deck.nToBuy":"{n} Einträge, {cards} Karten","deck.nNotFound":"{n} nicht gefunden",
   "deck.anySet":"Irgendein Set","deck.pickSet":"Set wählen",
   "deck.notFound":"nicht in den Kartendaten",
   "deck.deckSetMissing":"nicht in {s} gedruckt",
@@ -6007,8 +6026,9 @@ de:{
   "deck.priceApprox":"Die Summen sind eine Untergrenze — Karten auf „irgendein Set“ rechnen mit dem günstigsten Druck, Karten ohne Cardmarket-Preis zählen als 0.",
   "deck.collIn":"in Sammlung","deck.collOther":"anderes Set","deck.collMissing":"fehlt",
   "deck.collPartial":"{owned}/{qty} vorhanden",
-  "deck.thLocation":"Standort",
+  "deck.thLocation":"Ordner",
   "deck.locTitle":"Wo deine Exemplare liegen","deck.locDesc":"Häkchen entfernen, wenn diese Exemplare schon in einem anderen physischen Deck stecken — sie zählen dann nicht mehr als verfügbar für diese Liste.",
+  "deck.locMore":"+{n} weitere","deck.locSelectAll":"Alle auswählen","deck.locSelectNone":"Keine auswählen",
   "deck.stillToBuy":"Noch zu kaufen","deck.stillToBuyDesc":"{n} Karten, inkl. Versand",
   "deck.sortOrig":"Deck-Reihenfolge","deck.sortSection":"Bereich","deck.sortColl":"Sammlungsstatus",
   "deck.filterAll":"Alle Karten","deck.filterBuy":"Zu kaufen","deck.filterOwned":"In Sammlung",
@@ -6025,7 +6045,7 @@ de:{
   "wantlist.limitInfo":"Cardmarket erlaubt {limit} Einträge pro Wants-Liste, daher aufgeteilt "+
     "in {n} {lists}. Jeden Block einzeln einfügen.",
   "wantlist.list":"Liste","wantlist.listsPlural":"Listen",
-  "wantlist.entryHeader":"Wants-Liste {i} von {n} — {count} Einträge",
+  "wantlist.entryHeader":"Wants-Liste {i} von {n} — {count} Einträge, {cards} Karten",
   "wantlist.copyList":"Liste {i} kopieren","wantlist.copied":"Kopiert",
   "wantlist.slAmbiguous":"Einige Secret-Lair-Zeilen haben keine Versionsnummer. Cardmarket "+
     "führt von dieser Karte mehrere Versionen im selben Drop, und deren Nummerierung passt "+
@@ -6235,6 +6255,7 @@ de:{
   "cardPage.buyOnCardmarketNoPrice":"Auf Cardmarket kaufen","cardPage.buyFoilNoPrice":"Foil kaufen",
   "cardPage.viewOnScryfall":"Auf Scryfall ansehen","cardPage.regular":"Normal",
   "cardPage.copiesOwned":"Kopien in Besitz","cardPage.yourCollection":"Deine Sammlung",
+  "cardPage.binder":"Ordner",
   "cardPage.setTo4":"4 Kopien hinzufügen",
   "cardPage.wantListEntry":"Wants-Liste-Eintrag","cardPage.set":"Set",
   "cardPage.illustratedBy":"Illustriert von {artist}","cardPage.formatLegality":"Format-Legalität",
@@ -7980,6 +8001,10 @@ async function cardPage(sc,nr){
           <div class="v" id="qtyTotal" style="font-size:22px;color:${d.qty?"var(--ok)":"var(--muted)"}">${d.qty}</div></div>
         <div class="card"><div class="k">${t("missing.thRarity")}</div>
           <div class="v" style="font-size:22px">${RAR[d.rarity]?rarLabel(d.rarity):"?"}</div></div>
+        <div class="card"><div class="k">${t("cardPage.binder")}</div>
+          <div class="v" style="font-size:14px;line-height:2">${
+            (d.copies||[]).filter(cp=>cp.set===d.set&&cp.number===d.number&&cp.binder)
+              .map(cp=>deckLocPill(cp,false)).join("")||"—"}</div></div>
       </div>
       <h2>${t("ph.title")}</h2>
       <div class="tools" style="margin:0 0 8px">${phRangeSeg(PH_RANGE,"cardPhRange")}
@@ -8456,7 +8481,7 @@ async function drawCart(){
     b.textContent=t("cart.addedAllToCollection");setTimeout(()=>b.textContent=t("cart.addAllToCollection"),1700);};
   $("#cartWant").onclick=()=>{
     const v=cartView();
-    $("#cartWL").innerHTML=wantChunks(v.map(i=>wantLine(i,i.setName,i.qty)),v.some(i=>i.cmVer===-1));
+    $("#cartWL").innerHTML=wantChunks(v.map(i=>({text:wantLine(i,i.setName,i.qty),qty:i.qty})),v.some(i=>i.cmVer===-1));
     bindChunks();};
 }
 
@@ -8506,10 +8531,12 @@ function deckPriceHtml(c){
   return p&&p.eur?money(p.eur):"—";
 }
 // A copy can be owned but not actually free for THIS list - already sleeved
-// into another physical deck, say. c.excludedBinders holds the (set+binder)
-// keys of locations the user has told us not to count. deckLocKey must match
-// how the "Location" popup (deckOpenLoc) stores them.
-function deckLocKey(d){return d.set+""+d.binder;}
+// into another physical deck, say. c.excludedBinders holds the (set+binder+
+// foil) keys of locations the user has told us not to count - foil is part
+// of the key because the same binder can hold both a regular and a foil
+// batch, shown and excluded separately. deckLocKey must match how the
+// "Location" popup (deckOpenLoc) stores them.
+function deckLocKey(d){return d.set+""+d.binder+""+(d.foil?"1":"0");}
 function deckReserved(c){
   const excl=c.excludedBinders;
   if(!excl||!excl.length)return 0;
@@ -8554,28 +8581,36 @@ function deckSetName(c,setCode){
   const p=(c.printings||[]).find(p=>p.set===setCode);
   return p?p.setName:setCode.toUpperCase();
 }
-// Visible "Location" text for one row - only the locations relevant to what
-// this row would actually buy: the target set's, once one is picked, or
-// every known location under "any set". Untagged copies (binder="") have
-// nothing to show and are silently skipped here (they still count toward
-// availability, just have no location to display or manage).
-function deckLocText(c){
-  const det=(c.ownedDetail||[]).filter(d=>d.binder);
-  if(!det.length)return "";
-  const setCode=c.mode==="any"?null:(deckChosen(c)||{}).set;
-  const relevant=setCode?det.filter(d=>d.set===setCode):det;
-  if(!relevant.length)return "";
-  const excl=c.excludedBinders||[];
-  return relevant.map(d=>{
-    const label=`${esc(d.binder)}${d.qty>1?` ×${d.qty}`:""}`;
-    return excl.includes(deckLocKey(d))
-      ?`<span style="text-decoration:line-through;opacity:.55">${label}</span>`:label;
-  }).join(", ");
+// One coloured pill per location - the colour is the finish (regular/foil)
+// of that specific batch, not the collection status, so it reads at a
+// glance even before opening the popup. "off" (struck through, dimmed)
+// marks a location the user excluded via deckOpenLoc.
+function deckLocPill(d,off){
+  const label=`${esc(d.binder)}${d.qty>1?` ×${d.qty}`:""}`;
+  return `<span class="dlocTag ${d.foil?"dlocFoil":"dlocReg"}${off?" dlocOff":""}">${label}</span>`;
 }
-function deckLocCell(c,i){
-  const txt=deckLocText(c);
-  return txt?`<span class="setlink" data-dm="${i}|loc">${txt}</span>`
-             :`<span class="mt" style="color:var(--dim)">—</span>`;
+// Relevant locations for one row - the target set's, once one is picked, or
+// every known location under "any set". Untagged copies (binder="") have
+// nothing to show and are skipped (they still count toward availability,
+// just have no location to display or manage).
+function deckLocList(c){
+  const det=(c.ownedDetail||[]).filter(d=>d.binder);
+  if(!det.length)return [];
+  const setCode=c.mode==="any"?null:(deckChosen(c)||{}).set;
+  return setCode?det.filter(d=>d.set===setCode):det;
+}
+// Capped at 4 pills inline (a common basic land can otherwise be scattered
+// across a dozen binders) - the rest collapses into a "+N more" pill that
+// opens the same picker popup as clicking any other pill does.
+function deckLocCell(c,i,max){
+  const relevant=deckLocList(c);
+  if(!relevant.length)return `<span class="mt" style="color:var(--dim)">—</span>`;
+  const excl=c.excludedBinders||[];
+  const shown=relevant.slice(0,max||4);
+  const extra=relevant.length-shown.length;
+  const pills=shown.map(d=>deckLocPill(d,excl.includes(deckLocKey(d)))).join("");
+  const more=extra>0?`<span class="dlocTag dlocMore">${t("deck.locMore",{n:extra})}</span>`:"";
+  return `<span data-dm="${i}|loc" style="cursor:pointer">${pills}${more}</span>`;
 }
 function deckSecLbl(c){
   const n=deckSecName(c);
@@ -8612,7 +8647,7 @@ function drawDeck(){
     return;
   }
   const cs=DECK.cards;
-  const nOut=cs.filter(c=>c.status!=="notFound"&&(!DECK.onlyMissing||deckColl(c)!=="in")).length;
+  const {entries:nOut,cards:nCards}=deckPillCounts();
   const nBad=cs.filter(c=>c.status==="notFound").length;
   const hasSec=cs.some(deckHasSec);
   DECK._hasSec=hasSec;
@@ -8637,7 +8672,7 @@ function drawDeck(){
         `<option value="${v}" ${DECK.filter===v?"selected":""}>${t(l)}</option>`).join("")}</select>
       <div class="seg"><button data-dv="table" class="${DECK.view==="table"?"on":""}">${t("collection.table")}</button>
         <button data-dv="grid" class="${DECK.view==="grid"?"on":""}">${t("collection.grid")}</button></div>
-      <span class="pill" id="dNBuy">${t("deck.nToBuy",{n:nOut})}${nBad?" · "+t("deck.nNotFound",{n:nBad}):""}</span>
+      <span class="pill" id="dNBuy">${t("deck.nToBuy",{n:nOut,cards:num(nCards)})}${nBad?" · "+t("deck.nNotFound",{n:nBad}):""}</span>
       <label class="chk" style="margin:0 0 0 auto"><input type="checkbox" id="donlymissing" ${
         DECK.onlyMissing?"checked":""}> ${t("deck.onlyMissing")}</label>
       <button id="dgen" class="pri">${t("deck.generateBtn")}</button></div>
@@ -8756,13 +8791,13 @@ function deckTile(c,i){
       <div class="cn">${nm}</div>
       <div class="cset"><span class="tag b">${t("deck.notFound")}</span></div>${rm}</div></div>`;
   const img=deckPop(c);
-  const locTxt=deckLocText(c);
+  const hasLoc=deckLocList(c).length>0;
   return `<div class="cc" data-di="${i}">
     <div class="imgwrap">${img?`<img class="face" src="${img}" alt="${esc(c.name)}" loading="lazy">`
       :`<div class="noimg">${esc(c.name)}</div>`}</div>
     <div class="meta"><div class="cn">${nm}</div>
       <div class="cset">${deckCollBadge(c)} ${deckSecLbl(c)} ${deckMiss(c)}</div>
-      ${locTxt?`<div class="mt" style="margin-top:2px"><span class="setlink" data-dm="${i}|loc">${locTxt}</span></div>`:""}
+      ${hasLoc?`<div class="mt" style="margin-top:2px">${deckLocCell(c,i,2)}</div>`:""}
       <div class="cp">${deckPriceHtml(c)}</div>
       ${deckSeg(c,i)}${rm}
     </div></div>`;
@@ -8800,14 +8835,23 @@ function deckUpdateOne(i){
   deckSave();
   const wl=$("#deckWL");if(wl)wl.innerHTML="";
 }
+// Entries (rows) AND physical cards (quantities) still to buy - a single
+// "4x" row is one entry but four cards, which the pill used to conflate
+// (showing "1 to buy" for a card you need four copies of).
+function deckPillCounts(){
+  const rows=DECK.cards.filter(c=>c.status!=="notFound"&&(!DECK.onlyMissing||deckColl(c)!=="in"));
+  const cards=DECK.onlyMissing?deckMissingTotals().count
+    :rows.reduce((s,c)=>s+(c.qty||1),0);
+  return {entries:rows.length,cards};
+}
 // The "N to buy" pill lives in the toolbar, outside what deckUpdateOne
 // redraws (just the one row + the summary) - refresh it too so a mode
 // switch or a reservation toggle doesn't leave it showing a stale count.
 function deckRefreshPill(){
   const el=$("#dNBuy");if(!el||!DECK.cards)return;
-  const nOut=DECK.cards.filter(c=>c.status!=="notFound"&&(!DECK.onlyMissing||deckColl(c)!=="in")).length;
+  const {entries,cards}=deckPillCounts();
   const nBad=DECK.cards.filter(c=>c.status==="notFound").length;
-  el.innerHTML=`${t("deck.nToBuy",{n:nOut})}${nBad?" · "+t("deck.nNotFound",{n:nBad}):""}`;
+  el.innerHTML=`${t("deck.nToBuy",{n:entries,cards:num(cards)})}${nBad?" · "+t("deck.nNotFound",{n:nBad}):""}`;
 }
 // price + shipping estimate for the whole list. "any set" cards are priced at
 // their cheapest printing, so the goods total is a lower bound when any card is
@@ -8945,6 +8989,8 @@ function deckOpenLoc(i){
   const inner=`<div class="deckpick">
     <div class="tools" style="margin:0 0 6px">
       <b style="flex:1 1 auto">${esc(c.name)} — ${t("deck.locTitle")}</b>
+      <button class="dplocAll" data-v="1">${t("deck.locSelectAll")}</button>
+      <button class="dplocAll" data-v="0">${t("deck.locSelectNone")}</button>
       <button class="dpx" title="${t("common.close")}">✕</button></div>
     <p class="sub" style="margin:0 0 8px;max-width:540px">${t("deck.locDesc")}</p>
     <div class="list dplist" style="max-height:240px;overflow:auto;border:1px solid var(--line);border-radius:5px">
@@ -8953,8 +8999,7 @@ function deckOpenLoc(i){
       return `<label class="li" style="cursor:pointer">
         <input type="checkbox" class="dploc" data-key="${esc(key)}" ${excl.includes(key)?"":"checked"}
           style="margin-right:10px">
-        <span class="nm">${esc(deckSetName(c,d.set))}: ${esc(d.binder)}</span>
-        <span class="mt" style="flex:0 0 40px;text-align:right">${d.qty}×</span>
+        <span class="nm">${esc(deckSetName(c,d.set))}: ${deckLocPill(d,false)}</span>
       </label>`;
     }).join("")}</div></div>`;
   if(DECK.view==="grid")
@@ -8964,6 +9009,12 @@ function deckOpenLoc(i){
       `<tr class="deckpickrow"><td colspan="${deckColCount()}">${inner}</td></tr>`);
   const panel=document.querySelector(".deckpick");
   panel.querySelector(".dpx").onclick=()=>deckClosePick();
+  panel.querySelectorAll(".dplocAll").forEach(b=>b.onclick=()=>{
+    c.excludedBinders=b.dataset.v==="1"?[]:det.map(deckLocKey);
+    deckSave();
+    deckUpdateOne(i);
+    deckOpenLoc(i);           // rebuild the panel so every checkbox reflects the bulk change
+  });
   panel.querySelectorAll(".dploc").forEach(cb=>cb.onchange=()=>{
     const key=cb.dataset.key;
     c.excludedBinders=c.excludedBinders||[];
@@ -8972,7 +9023,6 @@ function deckOpenLoc(i){
     else if(idx<0)c.excludedBinders.push(key);
     deckSave();
     deckUpdateOne(i);
-    deckRefreshSummary();
   });
   DECK._outside=e=>{
     if(e.target.closest(".deckpick")||e.target.closest(`[data-dm="${i}|loc"]`))return;
@@ -8995,17 +9045,21 @@ function deckGenerate(){
   // did. Only "partial" (own some, not enough) trims its own line down to
   // the shortfall - deck-legal count doesn't care which printing the copies
   // you already have came from, so no reason to buy the full amount again.
-  const lines=DECK.cards
+  const items=DECK.cards
     .filter(c=>c.status!=="notFound"&&(!only||deckColl(c)!=="in"))
     .map(c=>{
       const qty=(only&&deckColl(c)==="partial")?deckNeed(c):c.qty;
+      let text;
       if(c.mode==="any"||(!c.deckPrinting&&c.mode!=="set"))
-        return (qty>1?qty+"x ":"")+c.name;
-      const p=c.mode==="set"?c.chosen:c.deckPrinting;
-      if(p.cmVer===-1)warn=true;
-      return wantLine({name:c.name,cmVer:p.cmVer,cmSuffix:p.cmSuffix,cmExpansion:p.cmExpansion},p.setName,qty);
+        text=(qty>1?qty+"x ":"")+c.name;
+      else{
+        const p=c.mode==="set"?c.chosen:c.deckPrinting;
+        if(p.cmVer===-1)warn=true;
+        text=wantLine({name:c.name,cmVer:p.cmVer,cmSuffix:p.cmSuffix,cmExpansion:p.cmExpansion},p.setName,qty);
+      }
+      return {text,qty};
     });
-  $("#deckWL").innerHTML=wantChunks(lines,warn);
+  $("#deckWL").innerHTML=wantChunks(items,warn);
   bindChunks();
   $("#deckWL").scrollIntoView({behavior:"smooth",block:"start"});
 }
@@ -9036,18 +9090,23 @@ function wantLine(c, setName, qty){
            : `${n}${c.name} (${base}${c.cmSuffix || ""})`;
 }
 
-function wantChunks(lines, warn){
-  if(!lines.length)return `<p class="sub">${t("wantlist.nothingToCopy")}</p>`;
+// items: [{text, qty}] - qty is how many physical copies that one line asks
+// for (a "4x Card Name" line is still one entry, but four cards), so a
+// chunk's header can show both without the caller re-deriving it from text.
+function wantChunks(items, warn){
+  if(!items.length)return `<p class="sub">${t("wantlist.nothingToCopy")}</p>`;
   const parts=[];
-  for(let i=0;i<lines.length;i+=CM_LIMIT)parts.push(lines.slice(i,i+CM_LIMIT));
+  for(let i=0;i<items.length;i+=CM_LIMIT)parts.push(items.slice(i,i+CM_LIMIT));
   const note = warn ? `<p class="msg warn" style="max-width:760px">${t("wantlist.slAmbiguous")}</p>` : "";
   return `<p class="sub">${t("wantlist.limitInfo",{limit:CM_LIMIT,n:parts.length,
       lists:parts.length>1?t("wantlist.listsPlural"):t("wantlist.list")})}</p>${note}
-    ${parts.map((chunk,i)=>`<div class="chunk">
-      <h4>${t("wantlist.entryHeader",{i:i+1,n:parts.length,count:chunk.length})}</h4>
-      <textarea readonly id="wl${i}">${chunk.join("\n")}</textarea>
+    ${parts.map((chunk,i)=>{
+      const cards=chunk.reduce((s,x)=>s+(x.qty||1),0);
+      return `<div class="chunk">
+      <h4>${t("wantlist.entryHeader",{i:i+1,n:parts.length,count:chunk.length,cards:num(cards)})}</h4>
+      <textarea readonly id="wl${i}">${chunk.map(x=>x.text).join("\n")}</textarea>
       <button class="pri" data-copy="${i}" style="margin-top:8px">${t("wantlist.copyList",{i:i+1})}</button>
-    </div>`).join("")}`;
+    </div>`;}).join("")}`;
 }
 function bindChunks(){
   document.querySelectorAll("[data-copy]").forEach(b=>b.onclick=async()=>{
