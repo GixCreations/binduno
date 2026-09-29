@@ -16,8 +16,8 @@ import urllib.request
 from datetime import datetime, timedelta
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-VERSION = "6.95"
-SCHEMA = 22
+VERSION = "6.96"
+SCHEMA = 23
 
 
 def _env(name, *legacy):
@@ -1330,6 +1330,33 @@ def refresh_cards(bulk_type="all_cards"):
             psize = sets[code][4] or 0
             if psize and set_counts[code] > psize and ni > psize:
                 rows[i] = r[:10] + (1,) + r[11:]
+
+        # Surge Foil marks a genuine alternate treatment only when a plain
+        # sibling of the same name ALSO exists in the set - Doctor Who's
+        # "The First Doctor" has a plain #128 alongside its surge-foil-only
+        # #733, and Cardmarket lists #733 as Extras V.1, exactly what this
+        # classifier already does. But some Universes Beyond Commander
+        # precons (Marvel Super Heroes, Final Fantasy, ...) print a card
+        # ONLY as surge foil - no plain version exists anywhere in that set
+        # - and Cardmarket then treats the surge-foil printing as the
+        # card's BASE listing, with only its other special treatments (if
+        # any) filed as Extras. Confirmed against the live site: msc
+        # "Luxury Suite" #252 (surge foil, finishes nonfoil+foil) -> plain
+        # "Commander: Marvel Super Heroes", #482 (extended art) -> "...:
+        # Extras"; same pattern for fic "Ultimate Magic: Meteor". Demote
+        # only when exactly one candidate exists per (set, name) - an
+        # ambiguous group is left classified as above rather than guessed at.
+        by_name_pre = {}
+        for i, r in enumerate(rows):
+            by_name_pre.setdefault((r[0], r[3]), []).append(i)
+        for idxs in by_name_pre.values():
+            if any(not rows[i][10] for i in idxs):
+                continue                          # a plain sibling already exists
+            cands = [i for i in idxs if rows[i][22] == "Surge Foil"
+                     and {"nonfoil", "foil"} <= set(rows[i][23].split(","))]
+            if len(cands) == 1:
+                i = cands[0]
+                rows[i] = rows[i][:10] + (0,) + rows[i][11:]
 
         # Cardmarket numbers the printings of one card name inside a set as
         # V.1, V.2 ... - NOT in collector-number order, empirically confirmed
