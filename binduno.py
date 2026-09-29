@@ -16,8 +16,8 @@ import urllib.request
 from datetime import datetime, timedelta
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-VERSION = "6.94"
-SCHEMA = 21
+VERSION = "6.95"
+SCHEMA = 22
 
 
 def _env(name, *legacy):
@@ -1400,9 +1400,20 @@ def refresh_cards(bulk_type="all_cards"):
         # and store the expansion name so want lines resolve.
         sl_codes = {code for code, s in sets.items()
                     if (s[1] or "").lower().startswith("secret lair")}
+        # "The List" (plst) is its own Scryfall set, but some of its reprints
+        # are physically distributed inside a Secret Lair Commander Deck
+        # rather than sold as a plain "The List" single - Cardmarket then
+        # only carries them under that Secret Lair product, e.g. Siege-Gang
+        # Lieutenant / plst#M3C-113 -> "Secret Lair Commander Deck: Goblin
+        # Storm", confirmed against the live product page (idProduct 891770).
+        # Most plst cards ARE plain "The List" singles though (e.g.
+        # Skullclamp), so unlike real Secret Lair sets below, an unresolved
+        # lookup here must fall through to the normal "(The List)" bracket
+        # instead of a forced fallback name.
+        list_codes = {code for code, s in sets.items() if (s[1] or "") == "The List"}
         cm_pids = cm_pid_of                                       # already extracted above
         want = {cm_pids[i] for i, r in enumerate(rows)
-                if r[0] in sl_codes and cm_pids[i]}
+                if r[0] in sl_codes | list_codes and cm_pids[i]}
         pid2exp = _cm_product_expansions(want, c)
         exp_map = dict(CM_SLD_EXPANSIONS)                        # baked
         if want:
@@ -1412,9 +1423,14 @@ def refresh_cards(bulk_type="all_cards"):
                 exp_map[int(k)] = v
         except (ValueError, TypeError):
             pass
-        cm_exps = [exp_map.get(pid2exp.get(cm_pids[i]), "Secret Lair Drop Series")
-                   if r[0] in sl_codes else None
-                   for i, r in enumerate(rows)]
+        cm_exps = []
+        for i, r in enumerate(rows):
+            if r[0] in sl_codes:
+                cm_exps.append(exp_map.get(pid2exp.get(cm_pids[i]), "Secret Lair Drop Series"))
+            elif r[0] in list_codes and pid2exp.get(cm_pids[i]) in exp_map:
+                cm_exps.append(exp_map[pid2exp[cm_pids[i]]])
+            else:
+                cm_exps.append(None)
         _sl_unresolved = sum(1 for i, r in enumerate(rows) if r[0] in sl_codes
                              and pid2exp.get(cm_pids[i]) not in exp_map)
         if want and _sl_unresolved:
@@ -7632,6 +7648,12 @@ function cmName(n){
   // already gets folded to "Commander: Marvel Super Heroes" above) — Cardmarket
   // brands the whole line "Universes Beyond: X" instead.
   if(n==="Doctor Who"||n==="Fallout")return "Universes Beyond: "+n;
+  // "Foundations" alone is too generic for Cardmarket's catalog - the
+  // expansion is literally named "Magic: The Gathering Foundations" there
+  // (and "...: Extras"/"...: Promos"), unlike every other set Binduno maps,
+  // which use the bare set name. Confirmed against cardmarket.com search.
+  if(n==="Foundations")return "Magic: The Gathering Foundations";
+  if(n==="Foundations Promos")return "Magic: The Gathering Foundations: Promos";
   return n;
 }
 // Cardmarket keeps special treatments in their own expansions, e.g.
