@@ -16,7 +16,7 @@ import urllib.request
 from datetime import datetime, timedelta
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-VERSION = "6.97"
+VERSION = "6.98"
 SCHEMA = 23
 
 
@@ -238,6 +238,8 @@ UNIVERSES_BEYOND_SETS = {
     "tmt", "tmc", "pza",      # Teenage Mutant Ninja Turtles (+ Eternal, Source Material)
     "msh", "msc",             # Marvel Super Heroes (+ Commander)
     "trk", "trc", "sds",      # Star Trek (+ Commander, Stardates)
+    "hob", "hoc",              # The Lord of the Rings: The Hobbit (+ Eternal)
+    "clu",                    # Ravnica: Clue Edition (Hasbro's Cluedo)
 }
 
 
