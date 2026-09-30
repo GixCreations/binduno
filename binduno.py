@@ -16,7 +16,7 @@ import urllib.request
 from datetime import datetime, timedelta
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-VERSION = "6.96"
+VERSION = "6.97"
 SCHEMA = 23
 
 
@@ -2890,11 +2890,14 @@ def set_rows(c):
         meta[r["code"]] = dict(r)
 
     rows = c.execute("""
-        SELECT k.set_code, k.num_int, k.name, k.rarity, k.eur, k.extra, k.variant,
-               CASE WHEN o.qty IS NULL THEN 0 ELSE 1 END AS have
+        SELECT k.set_code, k.num_int, k.name, k.rarity, k.eur, k.eur_foil, k.extra, k.variant,
+               CASE WHEN o.qty IS NULL THEN 0 ELSE 1 END AS have,
+               COALESCE(o.nonfoil_qty, 0) AS nonfoil_qty
         FROM cards k
         JOIN sets s ON s.code = k.set_code
-        LEFT JOIN (SELECT set_code, number, SUM(qty) qty FROM collection
+        LEFT JOIN (SELECT set_code, number, SUM(qty) qty,
+                          SUM(CASE WHEN foil='foil' THEN 0 ELSE qty END) nonfoil_qty
+                   FROM collection
                    GROUP BY set_code, number) o
                ON o.set_code = k.set_code AND o.number = k.number
         WHERE k.digital = 0 AND s.released <> ''
@@ -2914,7 +2917,20 @@ def set_rows(c):
         total, owned = pg["total"], pg["owned"]
         missing, missing_value = pg["missing"], pg["missingValue"]
         eg_n, eg_v = pg["endgameCount"], pg["endgameValue"]
-        owned_value = sum((r["eur"] or 0) for r in cards if r["have"])
+        # One price per owned printing, not per physical copy (owning three
+        # of the same card doesn't make the set "worth more" toward
+        # completion) - but priced at whichever finish you actually hold:
+        # the nonfoil trend price when any nonfoil copy is owned, the foil
+        # price when the only copies you have are foil. Using the nonfoil
+        # price unconditionally used to undercount (or zero out) printings
+        # that are foil-only on Scryfall, or that you happen to only own
+        # as foil - confirmed against a real collection where this alone
+        # accounted for part of the gap against Value over time's total
+        # (which prices every physical copy, foil or not - a different,
+        # intentionally more complete number, see that page's own total).
+        owned_value = sum(
+            (r["eur"] or 0) if r["nonfoil_qty"] else (r["eur_foil"] or r["eur"] or 0)
+            for r in cards if r["have"])
         st = m["set_type"] or ""
         cat, label = CATEGORY.get(st, ("Special Set",
                                        st.replace("_", " ").title() or "Other"))
