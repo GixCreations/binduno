@@ -16,7 +16,7 @@ import urllib.request
 from datetime import datetime, timedelta
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-VERSION = "6.98"
+VERSION = "6.99"
 SCHEMA = 23
 
 
@@ -4669,6 +4669,12 @@ h2{font-family:var(--serif);font-weight:400;font-size:20px;margin:34px 0 12px}
    together so a mobile line-wrap can't strand the percentage alone on its
    own line below the count it belongs with. */
 .li .statgroup{display:flex;gap:11px;flex:0 0 auto}
+/* "Closest to completion" set name - fixed 180px on desktop (two columns
+   side by side, .bar still visible and also wants the leftover room), but
+   see the @680px query below: once .bar is hidden on mobile, this gets to
+   grow into the space the bar would have used instead of staying capped
+   at a desktop-sized guess with most of the row empty next to it. */
+.li .nearestNm{flex:0 1 180px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 .li .mt{font-family:var(--mono);font-size:12px;color:var(--muted)}
 .bar{flex:1 1 92px;height:6px;background:var(--track);border-radius:4px;overflow:hidden}
 /* "Closest to completion" rows only - match the thicker bars used for "By rarity"
@@ -5221,7 +5227,12 @@ tr.child2 td:first-child::before{left:36px}
 .help code{font-family:var(--mono);font-size:12.5px;color:var(--gold)}
 .help table{margin:10px 0}
 @media(max-width:900px){.filters{grid-template-columns:1fr}.fbox{position:static;max-height:none}
-  .cardpage{grid-template-columns:1fr}}
+  .cardpage{grid-template-columns:1fr}
+  /* Below 900px .cardpage drops to one column, so .art's width:100% (sized
+     against a fixed 340px column on desktop) suddenly fills the full page
+     width instead - huge on a phone. 75%, centered, keeps it a sensible
+     size without the fixed-column cap desktop relies on. */
+  .cardpage .art{width:75%;margin:0 auto;display:block}}
 .setlink,[data-card],[data-code],[data-view],[data-buy],[data-cart],[data-q]{cursor:pointer}
 .setlink{color:var(--text);border-bottom:1px solid transparent}
 .setlink:hover{color:var(--gold);border-color:var(--gold)}
@@ -5259,6 +5270,10 @@ tr.child2 td:first-child::before{left:36px}
      that could split the two apart. The row's own name/number/% columns
      carry the same information already. */
   .li .bar{display:none}
+  /* With the bar gone, the name can have the room it would have shared
+     with it instead of staying capped at the desktop 180px guess -
+     ellipsis still kicks in if a name is longer than the phone is wide. */
+  .li .nearestNm{flex:1 1 auto}
   .li .mt{flex:0 0 auto!important}
   .wrap{padding:16px 13px 64px}
   footer{padding:14px 13px 22px}
@@ -6960,8 +6975,7 @@ function bindPhRange(sel,cb){
 const row=(x,i)=>`<div class="li" data-code="${x.code}">
   <span class="mt" style="flex:0 0 20px;text-align:right;color:var(--dim)">${i}.</span>
   ${icon(x,19)}
-  <span class="nm" style="flex:0 1 180px;white-space:nowrap;overflow:hidden;
-    text-overflow:ellipsis" title="${x.name}">${x.name}</span>
+  <span class="nm nearestNm" title="${x.name}">${x.name}</span>
   <span class="bar"><span style="width:${x.pct*100}%"></span></span>
   <span class="statgroup"><span class="mt" style="flex:0 0 auto;min-width:72px;text-align:right">${x.owned}/${x.total}</span>
   <span class="mt" style="color:var(--gold);flex:0 0 auto;min-width:58px;text-align:right">${pct(x.pct)}</span></span>${
