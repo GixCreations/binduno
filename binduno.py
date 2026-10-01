@@ -16,7 +16,7 @@ import urllib.request
 from datetime import datetime, timedelta
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-VERSION = "6.100"
+VERSION = "6.101"
 SCHEMA = 23
 
 
@@ -5270,14 +5270,18 @@ tr.child2 td:first-child::before{left:36px}
      that could split the two apart. The row's own name/number/% columns
      carry the same information already. */
   .li .bar{display:none}
-  /* With the bar gone, the name can have the room it would have shared
-     with it instead of staying capped at the desktop 180px guess -
-     ellipsis still kicks in if a name is longer than the phone is wide.
-     flex-basis 100% (not auto) always forces its own line, even for a
-     short name that would otherwise fit next to the count/percentage -
-     every row then wraps to the same two lines instead of alternating
-     between a compact one-line row and a taller two-line one. */
-  .li .nearestNm{flex:1 1 100%}
+  /* Keep "closest to completion" rows a single line - number, icon, name,
+     count and percentage all stay on one row, same height for every row
+     regardless of name length. nearestLi opts out of the general .li
+     wrap above (other .li uses, e.g. Settings' group-header rows, still
+     rely on wrapping). min-width:0 is what lets a flex child shrink
+     below its content size at all - without it flex items default to
+     min-width:auto and never get small enough for text-overflow:ellipsis
+     (already set on .nearestNm) to actually kick in; flex:1 1 auto then
+     gives the name whatever room is left after the fixed-width siblings
+     (number/icon/count/percentage) claim theirs, down to that. */
+  .nearestLi{flex-wrap:nowrap}
+  .li .nearestNm{flex:1 1 auto;min-width:0}
   .li .mt{flex:0 0 auto!important}
   .wrap{padding:16px 13px 64px}
   footer{padding:14px 13px 22px}
@@ -6976,7 +6980,7 @@ function bindPhRange(sel,cb){
 // installed monospace fallback, a browser zoom level, anything. flex:0 0
 // auto with min-width keeps the same alignment in the normal case but
 // still grows for whatever the actual text needs instead of cutting it.
-const row=(x,i)=>`<div class="li" data-code="${x.code}">
+const row=(x,i)=>`<div class="li nearestLi" data-code="${x.code}">
   <span class="mt" style="flex:0 0 20px;text-align:right;color:var(--dim)">${i}.</span>
   ${icon(x,19)}
   <span class="nm nearestNm" title="${x.name}">${x.name}</span>
