@@ -16,7 +16,7 @@ import urllib.request
 from datetime import datetime, timedelta
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-VERSION = "6.99"
+VERSION = "6.100"
 SCHEMA = 23
 
 
@@ -5272,8 +5272,12 @@ tr.child2 td:first-child::before{left:36px}
   .li .bar{display:none}
   /* With the bar gone, the name can have the room it would have shared
      with it instead of staying capped at the desktop 180px guess -
-     ellipsis still kicks in if a name is longer than the phone is wide. */
-  .li .nearestNm{flex:1 1 auto}
+     ellipsis still kicks in if a name is longer than the phone is wide.
+     flex-basis 100% (not auto) always forces its own line, even for a
+     short name that would otherwise fit next to the count/percentage -
+     every row then wraps to the same two lines instead of alternating
+     between a compact one-line row and a taller two-line one. */
+  .li .nearestNm{flex:1 1 100%}
   .li .mt{flex:0 0 auto!important}
   .wrap{padding:16px 13px 64px}
   footer{padding:14px 13px 22px}
