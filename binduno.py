@@ -16,7 +16,7 @@ import urllib.request
 from datetime import datetime, timedelta
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-VERSION = "6.101"
+VERSION = "6.107"
 SCHEMA = 23
 
 
@@ -768,6 +768,11 @@ QUIT_TIMER = None
 QUIT_GRACE = 2.5
 TRAY_ACTIVE = False        # set once a menu-bar / tray icon is up
 TRAY_ICON = None           # the pystray Icon, so an explicit Quit can remove it
+# The NSProcessInfo activity token that keeps App Nap off this process (see
+# run_tray() and the comment on APP_PLIST's NSAppSleepDisabled) - held as a
+# plain module global, deliberately not nested inside any closure, so it
+# can't be garbage-collected out from under the activity it's keeping alive.
+APP_NAP_ACTIVITY = None
 REFRESH_PROC = None        # the running card-data refresh subprocess, if any -
                            # see _kill_refresh_subprocess()
 
@@ -4622,7 +4627,18 @@ h2{font-family:var(--serif);font-weight:400;font-size:20px;margin:34px 0 12px}
 .clickable:hover{transform:translateY(-3px);border-color:var(--gold);
   box-shadow:0 8px 18px rgba(0,0,0,.28)}
 .clickable:active{transform:translateY(-1px)}
-.donuts{display:grid;grid-template-columns:repeat(auto-fit,minmax(230px,340px));gap:12px;margin-top:12px}
+/* minmax(230px,340px) - a fixed px max with no fr - used to leave the home
+   tiles stuck on far fewer columns than the window actually had room for,
+   confirmed by measuring the live grid: at some widths auto-fit resolved
+   to a single 340px column and stacked every tile into implicit rows
+   under it instead of laying out several side by side, even though 600+
+   spare px sat unused. minmax(min,1fr) (already used for this exact grid
+   on mobile, just below) is the well-supported version of this pattern -
+   auto-fit counts how many >=230px tracks fit, then the 1fr lets them
+   share out whatever room is actually there, growing past 230px evenly
+   instead of capping at a fixed number that this width-dependent counting
+   step turned out not to honor reliably. */
+.donuts{display:grid;grid-template-columns:repeat(auto-fit,minmax(230px,1fr));gap:12px;margin-top:12px}
 .donut{background:var(--panel);border:1px solid var(--line);border-radius:6px;padding:18px;
   display:flex;gap:16px;align-items:center}
 .donut svg{flex:0 0 96px}
@@ -4675,6 +4691,16 @@ h2{font-family:var(--serif);font-weight:400;font-size:20px;margin:34px 0 12px}
    grow into the space the bar would have used instead of staying capped
    at a desktop-sized guess with most of the row empty next to it. */
 .li .nearestNm{flex:0 1 180px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+/* flex-shrink:0 on the row-number span (inline style, flex:0 0 20px) only
+   stops it shrinking BELOW 20px - it does nothing to stop the OPPOSITE:
+   a flex item's automatic min-width defaults to its content's min-content
+   size, which for "10." (3 chars) is wider than 20px, so item #10 was
+   rendered at ~21.7px instead of 20 and everything after it (icon, name)
+   landed ~1.7px further right than items 1-9 - confirmed on both desktop
+   and mobile, not a media-query-specific bug. min-width:0 removes that
+   automatic floor so the literal 20px wins and "10." overflows its box
+   to the left (invisible - text-align:right - instead of pushing right). */
+.li .nearestIdx{min-width:0}
 .li .mt{font-family:var(--mono);font-size:12px;color:var(--muted)}
 .bar{flex:1 1 92px;height:6px;background:var(--track);border-radius:4px;overflow:hidden}
 /* "Closest to completion" rows only - match the thicker bars used for "By rarity"
@@ -5283,6 +5309,13 @@ tr.child2 td:first-child::before{left:36px}
   .nearestLi{flex-wrap:nowrap}
   .li .nearestNm{flex:1 1 auto;min-width:0}
   .li .mt{flex:0 0 auto!important}
+  /* The row number shares .mt with the owned/percentage spans above, so
+     it was also getting flex:0 0 auto - shrinking to fit "1." through
+     "9." (2 chars) but growing for "10." (3 chars), each a DIFFERENT
+     width, so the icon right after it landed at a different x per row
+     (most visible comparing row 10 to the rest). Restore its own fixed
+     20px column, same for every row regardless of digit count. */
+  .li .nearestIdx{flex:0 0 20px!important}
   .wrap{padding:16px 13px 64px}
   footer{padding:14px 13px 22px}
   h1{font-size:24px}
@@ -5320,12 +5353,23 @@ tr.child2 td:first-child::before{left:36px}
   /* keep card grids at two columns on the phone instead of collapsing to one */
   .cgrid{grid-template-columns:repeat(auto-fill,minmax(140px,1fr));gap:10px}
   .cards{grid-template-columns:repeat(auto-fit,minmax(140px,1fr));gap:9px}
-  .card{padding:13px}
-  .card .v{font-size:23px}
-  .donuts{gap:9px}
-  .donut{padding:14px;gap:12px}
-  .donut svg{flex:0 0 74px;width:74px;height:74px}
-  .donut .p{font-size:22px}
+  .card{padding:11px}
+  .card .v{font-size:19px}
+  .card .k{font-size:9.5px}
+  .card .n{font-size:10px}
+  /* Home's five top stat tiles (3 donut + 2 plain card, all inside one
+     .donuts grid) - auto-fit's 230px desktop minimum only ever fits one
+     per row on a phone, so each tile was full-width and mostly empty
+     space around a small ring. Two per row instead, each shrunk to
+     match - the ring keeps its own aspect ratio via the SVG's viewBox,
+     so sizing it down through width/height here scales its "43%" label
+     down with it for free, no separate font tweak needed there. */
+  .donuts{gap:9px;grid-template-columns:repeat(auto-fit,minmax(150px,1fr))}
+  .donut{padding:11px;gap:10px}
+  .donut svg{flex:0 0 56px;width:56px;height:56px}
+  .donut .t{font-size:9.5px}
+  .donut .p{font-size:17px;margin:1px 0}
+  .donut .s{font-size:10px}
   .grid{grid-template-columns:1fr;gap:9px}
   .set{padding:13px}
   .set .hd{min-height:0}
@@ -6838,18 +6882,32 @@ function priceGraph(h,opt){
   // history never needs more than ~52px, but the whole-collection value
   // graph can run into the thousands and got clipped at a fixed width.
   // .phlbl is monospace, so a char-count estimate is exact enough.
+  //
+  // On a narrow phone the chart renders much shorter, relative to its
+  // width, than this 960x260 viewBox - bindPriceGraph() counter-scales
+  // the labels so that stretch doesn't distort them, but a side effect of
+  // doing that safely (shrinking, never growing, so labels can't overflow
+  // the space reserved for them) is that the correction lands on the
+  // SMALLER of the two axis scales, which made 10px labels read as tiny
+  // as ~3.5px on screen. Bumping the source size here - and the per-char
+  // width estimate together with it - keeps that same correction safe
+  // (still shrink-only, now just starting from a bigger source) while
+  // landing close to the ~8px labels render at on desktop.
+  const mobLbl=typeof matchMedia==="function"&&matchMedia("(max-width:680px)").matches;
+  const lblSize=mobLbl?22:10, charW=lblSize*0.62;
+  const lblAttr=mobLbl?` style="font-size:${lblSize}px"`:"";
   const widest=Math.max(...[0,.25,.5,.75,1].map(f=>fmt(hi-(hi-lo)*f).length));
-  const PL=Math.max(52,widest*6.2+14);
+  const PL=Math.max(mobLbl?70:52,widest*charW+14);
   const X=d=>PL+(Date.parse(d)-t0)/span*(W-PL-PR);
   const Y=v=>PT+(1-(v-lo)/((hi-lo)||1))*(H-PT-PB);
   const zeroY=lo<0&&hi>0?`<line x1="${PL}" y1="${Y(0).toFixed(1)}" x2="${W-PR}" y2="${Y(0).toFixed(1)}" class="phgrid" stroke-dasharray="2 3"/>`:"";
   const grid=[0,.25,.5,.75,1].map(f=>{
     const y=PT+f*(H-PT-PB),v=hi-(hi-lo)*f;
     return `<line x1="${PL}" y1="${y.toFixed(1)}" x2="${W-PR}" y2="${y.toFixed(1)}" class="phgrid"/>`+
-      `<text x="${PL-7}" y="${(y+3).toFixed(1)}" text-anchor="end" class="phlbl">${fmt(v)}</text>`;
+      `<text x="${PL-7}" y="${(y+3).toFixed(1)}" text-anchor="end" class="phlbl"${lblAttr}>${fmt(v)}</text>`;
   }).join("");
   const xl=[0,.5,1].map(f=>{const d=S[Math.round(f*(S.length-1))].d;
-    return `<text x="${X(d).toFixed(1)}" y="${H-9}" text-anchor="${f?f<1?"middle":"end":"start"}" class="phlbl">${phDate(d)}</text>`;
+    return `<text x="${X(d).toFixed(1)}" y="${H-9}" text-anchor="${f?f<1?"middle":"end":"start"}" class="phlbl"${lblAttr}>${phDate(d)}</text>`;
   }).join("");
   const primary=lines[0].key;
   const up=S[S.length-1][primary]>=S[0][primary];
@@ -6892,6 +6950,29 @@ function bindPriceGraph(root){
   const svg=(root||document).querySelector(".phsvg");if(!svg)return;
   const m=JSON.parse(svg.dataset.ph),hit=svg.querySelector(".phhit"),cur=svg.querySelector(".phcur");
   if(!hit)return;
+  // preserveAspectRatio="none" on the <svg> (set in priceGraph()) lets the
+  // chart fill any container shape without letterboxing - fine for the
+  // price line itself, which has no "correct" shape to preserve, but it
+  // stretches EVERYTHING inside non-uniformly whenever the rendered box's
+  // aspect ratio differs from the 960x260 viewBox, which on a phone (much
+  // shorter relative to its width than that) visibly squished the axis
+  // label digits. Counter-scale every <text> around its own anchor point
+  // so it always reads at the SMALLER of the two axis scales in both
+  // directions - shrinking the less-compressed axis down to match, never
+  // growing the more-compressed one, so corrected text can't overflow the
+  // space priceGraph() reserved for it at its original, undistorted size.
+  // (priceGraph() bumps the base label size for narrow charts so the
+  // result still reads fine after this - see PH_MOBILE_LBL there.) k==1
+  // (aspect ratio rendered same as the viewBox, the common desktop case)
+  // is a no-op.
+  const rect=svg.getBoundingClientRect();
+  const k=(rect.width&&rect.height&&m.W&&m.H)?(rect.width/m.W)/(rect.height/m.H):1;
+  const fixText=el=>{
+    const x=el.getAttribute("x")||0,y=el.getAttribute("y")||0;
+    if(Math.abs(k-1)>.01)el.setAttribute("transform",`translate(${x} ${y}) scale(${k<1?1:1/k} ${k<1?k:1}) translate(${-x} ${-y})`);
+    else el.removeAttribute("transform");
+  };
+  svg.querySelectorAll("text.phlbl").forEach(fixText);
   const fmt=m.fmt==="pct"?(v=>(v>0?"+":"")+v.toFixed(1)+" %"):money;
   const X=d=>m.PL+(Date.parse(d)-m.t0)/m.span*(m.W-m.PL-m.PR);
   const Y=v=>m.PT+(1-(v-m.lo)/((m.hi-m.lo)||1))*(m.H-m.PT-m.PB);
@@ -6913,6 +6994,7 @@ function bindPriceGraph(root){
     tt.textContent=label;
     const w=label.length*6.6+12,left=x+10+w>m.W-m.PR?x-10-w:x+10;
     tt.setAttribute("x",(left+6).toFixed(1));tt.setAttribute("y",(m.PT+14).toFixed(1));
+    fixText(tt);
     bg.setAttribute("x",left.toFixed(1));bg.setAttribute("y",(m.PT+2).toFixed(1));
     bg.setAttribute("width",w.toFixed(1));bg.setAttribute("height","18");
   };
@@ -6981,7 +7063,7 @@ function bindPhRange(sel,cb){
 // auto with min-width keeps the same alignment in the normal case but
 // still grows for whatever the actual text needs instead of cutting it.
 const row=(x,i)=>`<div class="li nearestLi" data-code="${x.code}">
-  <span class="mt" style="flex:0 0 20px;text-align:right;color:var(--dim)">${i}.</span>
+  <span class="mt nearestIdx" style="flex:0 0 20px;text-align:right;color:var(--dim)">${i}.</span>
   ${icon(x,19)}
   <span class="nm nearestNm" title="${x.name}">${x.name}</span>
   <span class="bar"><span style="width:${x.pct*100}%"></span></span>
@@ -7624,7 +7706,7 @@ function render(){
   const page=all.slice((PAGE-1)*PER,PAGE*PER);
   $("#out").innerHTML = VIEW==="grid"
    ? `<div class="grid">${page.map(card).join("")}</div>`
-   : `<table><thead><tr><th>${t("collection.thSet")}</th><th class="num nowrap">${t("collection.thCode")}</th><th class="num nowrap">${t("collection.thReleased")}</th><th>${t("collection.thKind")}</th><th class="num">${t("collection.thOwned")}</th><th class="num">${t("collection.thProgress")}</th><th class="num" title="${t("collection.thCurrentValueTip")}">${t("collection.thCurrentValue")}</th><th class="num" title="${t("collection.thCardsToBuyTip")}">${t("collection.thCardsToBuy")}</th><th class="num">${t("collection.thShip")}</th><th class="num" title="${t("collection.thToFinishTip")}">${t("collection.thToFinish")}</th><th></th></tr></thead><tbody>${page.map(trow).join("")}</tbody></table>`;
+   : `<div class="tscroll"><table><thead><tr><th>${t("collection.thSet")}</th><th class="num nowrap">${t("collection.thCode")}</th><th class="num nowrap">${t("collection.thReleased")}</th><th>${t("collection.thKind")}</th><th class="num">${t("collection.thOwned")}</th><th class="num">${t("collection.thProgress")}</th><th class="num" title="${t("collection.thCurrentValueTip")}">${t("collection.thCurrentValue")}</th><th class="num" title="${t("collection.thCardsToBuyTip")}">${t("collection.thCardsToBuy")}</th><th class="num">${t("collection.thShip")}</th><th class="num" title="${t("collection.thToFinishTip")}">${t("collection.thToFinish")}</th><th></th></tr></thead><tbody>${page.map(trow).join("")}</tbody></table></div>`;
   $("#pg").innerHTML = pages>1 ? `<button ${PAGE<=1?"disabled":""} id="pv">${t("collection.previous")}</button>
     <span>${t("collection.pageOfN",{p:PAGE,n:pages,count:all.length})}</span>
     <button ${PAGE>=pages?"disabled":""} id="nx">${t("collection.next")}</button>` :
@@ -7884,7 +7966,7 @@ function drawCards(){
   const cols=[...SORTCOLS.map(([k,l])=>[k,l,NUMCOLS.has(k)?"num":""]),["note",t("setPage.thNote"),""],
     ["",t("cardPage.regular"),"num"],["",t("setPage.thFoil"),"num"],["",t("missing.thCart"),"num"],
     ["",t("setPage.thWatchlist"),"num"]];
-  OUT.innerHTML=head+`<table class="setcards"><thead><tr><th><input type="checkbox" id="setSelAll"
+  OUT.innerHTML=head+`<div class="tscroll"><table class="setcards"><thead><tr><th><input type="checkbox" id="setSelAll"
         ${rows.length&&rows.every(c=>SETSEL.has(DETAIL.code+"|"+c.number))?"checked":""}></th>${cols.map(([k,l,c])=>
     `<th class="${c}" data-c="${k}">${l}${CS===k?`<span class="ar">${CD>0?"▲":"▼"}</span>`:""}</th>`).join("")}
     </tr></thead><tbody>${rows.map(c=>`<tr class="${c.have?"have":"miss"} ${(!c.inGoal&&!c.have)?"notgoal":""}">
@@ -7908,7 +7990,7 @@ function drawCards(){
         >+</button></td>
       <td class="num"><button data-watch="${DETAIL.code}|${c.number}" class="watchtoggle ${c.inWatchlist?"on":""}"
           title="${c.inWatchlist?t('cardPage.inWatchlist'):t('cardPage.addToWatchlist')}">★</button></td></tr>`).join("")}
-    </tbody></table>`;
+    </tbody></table></div>`;
   OUT.querySelectorAll("th[data-c]").forEach(th=>th.onclick=()=>{
     const k=th.dataset.c; if(!k)return;
     CD = CS===k ? -CD : 1; CS=k; drawCards();});
@@ -8308,7 +8390,7 @@ async function cardsPane(){
       <span id="selBar">${selBarHTML(CARDSEL)}</span></div>
     ${CF.view==="grid"
       ? `<div class="cgrid">${r.cards.map(c=>cardTile(c,{quickAdd:true,select:true,selected:CARDSEL.has(selKey(c))})).join("")}</div>`
-      : `<table><thead><tr><th><input type="checkbox" id="cardsSelAll"
+      : `<div class="tscroll"><table><thead><tr><th><input type="checkbox" id="cardsSelAll"
              ${r.cards.length&&r.cards.every(c=>CARDSEL.has(selKey(c)))?"checked":""}></th>
          <th>${t("missing.thCard")}</th><th>${t("cardPage.set")}</th><th class="num">${t("missing.thNo")}</th>
          <th>${t("missing.thRarity")}</th><th class="num">${t("missing.thPrice")}</th><th class="num">${t("setPage.thFoil")}</th>
@@ -8333,7 +8415,7 @@ async function cardsPane(){
          <td class="num"><button data-cart="${c.set}|${c.number}">+</button></td>
          <td class="num"><button data-watch="${c.set}|${c.number}" class="watchtoggle ${c.inWatchlist?"on":""}"
              title="${c.inWatchlist?t('cardPage.inWatchlist'):t('cardPage.addToWatchlist')}">★</button></td></tr>`).join("")}
-         </tbody></table>`}
+         </tbody></table></div>`}
     ${r.cards.length?"":`<div class="empty"><h2>${t("browse.nothingMatches")}</h2>
       <p>${t("browse.loosenFilter")}</p></div>`}
     <div class="pager">${pages>1?`<button ${CF.page<=1?"disabled":""} id="cpv">${t("collection.previous")}</button>
@@ -8782,12 +8864,12 @@ function drawDeck(){
   }else if(DECK.view==="grid"){
     wrap.innerHTML=`<div class="cgrid">${view.map(o=>deckTile(o.c,o.i)).join("")}</div>`;
   }else{
-    wrap.innerHTML=`<table class="setcards"><thead><tr>
+    wrap.innerHTML=`<div class="tscroll"><table class="setcards"><thead><tr>
       ${th("name",t("missing.thCard"))}${hasSec?th("section",t("deck.sortSection"),"dcSec"):""}
       ${th("coll",t("deck.thCollection"),"dcColl")}${DECK._hasLoc?`<th class="dcLoc">${t("deck.thLocation")}</th>`:""}
       ${th("qty",t("setPage.thCopies"),"num dcQty")}${th("set",t("cardPage.set"),"dcSet")}
       ${th("price",t("missing.thPrice"),"num dcPrice")}<th class="dcRm"></th></tr></thead><tbody>${
-      view.map(o=>deckRow(o.c,o.i)).join("")}</tbody></table>`;
+      view.map(o=>deckRow(o.c,o.i)).join("")}</tbody></table></div>`;
     wrap.querySelectorAll("th[data-sk]").forEach(h=>h.onclick=()=>{
       const k=h.dataset.sk;
       if(DECK.sort===k)DECK.dir=-DECK.dir; else{DECK.sort=k;DECK.dir=1;}
@@ -9274,7 +9356,7 @@ async function drawMissing(){
     ${MF.view==="grid"
       ? `<div class="cgrid">${r.cards.map(c=>cardTile({...c,foil:0,qty:0,setName:c.setName},
           {select:true,selected:MISSEL.has(selKey(c))})).join("")}</div>`
-      : `<table><thead><tr><th><input type="checkbox" id="missSelAll"
+      : `<div class="tscroll"><table><thead><tr><th><input type="checkbox" id="missSelAll"
              ${r.cards.length&&r.cards.every(c=>MISSEL.has(selKey(c)))?"checked":""}></th>
          <th>${t("missing.thCard")}</th><th>${t("missing.thCheapestIn")}</th><th class="num">${t("missing.thNo")}</th>
          <th>${t("missing.thRarity")}</th><th class="num">${t("missing.thPrice")}</th><th class="num">${t("missing.thCart")}</th>
@@ -9291,7 +9373,7 @@ async function drawMissing(){
              style="padding:3px 9px;font-size:12px">+</button></td>
            <td class="num"><button data-watch="${c.set}|${c.number}" class="watchtoggle ${c.inWatchlist?"on":""}"
                title="${c.inWatchlist?t('cardPage.inWatchlist'):t('cardPage.addToWatchlist')}">★</button></td></tr>`).join("")}
-         </tbody></table>`}
+         </tbody></table></div>`}
     <div class="pager">${pages>1?`<button ${MF.page<=1?"disabled":""} id="mpv">${t("collection.previous")}</button>
       <span>${t("missing.pagerPageOfN",{p:MF.page,n:num(pages)})}</span>
       <button ${MF.page>=pages?"disabled":""} id="mnx">${t("collection.next")}</button>`:""}</div>`;
@@ -11372,6 +11454,17 @@ setTimeout(function(){t.style.transition="opacity .6s";t.style.opacity="0";setTi
 })();'''
 
 
+# NSAppSleepDisabled below: the menu-bar icon was repeatedly observed going
+# missing after the Mac sat idle for a while (report 2026-10, after two
+# earlier attempts at this - see the wake-observer/heartbeat nets in
+# run_tray()) while the HTTP server itself, on its own thread, kept working
+# the whole time. That split - main-thread/run-loop work silently stalling,
+# a background thread unaffected - is the signature of App Nap throttling a
+# background agent's run loop, not a crash. LSUIElement apps (no Dock icon,
+# no visible window - exactly this app) are prime App Nap targets. This key
+# is Apple's documented, OS-enforced opt-out: unlike the in-process
+# NSTimer/observer nets, it doesn't depend on any Python/PyObjC object
+# surviving the whole run, so it should hold even if those keep misbehaving.
 APP_PLIST = """<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0"><dict>
@@ -11386,6 +11479,7 @@ APP_PLIST = """<?xml version="1.0" encoding="UTF-8"?>
 <key>NSHighResolutionCapable</key><true/>
 <key>LSMinimumSystemVersion</key><string>11.0</string>
 <key>LSUIElement</key><true/>
+<key>NSAppSleepDisabled</key><true/>
 </dict></plist>
 """
 
@@ -11689,6 +11783,22 @@ def run_tray(url, autoopen=False):
             if not mac:
                 _open_browser()
                 return
+            # Belt-and-suspenders alongside APP_PLIST's NSAppSleepDisabled
+            # (the actual, OS-enforced fix - see the comment there): also
+            # ask at runtime for an activity that keeps App Nap off this
+            # process for as long as it lasts. Held in the module-level
+            # APP_NAP_ACTIVITY, not a local/closure variable, so nothing
+            # about how _setup() itself is referenced afterwards can end
+            # the activity early - ending it is the one way to explicitly
+            # give the App Nap exemption back up, and nothing here does.
+            try:
+                import Foundation as _FoundationNap
+                global APP_NAP_ACTIVITY
+                APP_NAP_ACTIVITY = _FoundationNap.NSProcessInfo.processInfo() \
+                    .beginActivityWithOptions_reason_(
+                        _FoundationNap.NSActivityUserInitiated, "Binduno menu-bar icon")
+            except Exception:                                 # noqa: BLE001
+                pass
             # pystray downsizes the icon to the 22 pt bar height with no @2x
             # copy, so on a Retina screen macOS upscales a 22 px bitmap and it
             # looks fuzzy next to the system glyphs. Replace it with a 44 px

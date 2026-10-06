@@ -37,10 +37,10 @@ One Python file, standard library only. No account, no cloud, nothing to sign up
   - [Build the Windows .exe yourself](#build-the-windows-exe-yourself)
 - [Updating](#updating)
 - [How it works](#how-it-works)
+- [Reaching Binduno from outside your network](#reaching-binduno-from-outside-your-network)
 - [Testers welcome](#testers-welcome)
 - [License](#license)
 - [Disclaimer](#disclaimer)
-- [Reaching Binduno from outside your network](#reaching-binduno-from-outside-your-network)
 
 ---
 
@@ -208,26 +208,6 @@ No re‑download, no reinstall either way.
 
 ---
 
-## Testers welcome
-
-Binduno works and is used daily, but it's an early public release. If you try it:
-
-- **Bugs, rough edges, confusing wording** — please open an [issue](../../issues).
-- **Feature ideas that fit the concept** — issues too, or start a discussion.
-- Especially useful: reports from **Windows**, from **large collections**, and from the **Cardmarket helper** on different browsers.
-
----
-
-## License
-
-Released under the **[PolyForm Noncommercial License 1.0.0](LICENSE)**. In short: you may use, study, modify and share Binduno freely for any **non‑commercial** purpose. Selling it, putting it behind a paywall, bundling it into a paid product or otherwise using it commercially — with or without changes — is **not** permitted.
-
-## Disclaimer
-
-This is an unofficial fan‑made project and is not affiliated with, endorsed, sponsored, or approved by Wizards of the Coast. Magic: The Gathering, all card names, images and related assets are trademarks and/or copyrights of Wizards of the Coast LLC and Hasbro, Inc. All prices are sourced from Scryfall and Cardmarket and shown for personal, non‑commercial reference only.
-
----
-
 ## Reaching Binduno from outside your network
 
 Binduno has **no login and no password** — anything that can reach its port can read *and change* your collection. That's fine on your own Wi‑Fi, but it means you should never forward its port on your router straight to the internet; that would leave it wide open to anyone who finds it.
@@ -246,3 +226,23 @@ The safe way to use Binduno from outside your home — on your phone over mobile
 4. Open Binduno from the other device exactly like on your home Wi‑Fi, just with that address instead of the local one: `http://<tailscale-ip-or-hostname>:8770`.
 
 No changes to Binduno or its port are needed — it already listens on every network interface, Tailscale just makes your own devices reachable to each other wherever they are.
+
+---
+
+## Testers welcome
+
+Binduno works and is used daily, but it's an early public release. If you try it:
+
+- **Bugs, rough edges, confusing wording** — please open an [issue](../../issues).
+- **Feature ideas that fit the concept** — issues too, or start a discussion.
+- Especially useful: reports from **Windows**, from **large collections**, and from the **Cardmarket helper** on different browsers.
+
+---
+
+## License
+
+Released under the **[PolyForm Noncommercial License 1.0.0](LICENSE)**. In short: you may use, study, modify and share Binduno freely for any **non‑commercial** purpose. Selling it, putting it behind a paywall, bundling it into a paid product or otherwise using it commercially — with or without changes — is **not** permitted.
+
+## Disclaimer
+
+This is an unofficial fan‑made project and is not affiliated with, endorsed, sponsored, or approved by Wizards of the Coast. Magic: The Gathering, all card names, images and related assets are trademarks and/or copyrights of Wizards of the Coast LLC and Hasbro, Inc. All prices are sourced from Scryfall and Cardmarket and shown for personal, non‑commercial reference only.
