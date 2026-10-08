@@ -19,6 +19,15 @@ matching lines have appeared since the last run (detecting a rotation
 when the file's current match count drops below what was last seen, and
 treating everything currently in the file as new in that case) and adds
 only the increment to a persistent running total that survives rotation.
+
+Only ever reads the live (non-rotated) log file, never the rotated .gz
+ones - fine as long as the timer actually runs at least once between two
+rotations (every 6h vs. daily rotation). If the service itself is broken
+for longer than that (happened 2026-09-16 to 2026-10-06: wrong group on
+the binduno-price user, see pricelogger/README.md), everything that
+rotated away in the meantime is silently lost - the rotated files
+themselves are still recoverable by hand for a while (14 kept, see
+/etc/logrotate.d/nginx) but this script won't look for them on its own.
 """
 import os
 import re
@@ -40,7 +49,23 @@ EXCLUDE_IPS = {
     "149.249.143.211",   # assistant's testing machine, seen 2026-09-14 - 13 hits in one day from live app testing, none real
 }
 
+# Whole prefixes to exclude, same reasoning as EXCLUDE_IPS but for ranges
+# that are entirely cloud/assistant infrastructure rather than one specific
+# address - the assistant's outbound IP rotates within this block between
+# sessions, so a single-IP entry goes stale immediately. Seen 2026-10-06:
+# 4 hits across 149.249.128.41, .134.225, .141.62 (this session's own IP),
+# .143.250 - all RIPE-ERX-149-249-0-0 (NL, reassigned/cloud block), none
+# of them the maintainer's real machine (that one hit was 77.20.7.144, a
+# German residential ISP - kept, counted).
+EXCLUDE_PREFIXES = (
+    "149.249.",
+)
+
 _IP_RE = re.compile(r"^(\S+)")
+
+
+def _is_excluded(ip):
+    return ip in EXCLUDE_IPS or ip.startswith(EXCLUDE_PREFIXES)
 
 
 def count_matches(path):
@@ -51,7 +76,7 @@ def count_matches(path):
                 if PATTERN not in line or " 200 " not in line:
                     continue
                 m = _IP_RE.match(line)
-                if m and m.group(1) in EXCLUDE_IPS:
+                if m and _is_excluded(m.group(1)):
                     continue
                 n += 1
     except FileNotFoundError:

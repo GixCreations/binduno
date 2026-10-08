@@ -108,6 +108,33 @@ afterward. Add to `EXCLUDE_IPS` (and re-deploy, `sudo systemctl` not
 needed - the timer just runs the updated file next time) after any future
 session that does live testing here from a different IP.
 
+**Incident, 2026-09-16 to 2026-10-06 (3 weeks, found 2026-10-06):** every
+run failed with `PermissionError` on `/var/log/nginx/binduno.access.log`
+(mode `0640`, group `adm` - `binduno-price` was never in that group, only
+its own). `total.txt` sat frozen at `0` the whole time;
+`binduno-installcount.timer` fired every 6h regardless (journalctl shows
+each failed run) but `count_installs.py` never got past opening the log
+file. Fix: `sudo usermod -aG adm binduno-price` (**not** something the
+assistant can do on its own - a group-membership change is a system/
+security setting, always asked of the user directly; see root `CLAUDE.md`'s
+action-category rules if this reads unfamiliar).
+
+Separately: the four "hits" sitting in the retained rotated logs from this
+window were IPs in `149.249.0.0/16` (`RIPE-ERX-149-249-0-0`, NL) - the
+assistant's own outbound range, confirmed by matching the already-excluded
+IP's block and the live session's own IP at the time. `EXCLUDE_IPS` doesn't
+scale to a rotating cloud IP for this kind of thing, so `count_installs.py`
+now also has `EXCLUDE_PREFIXES` for whole ranges. The one real hit in that
+window, `77.20.7.144` (a German residential ISP), was kept.
+
+Because the script only ever reads the *live* log file (see the module
+docstring), the ~3 weeks of outage meant every rotation in between was
+never counted and most of those rotated files are now gone for good
+(14 kept, see `/etc/logrotate.d/nginx`) - `total.txt` was manually
+backfilled to `1` (the one real hit, from the logs still retained at
+fix time) rather than reconstructed exactly; anything from installs in the
+unrecoverable part of the gap is simply lost to this proxy signal.
+
 ## Deployment (already set up on the VPS, kept here for reference)
 
 ```bash

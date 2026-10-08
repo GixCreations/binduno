@@ -278,5 +278,64 @@ class PriceHistorySeries(unittest.TestCase):
         self.assertEqual(h["series"][0]["eur"], 1.00)
 
 
+class CollectionReconcileBinderFallback(unittest.TestCase):
+    """Regression test for the 2026-09-27 incident: a Replace import used to
+    require an exact (set, number, lang, foil, binder) match to keep a
+    batch's old purchase_date. The first reimport after binder tracking
+    went from "doesn't exist" (NULL on every row) to real per-row values
+    matched nothing under the old binder-exact key and reset purchase_date
+    - so the value-over-time baseline - for the whole collection at once.
+    _commit_collection_rows now falls back to matching the same printing
+    regardless of binder when nothing is on record under the exact binder."""
+
+    def setUp(self):
+        self.c = fresh_db()
+        add_set(self.c, "mh2", "Modern Horizons 2")
+        add_card(self.c, "mh2", "228", "Liquimetal Torque", eur=2.0)
+
+    def test_binder_newly_tracked_keeps_old_purchase_date(self):
+        c = self.c
+        # Pre-binder-tracking row: owned a while, no binder on record yet
+        # (purchase_date NULL - "always owned", not "bought on no date").
+        c.execute("INSERT INTO collection(set_code,number,name,qty,lang,foil,binder)"
+                  " VALUES('mh2','228','Liquimetal Torque',2,'en','normal',NULL)")
+        c.commit()
+        b._commit_collection_rows(
+            c, [("mh2", "228", "Liquimetal Torque", 2, "en", "normal", None, "Lands")],
+            "replace", "ManaBox")
+        rows = c.execute("SELECT qty, purchase_date, binder FROM collection").fetchall()
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["binder"], "Lands")
+        self.assertIsNone(rows[0]["purchase_date"])
+
+    def test_binder_moved_keeps_old_purchase_date(self):
+        c = self.c
+        c.execute("INSERT INTO collection(set_code,number,name,qty,lang,foil,binder,purchase_date)"
+                  " VALUES('mh2','228','Liquimetal Torque',1,'en','normal','Old Binder','2026-01-01')")
+        c.commit()
+        b._commit_collection_rows(
+            c, [("mh2", "228", "Liquimetal Torque", 1, "en", "normal", None, "New Binder")],
+            "replace", "ManaBox")
+        rows = c.execute("SELECT qty, purchase_date, binder FROM collection").fetchall()
+        self.assertEqual(rows[0]["binder"], "New Binder")
+        self.assertEqual(rows[0]["purchase_date"], "2026-01-01")
+
+    def test_exact_binder_match_still_preferred_over_fallback(self):
+        c = self.c
+        c.execute("INSERT INTO collection(set_code,number,name,qty,lang,foil,binder,purchase_date)"
+                  " VALUES('mh2','228','Liquimetal Torque',1,'en','normal','Binder A','2026-01-01')")
+        c.execute("INSERT INTO collection(set_code,number,name,qty,lang,foil,binder,purchase_date)"
+                  " VALUES('mh2','228','Liquimetal Torque',1,'en','normal','Binder B','2026-02-01')")
+        c.commit()
+        b._commit_collection_rows(
+            c, [("mh2", "228", "Liquimetal Torque", 1, "en", "normal", None, "Binder A"),
+                ("mh2", "228", "Liquimetal Torque", 1, "en", "normal", None, "Binder B")],
+            "replace", "ManaBox")
+        by_binder = {r["binder"]: r["purchase_date"]
+                     for r in c.execute("SELECT binder, purchase_date FROM collection")}
+        self.assertEqual(by_binder["Binder A"], "2026-01-01")
+        self.assertEqual(by_binder["Binder B"], "2026-02-01")
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

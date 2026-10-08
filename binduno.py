@@ -16,7 +16,7 @@ import urllib.request
 from datetime import datetime, timedelta
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-VERSION = "6.107"
+VERSION = "6.108"
 SCHEMA = 23
 
 
@@ -2365,7 +2365,12 @@ def _commit_collection_rows(c, raw_rows, mode, label, keep_existing_prices=True)
     `keep_existing_prices` only matters for mode="replace": whether a card
     that was already in the collection keeps its recorded purchase price
     (see _reconcile_batches) or is priced fresh from this import, as if the
-    whole collection were being entered for the first time."""
+    whole collection were being entered for the first time. Matching prefers
+    the same (set, number, lang, foil, binder) as before; if nothing is on
+    record under that exact binder, it falls back to any old batch of the
+    same printing regardless of binder, so moving a card to a different
+    binder - or binder tracking simply not existing yet in an older row -
+    doesn't look like buying it all over again."""
     source = {"ManaBox": "manabox", "Cardmarket purchase": "cm"}.get(label, label.lower())
     agg, names, cards = {}, {}, 0
     for setc, num, name, qraw, lang, foil, price, binder in raw_rows:
@@ -2395,20 +2400,43 @@ def _commit_collection_rows(c, raw_rows, mode, label, keep_existing_prices=True)
     if mode == "replace":
         if c.execute("SELECT 1 FROM collection LIMIT 1").fetchone():
             backup_user_data(c, "replace-import")
-        old_by_key = {}
+        old_by_key, old_by_key4 = {}, {}
         if keep_existing_prices:
             for r in c.execute("""SELECT set_code, number, lang, foil, binder, qty,
                                           purchase_price, purchase_date, price_source
                                    FROM collection ORDER BY id"""):
-                k = (r["set_code"].lower().strip(), r["number"].strip(), r["lang"], r["foil"],
-                     r["binder"] or None)
-                old_by_key.setdefault(k, []).append(
-                    (r["qty"], r["purchase_price"], r["purchase_date"], r["price_source"]))
+                k4 = (r["set_code"].lower().strip(), r["number"].strip(), r["lang"], r["foil"])
+                k5 = k4 + (r["binder"] or None,)
+                batch = (r["qty"], r["purchase_price"], r["purchase_date"], r["price_source"])
+                old_by_key.setdefault(k5, []).append(batch)
+                old_by_key4.setdefault(k4, []).append(batch)
         c.execute("DELETE FROM collection")
+        # k4 keys already settled through an exact (set,number,lang,foil,binder)
+        # match - skipped for the old_by_key4 fallback below so the same old
+        # batch can't be claimed twice (once exactly, once loosely) when one
+        # card is split across several binders in the new file.
+        claimed_k4 = set()
         for k5, new_batches in new_by_key.items():
             setc, num, lang, foil, binder = k5
+            k4 = k5[:4]
             if keep_existing_prices and k5 in old_by_key:
                 batches = _reconcile_batches(old_by_key[k5], new_batches, today, source)
+                claimed_k4.add(k4)
+            elif keep_existing_prices and k4 in old_by_key4 and k4 not in claimed_k4:
+                # No batch on record under this exact binder - most likely the
+                # binder changed (or is newly tracked at all) since the last
+                # import. Fall back to whatever old batches exist for the same
+                # printing regardless of binder, so moving a card to a
+                # different binder doesn't look like buying it all over again.
+                # (Incident 2026-09-27: the binder column itself had just been
+                # added, NULL on every existing row; the next reimport's real
+                # ManaBox binder values matched nothing under the old
+                # binder-exact key and silently reset purchase_date - and so
+                # the value-over-time baseline - for the entire collection in
+                # one import. See pricelogger/README.md-style incident notes
+                # in git log 6.107+ for the investigation.)
+                batches = _reconcile_batches(old_by_key4[k4], new_batches, today, source)
+                claimed_k4.add(k4)
             else:
                 batches = [(q, price, today, source if price is not None else None)
                            for q, price in new_batches]
