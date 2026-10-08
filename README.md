@@ -36,6 +36,7 @@ One Python file, standard library only. No account, no cloud, nothing to sign up
   - [macOS: double-clickable app](#macos-double-clickable-app)
   - [Build the Windows .exe yourself](#build-the-windows-exe-yourself)
 - [Updating](#updating)
+- [Changelog](#changelog)
 - [How it works](#how-it-works)
 - [Reaching Binduno from outside your network](#reaching-binduno-from-outside-your-network)
 - [Testers welcome](#testers-welcome)
@@ -196,6 +197,12 @@ Open **Settings → Update & Help → Update App → "Update from GitHub"** and 
 - **The packaged `Binduno.exe`:** downloads the newest `Binduno.exe` from the latest GitHub Release, backs up the old one (`binduno_previous.exe`) and swaps itself in on restart. This only works once a Release with a built `Binduno.exe` exists — a bare `main`‑branch fix isn't installable this way, since there's no compiled binary for it yet; Binduno tells you so if you check for updates in between.
 
 No re‑download, no reinstall either way.
+
+---
+
+## Changelog
+
+Notable changes, newest first: [CHANGELOG.md](CHANGELOG.md).
 
 ---
 
