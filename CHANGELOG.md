@@ -3,7 +3,7 @@
 Notable changes to Binduno, newest first. Started 2026-10-08 — everything
 before v6.108 only lives in the [commit history](https://github.com/GixCreations/binduno/commits/main).
 
-## v6.108 — 2026-10-08
+## v6.108
 
 ### Fixed
 - A Replace-mode CSV reimport that changed a card's recorded storage
